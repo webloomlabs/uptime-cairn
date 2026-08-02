@@ -1,6 +1,6 @@
 # ADR-003: Tenancy Model — Inert Org Key from Phase 1; Isolation Model, Hierarchy, and Enforcement Deferred to Phase 3
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-01
 - **Deciders:** [Shakil Ilham](https://github.com/silham)
 
