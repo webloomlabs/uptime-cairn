@@ -118,23 +118,44 @@ decision requiring a human-authored ADR. The following were settled in this
 draft only so that it would be coherent enough to review. Each is a real
 decision, and none of them is mine to make:
 
-1. **Pagination model.** Page-number for collections, cursor for time series.
-   The alternative — cursor everywhere — is more correct under concurrent
-   writes but costs the dashboard its page controls and result counts. This
-   interacts directly with ADR-004 and belongs in it or alongside it.
+1. **Pagination model — the spec now contradicts ADR-004 and must be changed.**
+   This draft uses page-number pagination (`page` / `per_page` / `total`) for
+   collections and cursor pagination only for time series.
+   [ADR-004](../adr/004-ui-state-synchronisation.md) was accepted after this
+   draft was written and decides otherwise: *"every list view is a
+   cursor-paginated query (`updated_at, id`)"*, applied uniformly with no
+   small-install exception. The ADR is accepted and immutable; the spec is the
+   thing that is wrong. Converting the collection endpoints to
+   `(updated_at, id)` cursors also removes `total` and `total_pages`, which the
+   dashboard's page controls and result counts currently assume — so the UI
+   design has to absorb that at the same time.
 
 2. **Error format.** RFC 9457 problem documents with stable `type` URIs. The
    alternative is a simpler bespoke `{error: {code, message}}` envelope. RFC
    9457 is more work to implement and better for the generated clients.
 
-3. **ADR-004 does not exist yet, and this spec has a hole where it goes.**
-   The spec covers server-side pagination, filtering, and search — but nothing
-   about **live updates**. The dashboard needs scoped incremental subscriptions
-   (the whole point of ADR-004, and the specific thing Uptime Kuma got wrong),
-   and no transport for them is specified here: no WebSocket, no SSE, no
-   long-poll. I deliberately did not invent one. Whatever ADR-004 decides needs
-   its own section in this spec before freeze, and it is the single largest gap
-   in this draft.
+3. **ADR-004's surface is missing from this spec.** The ADR is now accepted and
+   requires two things this draft does not have:
+
+   - **A membership-reconciliation endpoint.** Filtered views poll *"a version
+     counter, or count+hash, scoped to the active filter"* on a short interval
+     (starting at 5 seconds) to detect membership changes. The ADR's compliance
+     checklist explicitly calls it ordinary API surface, *"usable by any API
+     client, not dashboard-only internals"* — so it belongs here, and it does
+     not exist yet.
+   - **The live-update channel contract.** Clients subscribe to the monitor IDs
+     currently on screen via `updates.{org_id}.{monitor_id}.status`, over NATS
+     in scaled mode and an in-process bus in solo mode. That is not REST and so
+     is largely out of OpenAPI's reach, but the diff payload shape and the
+     subscribe/unsubscribe semantics are part of the contract and need
+     specifying somewhere before freeze. The ADR's own open follow-up — that
+     both modes must present the *same* client-facing contract — is unresolved
+     until they are written down.
+
+   Note the subject shape carries `org_id`, while this spec exposes no tenancy
+   field at all per ADR-003. That is consistent — the identifier is a broker
+   concern, not an API one — but it is worth being deliberate about rather than
+   discovering later.
 
 4. **The `include` parameter.** `include=last_heartbeat,uptime` on monitor
    lists is a per-row cost multiplier at 5,000 monitors, and it is exactly the
@@ -183,7 +204,9 @@ published list. Worth resolving before either document is quoted at anyone:
 
 - **The probe protocol.** gRPC, separate deliverable, [ADR-001](../adr/001-probe-and-control-plane-split.md).
 
-- **Live updates.** See open question 3 — this is a gap, not a decision.
+- **Live updates.** Decided by [ADR-004](../adr/004-ui-state-synchronisation.md)
+  but not yet specified here. See open question 3 — this is a gap, not a
+  decision.
 
 - **OpenTelemetry export.** Named in Phase 0 §3.3 and Phase 1 §3.6. It is
   configuration and an outbound exporter rather than a REST surface, so it

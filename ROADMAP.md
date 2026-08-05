@@ -28,14 +28,15 @@ Repository, licence, code of conduct, governance, CI/CD. Data model. **The
 OpenAPI spec is written and frozen before any code is written.** Probe protocol
 design. Architecture Decision Records from day one.
 
-Two things get built in this phase, ahead of the product itself:
+One thing gets built in this phase, ahead of the product itself:
 
 - **The load-test harness**, because "5,000 monitors on one install and the UI
   stays fast" is the project's central promise and it must be measured
   continuously from the first commit, not discovered late.
-- **The Uptime Kuma importer**, as a standalone tool. It is useful on its own, it
-  validates the data model, and it starts building an audience before v0.1
-  exists.
+
+The Uptime Kuma importer was originally scoped here as a standalone tool. It has
+moved to Phase 1, where it ships integrated into the product — same P0 priority,
+one build instead of two.
 
 **Exit:** an ADR set and an OpenAPI spec a stranger could implement against.
 

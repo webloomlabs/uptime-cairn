@@ -197,7 +197,7 @@ sidecar for browser checks, Typst for PDF reports.
 
 | Phase | What | When |
 |---|---|---|
-| **0 — Foundations** | Spec, ADRs, governance, load-test harness, Kuma importer | Weeks 1–4 ← *we are here* |
+| **0 — Foundations** | Spec, ADRs, governance, data model, load-test harness | Weeks 1–4 ← *we are here* |
 | **1 — Solid Core** | 10 monitor types, 13 alert channels + Apprise, status pages, full REST API, 5,000-monitor gate | Months 1–4 |
 | **2 — Reporting** | Scheduled white-label PDF/HTML/CSV reports, SLA/SLO + error budgets, post-mortems | Months 4–7 |
 | **3 — Teams** | Orgs, RBAC, SSO/SAML, audit log, automatic incidents, on-call & escalation | Months 7–11 |

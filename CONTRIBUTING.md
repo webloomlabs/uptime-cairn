@@ -29,8 +29,13 @@ most valuable contributions today are not code:
    several Uptime Kuma instances across hosts, or produce client uptime reports
    by hand every month — that experience is the most useful thing you can give
    us. Open an issue.
-4. **Test the Kuma importer** against a real database and tell us what it got
-   wrong.
+4. **Tell us what is in your Uptime Kuma install.** We are mapping Kuma's schema
+   onto our data model on paper, and the thing that breaks a mapping is always
+   the case nobody thought of — an exotic monitor type, a notification provider
+   with no obvious equivalent, a status page arranged unusually. Describe the
+   shape; please do not send us a `kuma.db`, since it holds your URLs and
+   credentials. The importer itself ships in Phase 1 and there will be plenty to
+   test then.
 
 Code contributions open up properly in Phase 1. See the [roadmap](ROADMAP.md).
 
