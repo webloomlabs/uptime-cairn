@@ -205,7 +205,7 @@ sidecar for browser checks, Typst for PDF reports.
 | **5 — Depth** | Anomaly detection, plugin SDK, mobile apps, template gallery | Month 16+ |
 
 Full detail in [ROADMAP.md](ROADMAP.md). Phase plans:
-[Phase 0](PHASE-0-PLAN.md) · [Phase 1](PHASE-1-PLAN.md).
+[Phase 0](docs/plans/PHASE-0-PLAN.md) · [Phase 1](docs/plans/PHASE-1-PLAN.md).
 
 ## Contributing
 

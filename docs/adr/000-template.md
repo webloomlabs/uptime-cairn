@@ -1,6 +1,6 @@
 # ADR-000: <short, decisive title>
 
-- **Status:** Proposed | Accepted | Superseded by [ADR-XXX](XXX-slug.md)
+- **Status:** Proposed | Accepted | Superseded by ADR-XXX (link it as `[ADR-XXX](XXX-slug.md)`)
 - **Date:** YYYY-MM-DD
 - **Deciders:** <who agreed>
 

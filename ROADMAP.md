@@ -11,7 +11,8 @@ this ambitious is 40% built and abandoned, and the defence against it is that
 Phase 1 has to win real users standing entirely on its own.
 
 Detailed plans for the current work live in
-[PHASE-0-PLAN.md](PHASE-0-PLAN.md) and [PHASE-1-PLAN.md](PHASE-1-PLAN.md).
+[docs/plans/PHASE-0-PLAN.md](docs/plans/PHASE-0-PLAN.md) and
+[docs/plans/PHASE-1-PLAN.md](docs/plans/PHASE-1-PLAN.md).
 
 ---
 
