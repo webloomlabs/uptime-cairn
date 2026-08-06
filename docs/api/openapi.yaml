@@ -36,15 +36,28 @@ info:
 
     ## Pagination
 
-    Collections paginate by page number and return a `pagination` object with
-    a total, so list UIs can render page controls and result counts. Append-only
-    time series (heartbeats, history, deliveries) paginate by opaque cursor
-    instead, because offsets are unstable against a table that is being written
-    to continuously.
+    Every list endpoint paginates by opaque cursor, keyed on `(updated_at, id)`,
+    per ADR-004 — uniformly, with no exception for installs small enough that
+    sending everything would "work". Offsets are unstable against rows that
+    change while a user is paginating, and status changes constantly.
 
-    The client is never sent full state. Every collection endpoint enforces a
-    maximum page size, and the dashboard is required to paginate, filter, and
-    search server-side.
+    Cursor responses carry no total count. A count for the current filter comes
+    from `GET /api/v1/monitors/membership`, which a client polling for live-view
+    freshness is already calling.
+
+    The client is never sent full state. Every list endpoint caps its page size,
+    and the dashboard paginates, filters, and searches server-side.
+
+    ## Live updates
+
+    A client subscribes to exactly the monitor IDs on its screen and receives
+    `MonitorStatusDiff` messages for those and nothing else — so push volume is
+    bounded by viewport size, never by total monitor count. Filtered-view
+    membership is kept fresh by polling the membership endpoint above rather than
+    by the server evaluating live predicates per connected client.
+
+    The transport is NATS in scaled mode and an in-process bus in solo mode,
+    presenting the same message shapes either way. See docs/api/README.md.
 
     ## Errors
 
@@ -397,8 +410,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [api_keys:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -412,7 +425,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/ApiKey" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
@@ -507,16 +520,23 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [monitors:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
         - name: sort
           in: query
-          description: Sort field with optional leading `-` for descending.
+          description: |
+            Result ordering. Constrained to the cursor key, because ADR-004 fixes
+            cursor pagination on `(updated_at, id)` and a keyset cursor can only
+            paginate the ordering it is keyed on.
+
+            Sorting by name, status, or uptime is therefore **not offered** — see the
+            note in docs/api/README.md. Sorting a page client-side would order 25 rows
+            out of 5,000, which is worse than not offering it.
           schema:
             type: string
-            default: name
-            enum: [name, -name, status, -status, created_at, -created_at, updated_at, -updated_at, last_check_at, -last_check_at, uptime_24h, -uptime_24h]
+            default: -updated_at
+            enum: [updated_at, -updated_at]
         - name: status
           in: query
           description: Filter by current status.
@@ -572,7 +592,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Monitor" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -729,6 +749,78 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/monitors/membership:
+    get:
+      tags: [Monitors]
+      operationId: getMonitorMembership
+      summary: Membership signal for a filtered view
+      description: |
+        The reconciliation half of ADR-004. Live updates only reach the monitor IDs a
+        client currently has on screen; a monitor that changes status *off* screen and
+        would now match an active filter has no subscription telling the server anyone
+        cares. This endpoint closes that gap without the server evaluating live
+        predicates for every connected client.
+
+        Accepts the same filter parameters as `listMonitors` and returns a cheap
+        version and count for that filter. A client polls it on a short interval —
+        5 seconds by default — and re-fetches the affected page boundary only when
+        `version` or `count` changes. Staleness for filtered views is therefore bounded
+        by the poll interval rather than requiring a manual refresh.
+
+        This is ordinary API surface, not a dashboard-only internal: any client
+        maintaining a filtered view can use it.
+
+        Implementations must keep this an index-only read. It is polled once per active
+        view per interval, so its cost scales with connected clients rather than monitor
+        count — the one dimension the 5,000-monitor gate does not exercise by default.
+      x-cairn-phase: 1
+      x-cairn-scopes: [monitors:read]
+      parameters:
+        - $ref: "#/components/parameters/Search"
+        - name: status
+          in: query
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/MonitorStatus" }
+          style: form
+          explode: true
+        - name: type
+          in: query
+          schema:
+            type: array
+            items: { $ref: "#/components/schemas/MonitorType" }
+          style: form
+          explode: true
+        - name: tag_id
+          in: query
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+          style: form
+          explode: true
+        - name: group_id
+          in: query
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+          style: form
+          explode: true
+        - name: enabled
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: The current membership signal for this filter.
+          headers:
+            Cache-Control:
+              description: Always `no-store`. A cached membership signal is a stale view.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MembershipSignal" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/monitors/bulk:
     post:
@@ -985,8 +1077,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [groups:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -1000,7 +1092,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Group" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Groups]
@@ -1079,8 +1171,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [tags:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -1094,7 +1186,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Tag" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Tags]
@@ -1179,8 +1271,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [notifications:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
         - name: type
           in: query
@@ -1204,7 +1296,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/NotificationChannel" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Notification Channels]
@@ -1375,8 +1467,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [maintenance:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
         - name: state
           in: query
@@ -1401,7 +1493,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/MaintenanceWindow" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Maintenance Windows]
@@ -1486,8 +1578,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [incidents:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
         - name: state
           in: query
@@ -1523,7 +1615,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Incident" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Incidents]
@@ -1683,8 +1775,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [status_pages:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
         - name: published
           in: query
@@ -1701,7 +1793,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/StatusPage" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Status Pages]
@@ -1784,8 +1876,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [status_pages:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - name: confirmed
           in: query
           schema: { type: boolean }
@@ -1801,7 +1893,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Subscriber" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -1959,8 +2051,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [webhooks:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - name: enabled
           in: query
           schema: { type: boolean }
@@ -1976,7 +2068,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Webhook" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Outbound Webhooks]
@@ -2268,8 +2360,8 @@ paths:
       x-cairn-phase: 1
       x-cairn-scopes: [users:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -2283,7 +2375,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/User" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
     post:
@@ -2370,8 +2462,8 @@ paths:
       x-cairn-phase: 3
       x-cairn-scopes: [teams:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -2385,7 +2477,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/Team" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Teams]
@@ -2467,8 +2559,8 @@ paths:
       x-cairn-phase: 3
       x-cairn-scopes: [schedules:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -2482,7 +2574,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/OnCallSchedule" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [On-Call]
@@ -2588,8 +2680,8 @@ paths:
       x-cairn-phase: 3
       x-cairn-scopes: [schedules:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
       responses:
         "200":
           description: A page of escalation policies.
@@ -2602,7 +2694,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/EscalationPolicy" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [On-Call]
@@ -2687,8 +2779,8 @@ paths:
       x-cairn-phase: 2
       x-cairn-scopes: [reports:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - $ref: "#/components/parameters/Search"
       responses:
         "200":
@@ -2702,7 +2794,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/ReportTemplate" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Reports]
@@ -2806,8 +2898,8 @@ paths:
       x-cairn-phase: 2
       x-cairn-scopes: [reports:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
       responses:
         "200":
           description: A page of report schedules.
@@ -2820,7 +2912,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/ReportSchedule" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
     post:
       tags: [Reports]
@@ -2905,8 +2997,8 @@ paths:
       x-cairn-phase: 2
       x-cairn-scopes: [reports:read]
       parameters:
-        - $ref: "#/components/parameters/Page"
-        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
         - name: report_template_id
           in: query
           schema: { type: string, format: uuid }
@@ -2929,7 +3021,7 @@ paths:
                   data:
                     type: array
                     items: { $ref: "#/components/schemas/ReportRun" }
-                  pagination: { $ref: "#/components/schemas/PagePagination" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/report-runs/{reportRunId}:
@@ -3002,15 +3094,12 @@ components:
         `X-Cairn-CSRF-Token` header.
 
   parameters:
-    Page:
-      name: page
+    CollectionLimit:
+      name: limit
       in: query
-      description: 1-indexed page number.
-      schema: { type: integer, minimum: 1, default: 1 }
-    PerPage:
-      name: per_page
-      in: query
-      description: Items per page. The server caps this; requesting more is clamped, not rejected.
+      description: |
+        Maximum items to return. The server caps this; requesting more is clamped,
+        not rejected.
       schema: { type: integer, minimum: 1, maximum: 200, default: 25 }
     Search:
       name: q
@@ -3225,24 +3314,18 @@ components:
                     type: string
                     description: Human-readable explanation.
 
-    PagePagination:
-      type: object
-      description: Page-number pagination, used by collections a UI renders page controls for.
-      required: [page, per_page, total, total_pages]
-      properties:
-        page: { type: integer, minimum: 1 }
-        per_page: { type: integer, minimum: 1 }
-        total:
-          type: integer
-          minimum: 0
-          description: Total items matching the filters, across all pages.
-        total_pages: { type: integer, minimum: 0 }
-
     CursorPagination:
       type: object
       description: |
-        Cursor pagination, used by append-only time series where offsets drift as rows
-        are written. Iterate until `next_cursor` is null.
+        The only pagination model in this API, per ADR-004: every list view is a
+        cursor-paginated query keyed on `(updated_at, id)`, applied uniformly
+        regardless of how few rows an install has. Iterate until `next_cursor` is null.
+
+        There is deliberately **no total count**. Computing one costs a full scan of
+        the filtered set on every page fetch, which is the cost cursor pagination
+        exists to avoid. A count for the current filter comes from
+        `GET /api/v1/monitors/membership` instead, which returns it alongside the
+        change signal the client is already polling.
       required: [next_cursor, has_more]
       properties:
         next_cursor:
@@ -3602,7 +3685,10 @@ components:
           type: boolean
           default: true
           description: Whether recovery sends a notification as well as the failure.
-        status: { $ref: "#/components/schemas/MonitorStatus", readOnly: true }
+        status:
+          allOf:
+            - $ref: "#/components/schemas/MonitorStatus"
+          readOnly: true
         last_check_at: { type: [string, "null"], format: date-time, readOnly: true }
         next_check_at: { type: [string, "null"], format: date-time, readOnly: true }
         last_heartbeat:
@@ -4180,6 +4266,96 @@ components:
         response_time_ms: { type: number, minimum: 0 }
 
     # ------------------------------------------------------------------------
+    # Live updates (ADR-004)
+    # ------------------------------------------------------------------------
+
+    MembershipSignal:
+      type: object
+      description: |
+        A cheap answer to "has this filtered view changed?" — returned by
+        `GET /api/v1/monitors/membership`.
+
+        `version` covers content: it changes when any monitor matching the filter
+        changes status or configuration. `count` covers membership: it changes when a
+        monitor enters or leaves the filter. Both are needed — a monitor leaving a
+        `status=down` filter as another enters it keeps the count identical while the
+        view is now wrong.
+
+        Neither value is meaningful in isolation or comparable across different
+        filters. Clients store the pair per view and compare it to the previous poll.
+      required: [version, count, generated_at]
+      properties:
+        version:
+          type: integer
+          format: int64
+          description: |
+            Monotonic within a filter. Derived server-side; clients must treat it as
+            opaque and only ever test it for inequality against their previous value.
+        count:
+          type: integer
+          minimum: 0
+          description: |
+            Monitors currently matching the filter. This is where a list UI gets its
+            result count, since cursor pagination deliberately carries no total.
+        generated_at: { type: string, format: date-time }
+
+    MonitorStatusDiff:
+      type: object
+      description: |
+        The payload pushed to a client subscribed to a monitor currently on its screen.
+
+        **Not returned by any REST endpoint.** It is documented here because it is part
+        of the API contract and a client has to be written against it. ADR-004 puts it
+        on a NATS subject shaped `updates.{org_id}.{monitor_id}.status` in scaled mode
+        and an in-process bus in solo mode; both present this identical shape, so a
+        frontend never knows which mode it is talking to.
+
+        It is a diff, not a state blob: only what changed is sent, and only for
+        monitors the client has explicitly subscribed to. A client renders a page of
+        monitors, subscribes to exactly those IDs, and unsubscribes when they leave the
+        viewport — which is what makes push volume bounded by viewport size rather than
+        by total monitor count.
+      required: [monitor_id, status, at]
+      properties:
+        monitor_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/MonitorStatus" }
+        previous_status: { $ref: "#/components/schemas/MonitorStatus" }
+        at: { type: string, format: date-time }
+        response_time_ms: { type: [number, "null"] }
+        message: { type: [string, "null"] }
+        suppressed: { type: boolean }
+        heartbeat:
+          allOf:
+            - $ref: "#/components/schemas/Heartbeat"
+          description: The heartbeat that caused the change, present on state transitions.
+
+    OverviewDiff:
+      type: object
+      description: |
+        The global "X up, Y down" summary, pushed on its own channel independently of
+        per-monitor subscriptions.
+
+        Deliberately **not** computed by having the client sum whatever it happens to be
+        subscribed to — that would silently couple a global number to viewport state, so
+        the header would disagree with itself as the user paginated. Server-computed,
+        decoupled from monitor count and viewport size alike.
+      required: [monitors, generated_at]
+      properties:
+        monitors:
+          type: object
+          required: [total, up, down, pending, paused, maintenance]
+          properties:
+            total: { type: integer }
+            up: { type: integer }
+            down: { type: integer }
+            pending: { type: integer }
+            paused: { type: integer }
+            maintenance: { type: integer }
+        active_incidents: { type: integer }
+        active_maintenance_windows: { type: integer }
+        generated_at: { type: string, format: date-time }
+
+    # ------------------------------------------------------------------------
     # Groups and tags
     # ------------------------------------------------------------------------
 
@@ -4728,7 +4904,10 @@ components:
         title: { type: string, minLength: 1, maxLength: 200 }
         description: { type: [string, "null"], maxLength: 5000 }
         strategy: { $ref: "#/components/schemas/MaintenanceStrategy" }
-        state: { $ref: "#/components/schemas/MaintenanceState", readOnly: true }
+        state:
+          allOf:
+            - $ref: "#/components/schemas/MaintenanceState"
+          readOnly: true
         timezone:
           type: string
           description: IANA timezone the schedule is evaluated in. Recurrence follows local time across DST.

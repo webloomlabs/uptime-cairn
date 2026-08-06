@@ -16,9 +16,9 @@ frozen at the end of week 4.
 
 | | Count |
 |---|---|
-| Operations | 124 |
-| Schemas | 122 |
-| Phase 1 operations | 90 |
+| Operations | 125 |
+| Schemas | 124 |
+| Phase 1 operations | 91 |
 | Phase 2 operations | 14 |
 | Phase 3 operations | 20 |
 
@@ -46,13 +46,21 @@ Operations tagged `Public` require neither.
 Scopes are `<resource>:<read|write>`, and `write` implies `read` on the same
 resource. A key cannot be granted a scope its creator does not hold.
 
-**Pagination.** Two models, chosen by the shape of the data:
+**Pagination.** One model, everywhere: an opaque `cursor` keyed on
+`(updated_at, id)`, per [ADR-004](../adr/004-ui-state-synchronisation.md).
+Applied uniformly — there is no small-install exception where the full set is
+sent because it happens to fit today.
 
-- Collections a UI renders page controls for use `page` / `per_page` and return
-  `pagination` with a `total`.
-- Append-only time series — heartbeats, webhook deliveries — use an opaque
-  `cursor`, because an offset into a table being written to continuously is not
-  a stable position.
+Cursor responses carry **no total count**, because producing one costs a scan of
+the filtered set on every page fetch. A count comes from
+`GET /api/v1/monitors/membership`, which a client tracking a live view is
+already polling.
+
+**Live updates.** A client subscribes to exactly the monitor IDs on its screen
+and receives `MonitorStatusDiff` messages for those alone, so push volume is
+bounded by viewport size rather than by monitor count. Membership of *filtered*
+views is reconciled by polling, not by the server evaluating live predicates per
+client. See [Live updates](#live-updates) below.
 
 **Errors.** RFC 9457 problem documents (`application/problem+json`). Clients
 branch on the `type` URI, never on `title` or `detail`, both of which are prose.
@@ -111,6 +119,54 @@ disagrees with it is the thing that is wrong.
 
 ---
 
+## Live updates
+
+[ADR-004](../adr/004-ui-state-synchronisation.md)'s client-facing contract. It is
+not REST, so OpenAPI cannot express it directly; the message shapes live in the
+spec as documented-only schemas (`MonitorStatusDiff`, `OverviewDiff`) that no
+endpoint returns, the same pattern `EventEnvelope` uses for outbound webhooks.
+
+**Transport.** NATS in scaled mode, an in-process bus in solo mode. Both present
+identical message shapes and identical subscribe semantics, so a frontend never
+knows which it is talking to — the ADR's open follow-up, resolved here by stating
+it as a requirement of the contract rather than an implementation detail.
+
+**Subjects.**
+
+| Subject | Carries |
+|---|---|
+| `updates.{org_id}.{monitor_id}.status` | `MonitorStatusDiff` for one monitor |
+| `updates.{org_id}.summary` | `OverviewDiff`, the global header counts |
+
+`org_id` appears in the subject while the REST surface exposes no tenancy field
+at all, per ADR-003. That is consistent rather than contradictory — the segment
+is a broker-level isolation backstop, not an API concept — and ADR-003's
+compliance note about there being no tenancy API surface still holds.
+
+**The client's loop, which is the whole design in four steps:**
+
+1. Fetch a page of monitors with a cursor and filters.
+2. Subscribe to exactly those monitor IDs. Unsubscribe on paginate or unmount.
+3. Apply `MonitorStatusDiff` messages in place. Push volume is bounded by
+   viewport size, never by total monitor count — this is what makes the Kuma
+   fan-out failure structurally impossible rather than merely tuned around.
+4. Poll `GET /api/v1/monitors/membership` every ~5s with the same filters. If
+   `version` or `count` changed, re-fetch the affected page boundary.
+
+Step 4 exists because steps 2–3 cannot see monitors that are off-screen. A
+monitor that goes down elsewhere and now matches a `status=down` filter has no
+subscription telling the server anyone cares — so filtered views are eventually
+consistent, bounded by the poll interval. That staleness is the trade ADR-004
+accepted deliberately, in exchange for not running a predicate-evaluation service
+that scales with connected clients.
+
+**A client must not** derive the global summary by summing what it is subscribed
+to. That would couple a global number to viewport state and make the header
+disagree with itself as the user paginates. Use `OverviewDiff` or
+`GET /api/v1/overview`.
+
+---
+
 ## Open questions — these need a human decision before freeze
 
 Per [AGENTS.md](../../AGENTS.md) §3, the API contract is an architectural
@@ -118,44 +174,27 @@ decision requiring a human-authored ADR. The following were settled in this
 draft only so that it would be coherent enough to review. Each is a real
 decision, and none of them is mine to make:
 
-1. **Pagination model — the spec now contradicts ADR-004 and must be changed.**
-   This draft uses page-number pagination (`page` / `per_page` / `total`) for
-   collections and cursor pagination only for time series.
-   [ADR-004](../adr/004-ui-state-synchronisation.md) was accepted after this
-   draft was written and decides otherwise: *"every list view is a
-   cursor-paginated query (`updated_at, id`)"*, applied uniformly with no
-   small-install exception. The ADR is accepted and immutable; the spec is the
-   thing that is wrong. Converting the collection endpoints to
-   `(updated_at, id)` cursors also removes `total` and `total_pages`, which the
-   dashboard's page controls and result counts currently assume — so the UI
-   design has to absorb that at the same time.
+1. ~~**Pagination model.**~~ **Resolved 2026-08-06** — reconciled with ADR-004.
+   All 17 collection endpoints now use `(updated_at, id)` cursors;
+   `page`/`per_page` and the `PagePagination` schema are gone. See the new
+   consequence in question 8, which this created.
 
 2. **Error format.** RFC 9457 problem documents with stable `type` URIs. The
    alternative is a simpler bespoke `{error: {code, message}}` envelope. RFC
    9457 is more work to implement and better for the generated clients.
 
-3. **ADR-004's surface is missing from this spec.** The ADR is now accepted and
-   requires two things this draft does not have:
+3. ~~**ADR-004's surface is missing.**~~ **Resolved 2026-08-06.**
+   `GET /api/v1/monitors/membership` returns the `MembershipSignal`; the channel
+   contract, subjects, and `MonitorStatusDiff` / `OverviewDiff` shapes are
+   specified under [Live updates](#live-updates).
 
-   - **A membership-reconciliation endpoint.** Filtered views poll *"a version
-     counter, or count+hash, scoped to the active filter"* on a short interval
-     (starting at 5 seconds) to detect membership changes. The ADR's compliance
-     checklist explicitly calls it ordinary API surface, *"usable by any API
-     client, not dashboard-only internals"* — so it belongs here, and it does
-     not exist yet.
-   - **The live-update channel contract.** Clients subscribe to the monitor IDs
-     currently on screen via `updates.{org_id}.{monitor_id}.status`, over NATS
-     in scaled mode and an in-process bus in solo mode. That is not REST and so
-     is largely out of OpenAPI's reach, but the diff payload shape and the
-     subscribe/unsubscribe semantics are part of the contract and need
-     specifying somewhere before freeze. The ADR's own open follow-up — that
-     both modes must present the *same* client-facing contract — is unresolved
-     until they are written down.
-
-   Note the subject shape carries `org_id`, while this spec exposes no tenancy
-   field at all per ADR-003. That is consistent — the identifier is a broker
-   concern, not an API one — but it is worth being deliberate about rather than
-   discovering later.
+   The signal returns **both** a version and a count, rather than the ADR's
+   "version counter, *or* count+hash". Either alone is insufficient: a monitor
+   leaving a `status=down` filter as another enters keeps the count identical
+   while the view is stale, and a version that changes on every heartbeat would
+   fire on essentially every poll at 250 writes/second. The pair is the smallest
+   thing that actually works, and it matches the mechanism chosen in the data
+   model's §6.5.
 
 4. **The `include` parameter.** `include=last_heartbeat,uptime` on monitor
    lists is a per-row cost multiplier at 5,000 monitors, and it is exactly the
@@ -178,6 +217,35 @@ decision, and none of them is mine to make:
    API keys to be specified — but the whole of `Setup`, `Authentication`, and
    `API Keys` should get a deliberate security review before freeze, not a
    skim.
+
+8. **Sorting monitors by anything other than `updated_at` is now impossible —
+   and that is a UX regression worth your explicit decision.**
+
+   A keyset cursor can only paginate the ordering it is keyed on, and ADR-004
+   fixes that key as `(updated_at, id)`. So the `sort` parameter on
+   `listMonitors`, which previously offered name, status, `last_check_at`, and
+   `uptime_24h`, is now restricted to `updated_at` ascending or descending. A
+   dashboard listing 5,000 monitors cannot be sorted alphabetically.
+
+   I kept the spec strictly ADR-compliant rather than quietly widening an
+   accepted, immutable decision. Three ways forward, and this is yours to pick:
+
+   - **Accept it.** Filter and search replace sorting. Defensible — the ADR's
+     ordering is "most recently changed first", which is arguably what a
+     monitoring dashboard wants anyway.
+   - **Generalise the cursor to `(sort_field, id)`.** Standard keyset
+     pagination, and it satisfies ADR-004's stated *reason* — sorting by name is
+     stable precisely because names do not change in real time, so it does not
+     reintroduce the reordering problem the ADR was avoiding. Costs one index
+     per sortable field (the data model's §6.2 index budget already feels the
+     strain) and needs a superseding ADR, since the current one names
+     `(updated_at, id)` specifically.
+   - **Sort client-side within a page.** Do not — it orders 25 rows out of
+     5,000 and looks like a bug to the user.
+
+   My read is that the second option is what you actually want and that ADR-004
+   would have said so had the question come up, but extending an accepted ADR is
+   not mine to do.
 
 ## Discrepancies found in the existing plans
 
@@ -204,9 +272,11 @@ published list. Worth resolving before either document is quoted at anyone:
 
 - **The probe protocol.** gRPC, separate deliverable, [ADR-001](../adr/001-probe-and-control-plane-split.md).
 
-- **Live updates.** Decided by [ADR-004](../adr/004-ui-state-synchronisation.md)
-  but not yet specified here. See open question 3 — this is a gap, not a
-  decision.
+- **A REST transport for live updates.** The channel is specified under
+  [Live updates](#live-updates), but it is a message bus, not HTTP — there is no
+  WebSocket or SSE endpoint in this spec, by design. `MonitorStatusDiff` and
+  `OverviewDiff` are carried by NATS or the in-process bus, and appear here only
+  as documented schemas.
 
 - **OpenTelemetry export.** Named in Phase 0 §3.3 and Phase 1 §3.6. It is
   configuration and an outbound exporter rather than a REST surface, so it
