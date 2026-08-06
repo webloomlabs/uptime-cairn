@@ -1,0 +1,87 @@
+name: Load test
+
+# The 5,000-monitor gate. It runs from before the product exists, deliberately:
+# "5,000 monitors on one install and the UI stays fast" is the project's central
+# claim, and a claim measured only after the code is written is a claim
+# discovered to be false too late to act on.
+#
+# In Phase 0 it measures the schema directly, because there is no server yet.
+# Phase 1 points it at the real API by switching -target, and the assertions do
+# not change.
+
+on:
+  pull_request:
+    paths:
+      - "harness/**"
+      - "migrations/**"
+      - ".github/workflows/load-test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "migrations/**"
+      - ".github/workflows/load-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: load-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: 5,000-monitor gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: harness/go.mod
+          cache-dependency-path: harness/go.sum
+
+      # Fail with an explanation rather than a resolver error. Dependencies are
+      # pinned and committed per principle 10; CI never floats them by running
+      # `go mod tidy` for you.
+      - name: Check dependencies are pinned
+        run: |
+          if [ ! -f harness/go.sum ]; then
+            echo "::error::harness/go.sum is missing. Run 'cd harness && go mod tidy' once and commit the result."
+            echo "Dependencies are pinned and committed on purpose — CI does not resolve them for you."
+            exit 1
+          fi
+
+      - name: Vet
+        working-directory: harness
+        run: go vet ./...
+
+      - name: Build
+        working-directory: harness
+        run: go build -o /tmp/cairn-harness .
+
+      # Two scales, smallest first. The gate's primary assertion is the ratio
+      # between them: ADR-004 claims cost is bounded by viewport rather than by
+      # total monitor count, and only a comparison can test that. Absolute
+      # ceilings are a backstop for order-of-magnitude regressions — a shared
+      # runner is far too noisy to gate on milliseconds alone.
+      - name: Run gate
+        working-directory: harness
+        run: |
+          /tmp/cairn-harness \
+            -target sqlite \
+            -migrations ../migrations/sqlite \
+            -scales 500,5000 \
+            -iterations 200 \
+            -write-seconds 5 \
+            -json /tmp/load-test.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results
+          path: /tmp/load-test.json
+          if-no-files-found: warn
