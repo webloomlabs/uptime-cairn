@@ -8,15 +8,16 @@ written for SQLite first with a documented mapping to Postgres/TimescaleDB; a
 versioned-migration convention; and a paper mapping from Uptime Kuma's schema.
 
 The seven decisions this design could not make on its own were taken on
-2026-08-06 and are recorded, with their reasoning, in
-[§11 Decisions](#11-decisions). The schema below reflects them. Secrets at rest
-is designed in [§12](#12-secrets-at-rest).
+2026-08-06, and an eighth on 2026-08-08 with ADR-005. All are recorded, with
+their reasoning, in [§11 Decisions](#11-decisions). The schema below reflects
+them. Secrets at rest is designed in [§12](#12-secrets-at-rest).
 
 ## Inputs this design is bound by
 
 | Source | What it fixes |
 |---|---|
 | [ADR-001](../adr/001-probe-and-control-plane-split.md) | Checks execute behind a probe interface. Results arrive from a probe, even in-process — heartbeats carry a probe identity from day one. |
+| [ADR-005](../adr/005-probe-architecture.md) | Heartbeat ingest is **idempotent** — probes deliver at-least-once and several probes may check one monitor. The status encoding carries `unknown` and `skipped`, distinct from `down` and excluded from uptime. See [§11.8](#118-heartbeat-idempotency-and-the-unknown-outcome). |
 | [ADR-002](../adr/002-storage-engine.md) | SQLite (WAL) solo; PostgreSQL + TimescaleDB scaled. Tiered rollups raw → 1m → 5m → 1h → 1d. Storage sits behind a repository interface, not Timescale-specific SQL in business logic. |
 | [ADR-003](../adr/003-tenancy-model.md) | Every tenant-scoped table carries `org_id`, pointing at one sentinel row. Inert in Phase 1. Heartbeats index `(org_id, monitor_id, time desc)` — **not** space-partitioned by `org_id`. |
 | [ADR-004](../adr/004-ui-state-synchronisation.md) | Every list view is a cursor-paginated query on `(updated_at, id)`. Filtered views poll a membership signal. **This dictates the index design more than anything else here.** |
@@ -261,6 +262,20 @@ This split is the single most important physical-design choice in the document,
 and it is worth testing early against the load-test harness rather than trusting
 the reasoning above.
 
+**`status` here deliberately does *not* gain ADR-005's `unknown` and `skipped`.**
+Those are outcomes of a single check (§5.2), not states a monitor can be in, and
+a shed check should leave the monitor's state exactly as it was. A run of
+`unknown` results therefore leaves `status` at its last real value while
+`last_check_at` stops advancing, and staleness is derivable from that.
+
+Whether it *should* stay that way is an open question this document is not
+answering: after ten minutes of `unknown`, a dashboard still showing green is
+arguably lying by omission, and the honest rendering may be a fourth state rather
+than a stale one. It is a product decision about what the list view shows, it is
+cheap either way because `monitor_state` holds one row per monitor rather than
+billions, and ADR-005 scoped itself to the heartbeat encoding. Flagged here so it
+is decided rather than defaulted.
+
 ### 4.3 `groups` and `tags`
 
 `groups`: `id`, `org_id`, `name`, `description`, `parent_group_id` (self-FK,
@@ -471,7 +486,7 @@ Two consequences follow immediately:
 | `monitor_id` | uuid NOT NULL | |
 | `org_id` | uuid NOT NULL | Denormalised per ADR-003, leading index column. |
 | `probe_id` | uuid NOT NULL | Per ADR-001; the embedded probe in solo mode. |
-| `status` | SMALLINT NOT NULL | **Encoded as an integer**, not text: `0=down, 1=up, 2=pending, 3=maintenance`. On a table of this size, `TEXT` status costs several gigabytes a year for no benefit. The repository maps to and from the API's string enum. |
+| `status` | SMALLINT NOT NULL | **Encoded as an integer**, not text: `0=down, 1=up, 2=pending, 3=maintenance, 4=unknown, 5=skipped`. On a table of this size, `TEXT` status costs several gigabytes a year for no benefit. The repository maps to and from the API's string enum. Values 4 and 5 come from ADR-005 — see below. |
 | `response_time_ms` | REAL NULL | Null when the check never got far enough to time anything. |
 | `code` | TEXT NULL | HTTP status, gRPC health status, DNS rcode. |
 | `message` | TEXT NULL | Only populated on failures and state changes — storing "OK" 21M times a day is pure waste. |
@@ -480,10 +495,43 @@ Two consequences follow immediately:
 | `suppressed` | BOOL NOT NULL DEFAULT 0 | |
 | `suppression_reason` | SMALLINT NULL | `1=maintenance, 2=dependency`. |
 
-**No surrogate primary key.** The natural key is `(monitor_id, time)`, and adding
-a UUID PK to 7.9B rows costs 16 bytes plus an index for something nothing queries
-by. Duplicate-timestamp collisions within a monitor are prevented by the
-scheduler, not by a unique constraint that would cost a write-path lookup.
+**`unknown` and `skipped` are not failures**, and the distinction is the whole
+point of ADR-005's decision 13. `unknown` means the probe could not perform the
+check — no capability, an unparseable config, its own egress broken. `skipped`
+means the check never started, shed under overload. Neither is an observation of
+the target, so **both are excluded from uptime ratios** exactly as an absent
+bucket is (§5.3). Collapsing them into `down` would mean a probe losing its
+network reports every monitor assigned to it as failing, which is the false
+positive ADR-001 introduced N-of-M consensus to eliminate.
+
+**No surrogate primary key, and no stored `result_id`.** The natural key is
+`(monitor_id, probe_id, time)`, and adding a UUID column to a table of this size
+costs 16 bytes a row plus an index for something nothing queries by.
+
+**But heartbeat ingest must now be idempotent**, which the previous version of
+this section explicitly declined:
+
+> ~~Duplicate-timestamp collisions within a monitor are prevented by the
+> scheduler, not by a unique constraint that would cost a write-path lookup.~~
+
+That held for one in-process scheduler and survives neither of ADR-001's own
+payoffs. A result batch that is sent, written, and then not acknowledged before
+the connection drops is **resent**, because delivery is at-least-once. And under
+multi-region probing several probes check one monitor by design, so
+`(monitor_id, time)` is not unique even without replay.
+
+So `(org_id, monitor_id, time, probe_id)` is **UNIQUE**, and ingest is
+`INSERT … ON CONFLICT DO NOTHING`. `probe_id` in the key is what lets two probes
+report the same monitor at the same instant; the rest of the tuple is what makes
+a replayed batch a no-op. See [§6.3](#63-heartbeat-indexes) for why this costs
+less than it appears to, and [§11.8](#118-heartbeat-idempotency-and-the-unknown-outcome)
+for why the `result_id` on the wire is not stored here.
+
+One accepted edge: if a probe's clock steps backwards, two genuinely different
+checks can collide on `time` and the second is silently dropped. Losing one
+heartbeat to a clock step is the better failure than storing a duplicate, but the
+control plane should reject or clamp results whose timestamp is implausible
+against its own clock and flag the probe, rather than accepting the skew quietly.
 
 **Postgres:** a TimescaleDB hypertable partitioned on `time` with a chunk
 interval sized so a chunk fits comfortably in memory (start at 1 day at this
@@ -508,6 +556,7 @@ dense and each can be dropped independently):
 | `bucket_start` | Inclusive, UTC, aligned to the tier — the contract in §5.4. |
 | `monitor_id`, `org_id` | |
 | `up_count`, `down_count`, `pending_count`, `maintenance_count` | Integers. |
+| `unknown_count`, `skipped_count` | Integers, per ADR-005. Counted but **never** in the uptime denominator. They exist so that "the probe could not check for three hours" is visible in history and in Phase 2's SLA reports instead of appearing as an unexplained gap — an auditor asking why a period is missing deserves an answer in the data, not in a support conversation. |
 | `response_time_sum`, `response_time_count` | **Sum and count, not a stored average.** An average cannot be re-aggregated into a coarser tier without weighting; a sum and a count can. This is what lets 1h roll up from 5m correctly. |
 | `response_time_min`, `response_time_max` | Re-aggregate trivially. |
 | `response_time_p95` | **Populated only on `heartbeat_1m`**, computed from raw. Coarser tiers carry an approximation derived from the tier below and must be labelled as such wherever it is displayed or reported ([§11.5](#115-percentile-strategy)). |
@@ -515,11 +564,20 @@ dense and each can be dropped independently):
 `uptime_ratio` is **not stored**; it is `up_count / (up_count + down_count)`
 computed at read time, with maintenance excluded or included per the caller's
 `maintenance` parameter. Storing it would bake one maintenance policy into the
-data and make the API's three-way choice unimplementable.
+data and make the API's three-way choice unimplementable. `unknown_count` and
+`skipped_count` never enter that expression, in either the numerator or the
+denominator.
 
 A bucket with no checks has **no row** — absence means "no data", which the API
 surfaces as a null `uptime_ratio`. That distinction matters: a gap is not
 downtime, and a status page that renders it as downtime is lying.
+
+ADR-005 adds a second way to reach a null: **a bucket whose checks were all
+`unknown` or `skipped` does have a row, and `up_count + down_count` is zero.**
+The rule is therefore stated on the denominator rather than on the row's
+existence — `uptime_ratio` is null whenever `up_count + down_count = 0`,
+row or no row. The row is worth keeping because it carries the reason the
+observation is missing, which the absent bucket cannot.
 
 ### 5.4 The bucket contract — identical on both backends
 
@@ -617,13 +675,32 @@ the trade to measure rather than argue about.
 ### 6.3 Heartbeat indexes
 
 ```sql
--- The workhorse: monitor detail, history, and rollup computation
-CREATE INDEX idx_heartbeats_monitor_time ON heartbeats (org_id, monitor_id, time DESC);
+-- The workhorse: monitor detail, history, and rollup computation — and, since
+-- ADR-005, the idempotency guarantee as well. One index, both jobs.
+CREATE UNIQUE INDEX idx_heartbeats_monitor_time
+  ON heartbeats (org_id, monitor_id, time DESC, probe_id);
 
 -- Events only: state changes across an org, for the activity feed
 CREATE INDEX idx_heartbeats_important ON heartbeats (org_id, time DESC)
   WHERE important = 1;
 ```
+
+**`probe_id` goes last, and the position is the point.** The workhorse query
+filters `org_id` and `monitor_id` and ranges over `time`, so it uses the leading
+three columns exactly as before — a trailing column costs it nothing. Uniqueness,
+meanwhile, is evaluated over the full tuple, which is what makes a replayed batch
+a no-op and still lets two probes report the same monitor at the same instant.
+Ordering it `(org_id, monitor_id, probe_id, time)` instead would have forced the
+history query into one range scan per probe.
+
+The cost of making an existing index unique is smaller than the phrase "write-path
+lookup" suggests: this index is maintained on every insert regardless, so the
+B-tree descent already happens and uniqueness rides on it. The genuine cost is 16
+bytes per index entry for `probe_id` — roughly 2.4 GB against the 151M rows a
+7-day raw window holds at 5,000 monitors on the 20-second floor. **This is
+arithmetic, not a measurement**, and §5.1's 250-writes-per-second claim now has a
+constraint on it that it did not have when the harness first measured it. See
+[§13](#13-how-this-gets-validated-before-freeze) item 8.
 
 The partial index keeps the events feed cheap without indexing 21M uneventful
 rows a day. Both backends support partial indexes.
@@ -678,6 +755,7 @@ with the write rate.
 | Small int | `INTEGER` | `smallint` |
 | Encrypted blob | `BLOB` | `bytea` |
 | Heartbeat storage | Plain table, range-deleted | Hypertable, `time` partitioned, 1-day chunks |
+| Heartbeat idempotency | `UNIQUE INDEX` + `INSERT … ON CONFLICT DO NOTHING` | The same index and the same clause — but note that **TimescaleDB requires every unique index on a hypertable to include the partitioning column.** `time` is in the §6.3 index, so this holds by construction; it would not have held if the index had been keyed on `(org_id, monitor_id, probe_id)` alone. |
 | Rollups | Application-computed on a schedule | Continuous aggregates |
 | Rollup refresh | Scheduler job in-process | `add_continuous_aggregate_policy` |
 | Retention | `DELETE` by range + `PRAGMA incremental_vacuum` | `add_retention_policy` |
@@ -714,6 +792,13 @@ Timescale SQL in business logic. Concretely, these differ and must not leak:
 - Rollup computation (continuous aggregate vs scheduled job).
 - Retention (policy vs delete loop).
 - Batch insert shape (`COPY` vs multi-row `INSERT` in one transaction).
+- **Idempotent batch insert**, which is where those two diverge hardest since
+  ADR-005: SQLite takes `INSERT … ON CONFLICT DO NOTHING` directly, while
+  Postgres's `COPY` has no conflict clause at all and needs either a multi-row
+  `INSERT` or a `COPY` into a temp table followed by
+  `INSERT … SELECT … ON CONFLICT DO NOTHING`. The write path is the hottest code
+  in the system and its two implementations now have genuinely different shapes —
+  which is precisely the kind of divergence ADR-002's interface exists to contain.
 - Type marshalling for uuid, timestamp, boolean, and JSON.
 - `EXPLAIN` differences for the status-filter join in §6.2.
 
@@ -871,9 +956,11 @@ exercise was for.
 
 ## 11. Decisions
 
-All seven taken 2026-08-06 by [Shakil Ilham](https://github.com/silham). The
-reasoning is kept rather than deleted — the point of writing it down is that
-whoever revisits this in two years can see what was traded away.
+§11.1–§11.7 were taken 2026-08-06 and §11.8 on 2026-08-08 alongside
+[ADR-005](../adr/005-probe-architecture.md), all by
+[Shakil Ilham](https://github.com/silham). The reasoning is kept rather than
+deleted — the point of writing it down is that whoever revisits this in two years
+can see what was traded away.
 
 ### 11.1 Monitor configuration storage
 
@@ -979,6 +1066,40 @@ run with `synchronous = FULL` — SQLite allows the pragma to be changed per
 connection, so the write pool used for configuration can differ from the one used
 for heartbeat ingest. That asymmetry is the actual decision here, and it gets the
 throughput without the surprise.
+
+### 11.8 Heartbeat idempotency and the `unknown` outcome
+
+**Decided: [ADR-005](../adr/005-probe-architecture.md) decision 16**, applied
+here in §5.2, §5.3, §6.3, and §7.
+
+Both halves are cheap this week and expensive after Phase 1 ships. Adding a status
+value later means a migration plus a backfill of history that cannot be
+disambiguated — every historical `down` is either a real failure or a probe that
+could not run, and nothing in the row says which. Adding uniqueness later means
+building it on a table that already contains the duplicates it was meant to
+prevent.
+
+**One deliberate departure from the ADR's wording, recorded rather than made
+quietly.** Decision 16 says *"ingest deduplicates on `result_id`, and the
+heartbeat key accounts for `probe_id`."* This schema implements the second clause
+and satisfies the first without storing `result_id` on the heartbeat row.
+
+| | Stored `result_id` | Natural-key uniqueness (chosen) |
+|---|---|---|
+| Cost | 16 bytes a row plus its own index, on the one table §5.2 refused a UUID PK for on exactly this reasoning | Zero new columns; `probe_id` is already stored, and the §6.3 index already exists |
+| Guarantee | Exact: dedupes any resend | Equivalent in practice: one probe cannot produce two distinct results for one monitor at one microsecond, so the tuple *is* an idempotency key |
+| Weakness | None material | A backwards clock step can collide two real checks (§5.2) |
+
+`result_id` remains real and remains on the wire — it is what the acknowledged
+high-water mark in ADR-005 decision 12 is expressed in, and what makes a resumed
+stream resume at the right place. It simply is not persisted per heartbeat, which
+is the same argument §5.2 already made against a surrogate key and should be
+applied consistently.
+
+**This needs the maintainer's ruling.** ADR-005 is accepted and immutable, so if
+the stored `result_id` was meant literally rather than as a statement of intent,
+this schema is wrong and a superseding ADR is the correct instrument — not an
+edit here.
 
 ---
 
@@ -1207,8 +1328,19 @@ than implying encryption at rest is a general defence.
    different row fails to open, proving the AAD binding works; starting with
    encrypted data and no key aborts rather than regenerating; and a serialised
    notification channel never emits its secret.
+8. **The unique heartbeat index still clears 250 writes/second** (§6.3, §11.8).
+   The harness measured that rate against a non-unique index; ADR-005 changed the
+   write path underneath it, so the number has to be re-earned rather than
+   inherited. Two assertions, not one: the sustained rate still clears the floor,
+   **and** a replayed batch is genuinely a no-op rather than a duplicate — the
+   second is the reason the first got harder, and a gate that checks only
+   throughput would let a broken conflict clause through.
+9. **`unknown` and `skipped` never reach an uptime ratio** (§5.3). A fixture with
+   a window of nothing but `unknown` must produce a null `uptime_ratio`, not
+   zero. Zero is the specific wrong answer: it renders a probe outage as a total
+   customer outage, on the status page and in Phase 2's SLA reports both.
 
-Items 1, 2, 4, and 6 need the load-test harness, which is the other unstarted
+Items 1, 2, 4, 6, and 8 need the load-test harness, which is the other unstarted
 week-2 deliverable. That is not a coincidence: the harness is what turns this
 document from reasoning into evidence.
 

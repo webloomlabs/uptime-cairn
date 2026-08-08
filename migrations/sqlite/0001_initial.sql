@@ -153,15 +153,22 @@ CREATE INDEX idx_monitor_state_due    ON monitor_state (next_check_at);
 -- The only table within three orders of magnitude of the others: 5,000 monitors
 -- at the 20s floor is ~250 writes/second, 21.6M rows/day (§5.1).
 --
--- No surrogate primary key: the natural key is (monitor_id, time), and a UUID PK
--- on 7.9B rows costs 16 bytes plus an index for something nothing queries by.
+-- No surrogate primary key and no stored result_id: the natural key is
+-- (monitor_id, probe_id, time), and a UUID column on a table this size costs 16
+-- bytes plus an index for something nothing queries by (§11.8).
 -- Status is an integer, not text — TEXT would cost several GB/year for nothing.
+--
+-- ADR-005: 4=unknown (the probe could not perform the check) and 5=skipped (shed
+-- under overload) are NOT failures. Collapsing them into down would mean a probe
+-- losing its network reports every monitor assigned to it as failing. Both are
+-- excluded from uptime ratios, exactly as an absent bucket is.
 CREATE TABLE heartbeats (
     time               INTEGER NOT NULL,  -- microseconds since epoch
     monitor_id         BLOB    NOT NULL,
     org_id             BLOB    NOT NULL,
     probe_id           BLOB    NOT NULL,
-    status             INTEGER NOT NULL,  -- 0=down 1=up 2=pending 3=maintenance
+    -- 0=down 1=up 2=pending 3=maintenance 4=unknown 5=skipped
+    status             INTEGER NOT NULL CHECK (status BETWEEN 0 AND 5),
     response_time_ms   REAL,
     code               TEXT,
     message            TEXT,              -- only on failures and state changes
@@ -171,7 +178,18 @@ CREATE TABLE heartbeats (
     suppression_reason INTEGER            -- 1=maintenance 2=dependency
 ) STRICT;
 
-CREATE INDEX idx_heartbeats_monitor_time ON heartbeats (org_id, monitor_id, time DESC);
+-- UNIQUE per ADR-005: probes deliver at-least-once, so an unacknowledged batch is
+-- resent, and under multi-region probing several probes check one monitor by
+-- design. Ingest is INSERT ... ON CONFLICT DO NOTHING.
+--
+-- probe_id goes LAST on purpose. Monitor history filters org_id and monitor_id
+-- and ranges over time, so it uses the leading three columns exactly as before;
+-- a trailing column costs that query nothing. Ordering it
+-- (org_id, monitor_id, probe_id, time) would force one range scan per probe.
+-- Timescale also requires a hypertable's unique index to include the
+-- partitioning column, which this satisfies by construction rather than by luck.
+CREATE UNIQUE INDEX idx_heartbeats_monitor_time
+    ON heartbeats (org_id, monitor_id, time DESC, probe_id);
 -- Events only. Keeps the activity feed cheap without indexing 21M uneventful
 -- rows a day.
 CREATE INDEX idx_heartbeats_important ON heartbeats (org_id, time DESC) WHERE important = 1;
@@ -185,6 +203,13 @@ CREATE INDEX idx_heartbeats_important ON heartbeats (org_id, time DESC) WHERE im
 -- maintenance choice stays implementable.
 -- A bucket with no checks has NO ROW: absence means "no data", which is not the
 -- same as downtime.
+--
+-- ADR-005 adds a second route to "no data": a bucket whose checks were all
+-- unknown or skipped DOES have a row, with up_count + down_count = 0. So the
+-- null rule is stated on the denominator, not on the row's existence —
+-- uptime_ratio is null whenever up_count + down_count = 0, row or no row. The
+-- row is worth keeping because it carries WHY the observation is missing, which
+-- an absent bucket cannot.
 CREATE TABLE heartbeat_1m (
     bucket_start         INTEGER NOT NULL,
     monitor_id           BLOB    NOT NULL,
@@ -193,6 +218,9 @@ CREATE TABLE heartbeat_1m (
     down_count           INTEGER NOT NULL DEFAULT 0,
     pending_count        INTEGER NOT NULL DEFAULT 0,
     maintenance_count    INTEGER NOT NULL DEFAULT 0,
+    -- Counted, never in the uptime denominator (ADR-005).
+    unknown_count        INTEGER NOT NULL DEFAULT 0,
+    skipped_count        INTEGER NOT NULL DEFAULT 0,
     response_time_sum    REAL,
     response_time_count  INTEGER,
     response_time_min    REAL,
@@ -213,6 +241,8 @@ CREATE TABLE heartbeat_5m (
     down_count          INTEGER NOT NULL DEFAULT 0,
     pending_count       INTEGER NOT NULL DEFAULT 0,
     maintenance_count   INTEGER NOT NULL DEFAULT 0,
+    unknown_count       INTEGER NOT NULL DEFAULT 0,
+    skipped_count       INTEGER NOT NULL DEFAULT 0,
     response_time_sum   REAL,
     response_time_count INTEGER,
     response_time_min   REAL,
@@ -231,6 +261,8 @@ CREATE TABLE heartbeat_1h (
     down_count          INTEGER NOT NULL DEFAULT 0,
     pending_count       INTEGER NOT NULL DEFAULT 0,
     maintenance_count   INTEGER NOT NULL DEFAULT 0,
+    unknown_count       INTEGER NOT NULL DEFAULT 0,
+    skipped_count       INTEGER NOT NULL DEFAULT 0,
     response_time_sum   REAL,
     response_time_count INTEGER,
     response_time_min   REAL,
@@ -249,6 +281,8 @@ CREATE TABLE heartbeat_1d (
     down_count          INTEGER NOT NULL DEFAULT 0,
     pending_count       INTEGER NOT NULL DEFAULT 0,
     maintenance_count   INTEGER NOT NULL DEFAULT 0,
+    unknown_count       INTEGER NOT NULL DEFAULT 0,
+    skipped_count       INTEGER NOT NULL DEFAULT 0,
     response_time_sum   REAL,
     response_time_count INTEGER,
     response_time_min   REAL,

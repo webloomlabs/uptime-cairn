@@ -265,11 +265,16 @@ func (t *SQLiteTarget) WriteHeartbeats(ctx context.Context, batch []Heartbeat) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// ON CONFLICT DO NOTHING is the product's ingest path, not a safety net here:
+	// ADR-005 makes probe delivery at-least-once, so the data model (§5.2) gives
+	// heartbeats a unique natural key and ingest absorbs the resend. Measuring a
+	// plain INSERT would measure a write path the product does not use.
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO heartbeats (
 			time, monitor_id, org_id, probe_id, status,
 			response_time_ms, message, attempt, important, suppressed
-		) VALUES (?,?,?,?,?,?,?,1,?,0)`)
+		) VALUES (?,?,?,?,?,?,?,1,?,0)
+		ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return err
 	}
