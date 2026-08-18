@@ -50,7 +50,7 @@ does, and mechanically — which is the only kind of architectural rule that
 survives a deadline.
 
 ```sh
-buf lint                 # DEFAULT rules, minus the two exceptions buf.yaml argues for
+buf lint                 # STANDARD rules, minus the two exceptions buf.yaml argues for
 buf format -w            # the formatter is the style guide; CI checks it
 buf build                # parse and compile everything
 buf generate             # Go + gRPC stubs, beside the definitions
@@ -87,8 +87,8 @@ Output lands beside the definitions (`proto/cairn/probe/v1/*.pb.go`), matching
 each file's `option go_package`, so an import path and a directory path stay the
 same thing.
 
-**Generated code is not committed today**, because nothing imports it yet.
-Committing it once Phase 1 does is the recommendation — it keeps buf and the two
-plugins off the critical path for a contributor who only wants to build the
-server — but that is a call to make with the first consumer, in the PR that adds
-it, not now.
+**Generated code is committed.** The control plane and the probe both import it,
+and committing it keeps buf and the two plugins off the critical path for a
+contributor who only wants to build and run the server. Regenerate after any
+`.proto` change and commit the result in the same commit — a `.pb.go` that
+disagrees with the `.proto` beside it is the worst of both options.
