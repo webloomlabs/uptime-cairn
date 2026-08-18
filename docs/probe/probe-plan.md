@@ -10,15 +10,17 @@ living document and may be edited; ADR-005 is not.
 
 This is the design layer above [PHASE-0-PLAN.md](../plans/PHASE-0-PLAN.md) §3.5,
 whose actual deliverable is *"protobuf/gRPC definitions … documented well enough
-that a third party could implement a probe."* Those artefacts —
-`proto/cairn/probe/v1/*.proto` and a semantics document — are now unblocked and
-are the next Phase 0 step.
+that a third party could implement a probe."* Those artefacts now exist —
+[`proto/cairn/probe/v1/`](../../proto/cairn/probe/v1/) and
+[protocol.md](protocol.md) — and are drafted, not yet reviewed. Where they and
+this plan differ, ADR-005 and protocol.md are what an implementer follows.
 
 [§8](#8-conflicts-with-accepted-documents) lists three places where the design
 collides with documents that were already accepted. Two of them are resolved by
-ADR-005 decision 16 and still need the corresponding edits to the data model and
-`migrations/sqlite/`; the third is an accepted limitation that must be documented
-in those words.
+ADR-005 decision 16, and the corresponding edits have since been made to the data
+model and `migrations/sqlite/0001_initial.sql` — with one departure the data model
+records in its §11.8 and refers back to the maintainer. The third is an accepted
+limitation that must be documented in those words.
 
 ---
 
@@ -725,9 +727,11 @@ Two consequences for the design:
 
 ## 6. Illustrative service sketch
 
-**Not the deliverable.** The `.proto` files are Phase 0 §3.5's actual output and
-should be written once the questions in [§9](#9-open-questions--these-need-your-decision)
-are answered. This is here only so the shape can be argued with.
+**Not the deliverable, and now superseded by one.** The `.proto` files are Phase 0
+§3.5's actual output and have been written — see
+[`proto/cairn/probe/v1/`](../../proto/cairn/probe/v1/). The sketch below is kept
+because it is the shape that was argued with; it differs from the delivered
+protocol in several places, and the delivered files win.
 
 ```protobuf
 package cairn.probe.v1;

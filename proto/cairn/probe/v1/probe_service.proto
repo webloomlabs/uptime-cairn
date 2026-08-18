@@ -1,0 +1,190 @@
+// Uptime Cairn — probe protocol, service and session lifecycle.
+//
+// Binding documents. Where this file and one of them disagree, they win:
+//   ADR-001  docs/adr/001-probe-and-control-plane-split.md   the split itself
+//   ADR-005  docs/adr/005-probe-architecture.md              the sixteen decisions
+//   semantics docs/probe/protocol.md                         what the bytes mean
+//
+// The .proto is the smaller half of the deliverable. Everything a third party
+// needs that a message definition cannot express — retry, backoff, ordering,
+// idempotency, what a probe must never do — is in docs/probe/protocol.md, and
+// an implementation written from these files alone will be wrong in ways that
+// only show up during an outage.
+//
+// Compatibility (ADR-005 decision 7, probe plan §4.12): additive only. Field
+// numbers are never reused, never renumbered, and a field's meaning never
+// changes. Anything breaking is package cairn.probe.v2, and v1 keeps working
+// for the deprecation window in docs/api/README.md. Feature differences within
+// v1 are handled by capability negotiation, never by version gating.
+
+syntax = "proto3";
+
+package cairn.probe.v1;
+
+import "cairn/probe/v1/assignment.proto";
+import "cairn/probe/v1/result.proto";
+
+option go_package = "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1;probev1";
+
+// The whole probe-facing surface. Five RPCs, all dialled outbound by the probe;
+// the control plane never connects to a probe and a probe never listens
+// (ADR-001). "Push" from the control plane means a frame written on a stream
+// the probe already opened, which is why every control-plane→probe action takes
+// effect on next connect rather than synchronously (ADR-005 decision 10).
+service ProbeService {
+  // One-time exchange of an enrolment token for a long-lived credential. The
+  // only unauthenticated RPC, called once per control plane at first boot and
+  // never in solo mode.
+  rpc Enrol(EnrolRequest) returns (EnrolResponse);
+
+  // Exchange the long-lived credential for a short-lived access token. Called
+  // on connect and again before expiry. This is what makes revocation take
+  // effect within one token lifetime without operating a CA (decision 8).
+  rpc IssueToken(IssueTokenRequest) returns (IssueTokenResponse);
+
+  // Declare capabilities, capacity, and versions. Must succeed before
+  // WatchAssignments or StreamResults; both fail FAILED_PRECONDITION otherwise.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // Long-lived server stream: full assignment set, then deltas, then periodic
+  // reconciliation against a digest (decision 11).
+  rpc WatchAssignments(WatchAssignmentsRequest) returns (stream AssignmentUpdate);
+
+  // Long-lived bidirectional stream: batched results up, acknowledged
+  // high-water marks down (decision 12). Self-metrics ride along on the same
+  // stream because a probe has no inbound port to scrape (probe plan §4.13).
+  rpc StreamResults(stream ResultBatch) returns (stream ResultAck);
+}
+
+// ---------------------------------------------------------------------------
+// Enrolment and credentials
+// ---------------------------------------------------------------------------
+
+// Credential placement rule, stated once and applied throughout: a credential
+// being *exchanged for another* is a message field, because it is the subject
+// of the call. A credential *authorising* a call is `authorization: Bearer …`
+// request metadata. So enrolment tokens and long-lived credentials appear in
+// messages; access tokens never do.
+message EnrolRequest {
+  // Single-use, short-TTL, scoped to one org and one probe row. Hashed into
+  // probes.token_hash by the control plane (decision 8).
+  string enrolment_token = 1;
+
+  // Advisory. The probe row already carries the operator's chosen name; this is
+  // what the probe host calls itself, useful when they disagree.
+  string requested_name = 2;
+
+  string agent_version = 3;
+  uint32 protocol_version = 4;
+
+  // Probe wall clock. Lets the control plane refuse an enrolment from a host
+  // whose clock would poison the time series before it has sent anything.
+  int64 probe_time_unix_micros = 5;
+}
+
+message EnrolResponse {
+  // UUIDv7, 16 raw bytes — the probes.id this probe was pre-registered as.
+  // Every UUID on this protocol is encoded this way; never a string.
+  bytes probe_id = 1;
+
+  // Long-lived, written to disk at 0600 and nothing else is (decision 9: the
+  // credential is identity, not state). Opaque to the probe.
+  string credential = 2;
+  int64 credential_expires_at_unix_micros = 3;
+
+  int64 server_time_unix_micros = 4;
+
+  // Deliberately absent: org_id. The probe never learns which org it serves —
+  // it does not need it, results are attributed control-plane-side, and a probe
+  // that holds no org identity has nothing to leak across sessions.
+}
+
+message IssueTokenRequest {
+  string credential = 1;
+}
+
+message IssueTokenResponse {
+  // Presented as `authorization: Bearer <access_token>` on every subsequent
+  // call, including a re-registration. Minutes, not days.
+  string access_token = 1;
+  int64 access_token_expires_at_unix_micros = 2;
+
+  // Set only when the control plane is rotating this probe's credential. The
+  // probe writes it atomically and uses it from the next exchange onward; the
+  // previous credential stays valid for the grace period in the semantics doc,
+  // so a rotation that races a crash cannot lock a probe out (probe plan
+  // §4.9(e)).
+  string rotated_credential = 3;
+  int64 rotated_credential_expires_at_unix_micros = 4;
+
+  int64 server_time_unix_micros = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+// What a probe can actually do, declared per check type. This is the
+// compatibility mechanism (decision 7): a probe that does not advertise a type
+// is never assigned one, so an old probe against a newer control plane is a
+// capability difference rather than a version error.
+message Capability {
+  // Matches monitors.type in the data model and MonitorType in the OpenAPI
+  // spec: http, tcp, icmp, dns, tls_expiry, domain_expiry, docker, grpc.
+  // `push` never appears here — it is evaluated by the control plane and is
+  // never assigned to a probe at all (decision 6, probe plan §5).
+  string type = 1;
+
+  // The checker's version, not the agent's. Lets a control plane withhold a
+  // monitor whose config uses a feature an older checker would silently ignore.
+  // 0 when unavailable.
+  uint32 version = 2;
+
+  bool available = 3;
+
+  // Required when available is false, and it is user-facing: this is the string
+  // that turns "ICMP does not work in this container" from an error repeated
+  // 250 times a second into a fact the control plane holds before a single
+  // check runs. "raw sockets unavailable: no CAP_NET_RAW" is the shape.
+  string reason = 4;
+}
+
+message RegisterRequest {
+  string agent_version = 1;
+  uint32 protocol_version = 2;
+  string name = 3;
+  string region = 4;
+  repeated Capability capabilities = 5;
+
+  // Capacity, so the control plane can decline an assignment and tell the user
+  // "probe at capacity" rather than assigning work that will be shed (probe
+  // plan §4.5). Both are the probe's own configured ceilings.
+  uint32 max_concurrent_checks = 6;
+  uint32 max_checks_per_second = 7;
+
+  int64 probe_time_unix_micros = 8;
+
+  // "linux/arm64". Operator-facing; the Pi user is a stated persona and a fleet
+  // list that cannot show architecture cannot show why one probe is slow.
+  string platform = 9;
+}
+
+message RegisterResponse {
+  // Authoritative. Solo mode never enrols, so this is where the embedded probe
+  // row's id comes from (decision 14).
+  bytes probe_id = 1;
+
+  int64 server_time_unix_micros = 2;
+
+  // The control plane's own protocol version. Equal major or the call would
+  // have failed FAILED_PRECONDITION.
+  uint32 protocol_version = 3;
+
+  // Server-driven tuning. Every value has a probe-side default (semantics doc
+  // §9), and 0 means "keep your default" — so a control plane that sets none of
+  // them is valid, and a fleet can be retuned without a probe release.
+  uint32 health_interval_seconds = 4;
+  uint32 reconcile_interval_seconds = 5;
+  uint32 result_batch_max_results = 6;
+  uint32 result_flush_interval_millis = 7;
+}

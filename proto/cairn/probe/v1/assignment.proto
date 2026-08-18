@@ -1,0 +1,129 @@
+// Uptime Cairn — probe protocol, assignment synchronisation.
+//
+// Full set, then deltas, then periodic reconciliation against a digest. This is
+// deliberately the same diff-plus-reconcile pattern ADR-004 chose for the
+// browser (ADR-005 decision 11) — one idea in the codebase, not two.
+//
+// See docs/probe/protocol.md §5 for the state machine, the digest definition,
+// and what a probe does when the two sides disagree.
+
+syntax = "proto3";
+
+package cairn.probe.v1;
+
+option go_package = "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1;probev1";
+
+// One monitor, as a probe sees it. The probe knows nothing else about it: not
+// its name, not its group, not its notification channels, not its current
+// up/down state, not how many times it has failed in a row. The control plane
+// owns all of that (decision 1).
+message Assignment {
+  // UUIDv7, 16 raw bytes. Unique within a session; monitor identity inside a
+  // multi-session probe is (session, monitor_id) and never monitor_id alone,
+  // because two control planes may legitimately issue the same UUID
+  // (decision 3).
+  bytes monitor_id = 1;
+
+  // monitors.type. A probe that does not recognise the string rejects the
+  // assignment (Rejection.REASON_UNSUPPORTED_TYPE) rather than guessing.
+  string type = 2;
+
+  // monitors.config, verbatim — the same JSON the data model already stores
+  // (§11.1), carried as opaque bytes.
+  //
+  // This is the highest-leverage line in the protocol (decision 6): adding a
+  // monitor type is one Checker implementation, one registry entry, and a
+  // config schema in the OpenAPI spec. It never changes this file, never bumps
+  // the protocol version, and never invalidates a deployed probe.
+  //
+  // The cost, stated so nobody is surprised by it: the wire boundary enforces
+  // nothing. A probe can be handed a config it cannot parse, and the answer is
+  // to make that loud and immediate — see AssignmentRejection, and note that
+  // validation happens at assignment time, not check time.
+  //
+  // It carries secrets. Everything in data model §12 that belongs to this
+  // monitor is here in plaintext, decrypted by the control plane. Assignments
+  // are never written to disk, never logged, and redacted from every error path
+  // (decision 15).
+  bytes config = 3;
+
+  // Scheduling, promoted out of config because the scheduler needs them without
+  // parsing type-specific JSON. All from the monitors table; the control plane
+  // is authoritative for every one of them.
+  uint32 interval_seconds = 4;
+  uint32 timeout_seconds = 5;
+
+  // Retries the probe performs itself, at retry_interval_seconds. Each attempt
+  // is one Result, which is what heartbeats.attempt anticipates. The probe
+  // stops at retries+1 attempts and never decides what the failures mean —
+  // consecutive_failures and the state transition are control-plane work.
+  uint32 retries = 6;
+  uint32 retry_interval_seconds = 7;
+
+  // Inverts up and down after assertions are applied. Never inverts unknown or
+  // skipped: those are statements about the probe, and an operator asking to
+  // invert a monitor did not ask to invert their probe's health.
+  bool upside_down = 8;
+
+  // Opaque, changes whenever config or any scheduling field above changes.
+  // Compared by equality only — never parsed, never ordered. It is half of the
+  // reconciliation digest and the signal to re-validate a config.
+  string config_version = 9;
+
+  // Deliberately absent: resend_after, notify_on_recovery, parent_monitor_id,
+  // group_id, tags, maintenance windows. Each requires knowledge of another
+  // check, another monitor, or another probe, which is the line decision 1
+  // draws. A probe that received them would eventually be tempted to act on
+  // them.
+}
+
+message WatchAssignmentsRequest {
+  bytes probe_id = 1;
+
+  // Empty on first connect, or whenever the probe has no assignments it trusts.
+  // Otherwise the last set_version the probe fully applied.
+  string known_set_version = 2;
+
+  // The probe's digest over its own current set (protocol.md §5.3). Lets the
+  // control plane answer a resumption with a delta when the versions match and
+  // a full set when they do not, without a round trip to find out.
+  string known_assignment_digest = 3;
+}
+
+message AssignmentUpdate {
+  oneof update {
+    AssignmentSet set = 1;
+    AssignmentDelta delta = 2;
+    Reconcile reconcile = 3;
+  }
+}
+
+// The full set, chunked. gRPC's default 4 MiB receive limit is smaller than a
+// 5,000-monitor set with ~1 KB of config each, so chunking is required rather
+// than defensive: the probe accumulates chunks sharing a set_version and swaps
+// its assignment table atomically when it sees final = true. A stream that
+// drops mid-set is discarded, not half-applied.
+message AssignmentSet {
+  string set_version = 1;
+  repeated Assignment assignments = 2;
+  bool final = 3;
+}
+
+// Steady state. Sent as monitors are created, edited, paused, or reassigned.
+message AssignmentDelta {
+  // The version the probe holds *after* applying this delta.
+  string set_version = 1;
+
+  repeated Assignment added = 2;
+  repeated Assignment updated = 3;
+  repeated bytes removed_monitor_ids = 4;
+}
+
+// Periodic re-anchor, ~15 minutes. A resend of the full set at this cadence is
+// unaffordable (~5 MB × every probe × every 15 min) and unnecessary: the probe
+// compares digests and only asks for a full set when they differ. Same "if in
+// doubt, re-fetch" rule ADR-004's membership signal uses.
+message Reconcile {
+  string set_version = 1;
+  string assignment_digest = 2;
+}

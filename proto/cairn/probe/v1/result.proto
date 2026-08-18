@@ -1,0 +1,249 @@
+// Uptime Cairn — probe protocol, results, acknowledgement, and probe health.
+//
+// One invariant governs this file (ADR-005 decision 13):
+//
+//     Probe overload must never look like target downtime.
+//
+// Which is why Outcome has five values and not three, and why unknown and
+// skipped are excluded from every uptime ratio exactly as an absent bucket is
+// (data model §5.3).
+
+syntax = "proto3";
+
+package cairn.probe.v1;
+
+option go_package = "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1;probev1";
+
+// What happened. Stored as heartbeats.status, whose integer encoding predates
+// this enum and does not match it — proto3 requires 0 to be UNSPECIFIED and the
+// schema uses 0 for down. The mapping is explicit, in one place, in
+// protocol.md §6.2. Do not assume the numbers line up; they do not.
+enum Outcome {
+  // Never sent. A probe emitting this is a bug, and ingest rejects the batch.
+  OUTCOME_UNSPECIFIED = 0;
+
+  // The check ran and every assertion passed.
+  OUTCOME_UP = 1;
+
+  // The check ran and the target failed, or an assertion failed. The only
+  // outcome that can page anyone.
+  OUTCOME_DOWN = 2;
+
+  // The probe could not perform the check: capability missing, config
+  // unparseable, the probe's own DNS or egress broken. This is the value the
+  // whole taxonomy exists for. Without it a probe whose egress dies reports
+  // 5,000 monitors down and pages everyone — the precise false positive
+  // ADR-001 introduced N-of-M consensus to eliminate.
+  OUTCOME_UNKNOWN = 3;
+
+  // The check never started: shed under overload, or past its lateness budget.
+  // A probe capacity signal, not a monitor failure.
+  OUTCOME_SKIPPED = 4;
+
+  // Deliberately absent: pending and maintenance. Both exist in
+  // heartbeats.status and neither is a probe's to decide — pending is a
+  // threshold the control plane counts, maintenance is a window it holds.
+}
+
+// Why, one level below Outcome. Optional, additive, and for humans: it drives
+// the phrasing in the UI and the grouping in probe health, never alerting
+// logic. Clients must tolerate values they do not recognise.
+enum ErrorClass {
+  ERROR_CLASS_UNSPECIFIED = 0;
+
+  // The target answered and the answer was wrong: status code, keyword, JSON
+  // path, regex, response-time threshold, expiring certificate.
+  ERROR_CLASS_ASSERTION = 1;
+
+  // The target did not answer within timeout_seconds. A target failure, so it
+  // pairs with OUTCOME_DOWN.
+  ERROR_CLASS_TIMEOUT = 2;
+
+  // Resolving the target's name failed. Pairs with DOWN when the target's name
+  // does not resolve, and with UNKNOWN when the probe's own resolver is broken.
+  // Telling those apart is the checker's job and it must not guess.
+  ERROR_CLASS_DNS = 3;
+
+  ERROR_CLASS_TLS = 4;
+
+  // Connection refused, reset, unreachable. DOWN if it is the target's network,
+  // UNKNOWN if it is the probe's.
+  ERROR_CLASS_NETWORK = 5;
+
+  // The config did not parse or did not validate. Always UNKNOWN, and normally
+  // reported as an AssignmentRejection instead — a config error that reaches a
+  // Result means validation was skipped somewhere.
+  ERROR_CLASS_CONFIG = 6;
+
+  // The probe cannot run this type here. Always UNKNOWN.
+  ERROR_CLASS_CAPABILITY = 7;
+
+  // Shed or too late to start. Always SKIPPED.
+  ERROR_CLASS_OVERLOAD = 8;
+}
+
+message Result {
+  // UUIDv7, 16 raw bytes. The idempotency key: delivery is at-least-once and
+  // ingest deduplicates on it (decision 12, data model §11.8). Generated once,
+  // when the check completes, and never regenerated on replay — a probe that
+  // mints a new id for a resent result has defeated the entire mechanism.
+  //
+  // Must increase monotonically within a session, because acknowledgement is a
+  // high-water mark over exactly this ordering. UUIDv7 gives that for free
+  // provided the probe generates ids in send order.
+  bytes result_id = 1;
+
+  bytes monitor_id = 2;
+
+  // When the check ran, on the probe's clock, in microseconds — the resolution
+  // heartbeats.time uses. Never rewritten by the control plane: a corrected
+  // timestamp would change the natural key of a row that may already exist,
+  // turning a duplicate into a second row. Clock skew is reported, not
+  // repaired (protocol.md §8).
+  int64 time_unix_micros = 3;
+
+  Outcome outcome = 4;
+
+  // Absent for SKIPPED, and for UNKNOWN where nothing was measured. 0 is a
+  // measurement of zero, not a missing measurement; a probe with nothing to
+  // report leaves the field unset and ingest stores NULL.
+  double response_time_ms = 5;
+
+  // Protocol-level result, as text because every protocol spells it
+  // differently: HTTP status, DNS rcode, gRPC health status, TLS days
+  // remaining. heartbeats.code.
+  string code = 6;
+
+  // Failures and state changes only — not every result. At 250 results/second a
+  // message on every row is gigabytes a year of "OK". Must never contain a
+  // secret; the redaction rule in decision 15 applies hardest here, because a
+  // URL with embedded credentials escapes through error strings more often than
+  // through anything else.
+  string message = 7;
+
+  // 1-based. The final attempt of a failing monitor is retries+1.
+  uint32 attempt = 8;
+
+  // Shedding priority hint: this result's outcome differs from the previous
+  // outcome this probe sent for this monitor. Under buffer pressure the oldest
+  // results with this unset are shed first, so state changes survive an outage
+  // that raw heartbeats do not.
+  //
+  // NOT heartbeats.important. That column is a state transition, which requires
+  // consecutive_failures and the current state — control-plane knowledge the
+  // probe does not have and must not simulate (decision 1). The control plane
+  // computes the stored value at ingest and may disagree with this flag.
+  bool outcome_changed = 9;
+
+  ErrorClass error_class = 10;
+}
+
+// A monitor the probe will not run, reported once when the assignment arrives
+// rather than as a result stream that lies 250 times a second. The control
+// plane surfaces it as a configuration error against that monitor, and the
+// monitor stays visibly unassigned instead of silently pending forever.
+message AssignmentRejection {
+  bytes monitor_id = 1;
+
+  // The config_version rejected. A rejection is stale once the config changes,
+  // and without this the control plane cannot tell a stale rejection from a
+  // current one.
+  string config_version = 2;
+
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_UNSUPPORTED_TYPE = 1;
+    REASON_INVALID_CONFIG = 2;
+    REASON_CAPABILITY_UNAVAILABLE = 3;
+    REASON_AT_CAPACITY = 4;
+    REASON_INTERVAL_BELOW_MINIMUM = 5;
+  }
+  Reason reason = 3;
+
+  // User-facing and specific. "keyword assertion requires a non-empty keyword"
+  // is useful; "invalid config" wastes the round trip. Redacted like every
+  // other string on this protocol.
+  string message = 4;
+}
+
+// Self-metrics, on the result stream because a probe has no inbound port to
+// scrape and giving it one would contradict ADR-001 (probe plan §4.13). The
+// control plane republishes these on its own /metrics, labelled by probe.
+message ProbeHealth {
+  int64 time_unix_micros = 1;
+
+  uint32 assigned_count = 2;
+  uint32 in_flight_checks = 3;
+  uint32 max_concurrent_checks = 4;
+  uint32 due_queue_depth = 5;
+
+  uint64 buffered_results = 6;
+  uint64 buffered_bytes = 7;
+
+  // Monotonic since process start, per session. The one that matters: a probe
+  // quietly dropping data must be visible in the UI, and a rising shed count is
+  // how (decision 12).
+  uint64 shed_results_total = 8;
+  uint64 skipped_checks_total = 9;
+  uint64 checks_started_total = 10;
+  uint64 checks_completed_total = 11;
+
+  double checks_per_second = 12;
+  double check_latency_p50_millis = 13;
+  double check_latency_p95_millis = 14;
+
+  uint64 process_uptime_seconds = 15;
+
+  // Probe clock minus control-plane clock, as last observed. Positive means the
+  // probe is ahead. Surfaced rather than corrected.
+  int64 clock_offset_micros = 16;
+
+  // Keyed by monitor type. Per-type failure counts separate "one target is
+  // down" from "all DNS checks fail", which is the difference between a monitor
+  // problem and a probe problem.
+  map<string, uint64> error_count_by_type = 17;
+
+  // Deliberately absent: anything about other sessions. A control plane never
+  // learns that it shares a probe (decision 4), so these numbers are
+  // this-session-scoped wherever they can be and aggregate-only where a shared
+  // resource makes that impossible — in_flight_checks and
+  // max_concurrent_checks are process-wide by nature, and that is the extent
+  // of it.
+}
+
+message ResultBatch {
+  repeated Result results = 1;
+
+  // Sent at least every health_interval_seconds, including on an otherwise
+  // empty batch — a probe with nothing to report is exactly when its health
+  // matters.
+  ProbeHealth health = 2;
+
+  repeated AssignmentRejection rejections = 3;
+}
+
+message ResultAck {
+  // Every result with a result_id at or below this one, in unsigned byte order,
+  // is durable. The probe frees buffer up to here and not one result further.
+  // Nothing is freed on send (decision 12).
+  bytes acknowledged_through_result_id = 1;
+
+  uint32 accepted = 2;
+
+  // Deduplicated on result_id. Expected and healthy after a reconnect; a
+  // persistently non-zero count without reconnects means the probe is
+  // regenerating ids, which is a bug worth alerting on.
+  uint32 duplicate = 3;
+
+  // Malformed or unattributable — a monitor no longer assigned, an
+  // OUTCOME_UNSPECIFIED, a timestamp beyond the acceptable skew. Never retried;
+  // a rejected result is dropped by the probe, not resent.
+  uint32 rejected = 4;
+
+  string message = 5;
+
+  // Backpressure without breaking the stream: the probe waits this long before
+  // sending the next batch. Preferred over RESOURCE_EXHAUSTED, which costs a
+  // reconnect and buys nothing.
+  uint32 pause_millis = 6;
+}
