@@ -601,11 +601,11 @@ A third-party probe is conforming when all of the following hold. This list is t
 
 Named so the gaps are visible rather than discovered:
 
-- **Codegen and breaking-change tooling.** `protoc` versus `buf`, and where generated Go
-  lands, is a dependency decision ([AGENTS.md](../../AGENTS.md) §5) and a CI change. The
-  `go_package` option currently points beside the protos; moving it later is mechanical.
-  Whatever is chosen, the additive-only promise in §11 wants a breaking-change check in
-  CI, not a review convention.
+- **Whether generated code is committed.** The tooling is settled — buf, with
+  `buf lint`, `buf format`, and `buf breaking` in CI ([proto/README.md](../../proto/README.md))
+  — and the additive-only promise in §11 is checked mechanically against the last release
+  tag rather than by review. What is still open is whether the generated Go is committed
+  alongside the definitions, which is a call for the PR that adds the first consumer.
 - **Every default in this document is reasoned, not measured.** Buffer coverage, batch
   sizes, the worker ceiling, `bufconn` overhead — [probe-plan §10](probe-plan.md#10-how-this-gets-validated)
   lists what would test each one, and the harness is where that happens.

@@ -1,0 +1,44 @@
+# buf configuration for the wire formats in proto/.
+#
+# Chosen over protoc because the promise this repository makes about the probe
+# protocol — additive only, field numbers never reused, anything breaking is a
+# new package version (docs/probe/protocol.md §11) — is a promise no review
+# convention keeps. `buf breaking` checks it mechanically against the last
+# release; nothing else here does.
+version: v2
+
+modules:
+  - path: proto
+
+lint:
+  use:
+    - DEFAULT
+
+  # Two DEFAULT rules are deliberately off, and the reason is not convenience.
+  #
+  # They require every RPC's messages to be named <RpcName>Request and
+  # <RpcName>Response. Ours are named for what they are — AssignmentUpdate,
+  # ResultBatch, ResultAck — and those names are load-bearing: they appear in
+  # ADR-005, in docs/probe/protocol.md, and in the data model's discussion of
+  # ingest. Renaming them to satisfy a convention would break the trail between
+  # the decision and the code, and wrapping them in per-RPC envelopes would add a
+  # level of nesting that carries no information.
+  #
+  # This is the only lint exception, and adding a second one should require the
+  # same kind of argument.
+  except:
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+
+  # A rule silenced in a comment is a rule silenced where nobody reviewing the
+  # config will see it. Exceptions belong here, with a reason.
+  disallow_comment_ignores: true
+
+breaking:
+  # FILE is the strictest level and the right one for a protocol whose
+  # compatibility story is "any v1 probe works against any v1 control plane".
+  # Note what this does NOT protect: it compares against the last release, so
+  # before the first tag there is nothing to compare and nothing promised — see
+  # .github/workflows/proto.yml.
+  use:
+    - FILE

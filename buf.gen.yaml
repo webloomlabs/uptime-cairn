@@ -1,0 +1,32 @@
+# Code generation for proto/.
+#
+# Nothing generated is committed yet and no build depends on it — Phase 1 wires
+# the first consumer. Run it with:
+#
+#   buf generate
+#
+# Output lands beside the definitions, matching each file's `option go_package`,
+# so an import path and a directory path stay the same thing.
+#
+# `clean: true` is deliberately absent: the output directory is also the source
+# directory, and a clean step there would delete the .proto files.
+version: v2
+
+plugins:
+  # Local plugins rather than remote ones, per the dependency policy: a build
+  # that reaches a registry for a code generator is a build that fails when the
+  # registry does, and reproducible builds are a Phase 0 §3.6 deliverable.
+  #
+  #   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  #   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+  #
+  # When Phase 1 makes generation part of the build, those two versions should
+  # move into the root module as tool dependencies so they are pinned in go.sum
+  # rather than in a README.
+  - local: protoc-gen-go
+    out: proto
+    opt: paths=source_relative
+
+  - local: protoc-gen-go-grpc
+    out: proto
+    opt: paths=source_relative

@@ -9,6 +9,10 @@
 /internal/ui/dist/*
 !/internal/ui/dist/index.html
 
+# Generated protobuf code. `buf generate` writes it beside the definitions; it is
+# not committed while nothing imports it (proto/README.md).
+/proto/**/*.pb.go
+
 # Frontend
 /web/node_modules/
 /web/.svelte-kit/

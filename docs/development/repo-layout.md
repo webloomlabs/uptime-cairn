@@ -76,6 +76,14 @@ go run ./cmd/cairn -version
 cd harness && go mod tidy && go build .   # the load gate, separate module
 ```
 
+The wire formats have their own toolchain, needed only when editing `proto/`:
+
+```sh
+buf lint
+buf format -w
+buf generate              # Go + gRPC stubs; not committed, nothing imports them yet
+```
+
 `go run ./cmd/cairn` exits non-zero with "Phase 1 has not been built yet". That
 is deliberate: a skeleton that starts and silently does nothing gets discovered
 by a user, and one that says so gets discovered by the developer who wired it.
@@ -86,9 +94,10 @@ directory to find in a clean checkout.
 
 ## What is deliberately not here yet
 
-- **No generated protobuf code.** The `.proto` files are the Phase 0
-  deliverable; choosing between `protoc` and `buf`, and where generated Go
-  lands, is a dependency decision plus a CI change ([proto/README.md](../../proto/README.md)).
+- **No generated protobuf code**, though the tooling for it is now wired:
+  `buf lint`, `buf format`, and `buf breaking` run in CI, and `buf generate`
+  produces `proto/cairn/probe/v1/*.pb.go` when someone needs them. Nothing
+  imports them yet, so nothing is committed ([proto/README.md](../../proto/README.md)).
 - **No Dockerfile, Makefile, or release workflow.** Deployment artefacts are
   [PHASE-1-PLAN.md](../plans/PHASE-1-PLAN.md) §4.2, and a Dockerfile written
   before the build it packages is a Dockerfile that will be rewritten.

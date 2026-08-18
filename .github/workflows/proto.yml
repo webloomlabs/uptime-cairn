@@ -1,0 +1,68 @@
+name: Proto
+
+# The wire-format gate. The probe protocol promises that any v1 probe works
+# against any v1 control plane (docs/probe/protocol.md §11), which means field
+# numbers are never reused, never renumbered, and semantics never change. That is
+# a promise a reviewer cannot reliably keep by reading a diff, so buf checks it.
+
+on:
+  pull_request:
+    paths:
+      - "proto/**"
+      - "buf.yaml"
+      - "buf.gen.yaml"
+      - ".github/workflows/proto.yml"
+  push:
+    branches: [main]
+    paths:
+      - "proto/**"
+      - "buf.yaml"
+      - "buf.gen.yaml"
+      - ".github/workflows/proto.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proto-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, format, and compatibility
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the breaking-change check compares against a tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.47.2
+          github_token: ${{ github.token }}
+
+      - name: Lint
+        run: buf lint
+
+      # Formatting is checked rather than applied. A workflow that pushes
+      # formatting commits is a workflow that writes to the repository, and this
+      # one has read-only permissions on purpose. `buf format -w` locally is the
+      # fix.
+      - name: Check formatting
+        run: buf format --diff --exit-code
+
+      # Nothing is promised to anyone before the first release, so before the
+      # first tag this step explains itself and passes. After it, a breaking
+      # change fails the build and the remedy is a new package version, not a
+      # renumbered field.
+      - name: Breaking-change check against the last release
+        run: |
+          tag="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+          if [ -z "$tag" ]; then
+            echo "::notice::No release tag yet — the wire format is not promised to anyone, so there is nothing to break."
+            exit 0
+          fi
+          echo "Comparing against $tag"
+          buf breaking --against ".git#tag=$tag"

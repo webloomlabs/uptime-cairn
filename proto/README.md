@@ -38,26 +38,57 @@ see [ADR-005](../docs/adr/005-probe-architecture.md) decision 7.
 [docs/api/openapi.yaml](../docs/api/openapi.yaml) and the two are deliberately
 separate contracts: gRPC faces probes, REST faces every other client.
 
-## Code generation
+## Tooling: buf
 
-Not wired up yet, and deliberately so — the choice between `protoc` with
-`protoc-gen-go`/`protoc-gen-go-grpc` and `buf` is a dependency decision
-([AGENTS.md](../AGENTS.md) §5) plus a CI change, and neither belongs in the
-document that first defines the messages. Generated code is not committed today
-and no build depends on these files.
+Decided: **buf**, configured in [buf.yaml](../buf.yaml) and
+[buf.gen.yaml](../buf.gen.yaml), checked in CI by
+[.github/workflows/proto.yml](../.github/workflows/proto.yml).
 
-For reference, generating with `protoc` from the repository root would be:
+The reason is the additive-only promise above. `protoc` compiles; it has no
+opinion about whether field 7 meant something else last release. `buf breaking`
+does, and mechanically — which is the only kind of architectural rule that
+survives a deadline.
 
 ```sh
-protoc -I proto \
-  --go_out=. --go_opt=module=github.com/webloomlabs/uptime-cairn \
-  --go-grpc_out=. --go-grpc_opt=module=github.com/webloomlabs/uptime-cairn \
-  proto/cairn/probe/v1/*.proto
+buf lint                 # DEFAULT rules, minus the two exceptions buf.yaml argues for
+buf format -w            # the formatter is the style guide; CI checks it
+buf build                # parse and compile everything
+buf generate             # Go + gRPC stubs, beside the definitions
+buf breaking --against ".git#tag=$(git describe --tags --abbrev=0)"
 ```
 
-`option go_package` currently places generated code beside the definitions;
-moving it under `internal/` later is a one-line change per file.
+Installing it: `brew install bufbuild/buf/buf`, or the release binaries at
+<https://github.com/bufbuild/buf/releases>. CI pins a version; a local buf that
+is newer will occasionally disagree about formatting, and the pinned one wins.
 
-Whichever tool is chosen, the additive-only promise above wants a
-**breaking-change check in CI** rather than a review convention — `buf breaking`
-against the previous tag is the usual shape.
+**The breaking check compares against the last release tag, not against `main`.**
+Before the first tag it explains itself and passes: the protocol is still a Phase
+0 draft under review, nothing is deployed, and treating an unreviewed draft as
+frozen would mean writing a superseding version before anyone has implemented the
+first one.
+
+## Code generation
+
+Generation needs two local plugins, which buf invokes:
+
+```sh
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+buf generate
+```
+
+Local rather than remote plugins on purpose: a build that reaches a registry for
+a code generator is a build that fails when the registry does, and reproducible
+builds are a Phase 0 §3.6 deliverable. When Phase 1 makes generation part of the
+build, those two versions belong in the root module as tool dependencies so they
+are pinned in `go.sum` rather than in this file.
+
+Output lands beside the definitions (`proto/cairn/probe/v1/*.pb.go`), matching
+each file's `option go_package`, so an import path and a directory path stay the
+same thing.
+
+**Generated code is not committed today**, because nothing imports it yet.
+Committing it once Phase 1 does is the recommendation — it keeps buf and the two
+plugins off the critical path for a contributor who only wants to build the
+server — but that is a call to make with the first consumer, in the PR that adds
+it, not now.
