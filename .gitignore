@@ -1,0 +1,27 @@
+# Build output
+/cairn
+/dist/
+/bin/
+
+# The frontend build lands in internal/ui/dist and is embedded at compile time.
+# The placeholder is committed so //go:embed has something to find before the
+# frontend exists; everything else there is generated.
+/internal/ui/dist/*
+!/internal/ui/dist/index.html
+
+# Frontend
+/web/node_modules/
+/web/.svelte-kit/
+/web/build/
+
+# Local data — a dev run writes a real SQLite database and it must never be
+# committed: it holds monitor credentials (data model §12).
+*.db
+*.db-wal
+*.db-shm
+/data/
+
+# Editors, OS
+.DS_Store
+.idea/
+*.swp

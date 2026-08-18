@@ -37,7 +37,9 @@ most valuable contributions today are not code:
    credentials. The importer itself ships in Phase 1 and there will be plenty to
    test then.
 
-Code contributions open up properly in Phase 1. See the [roadmap](ROADMAP.md).
+Code contributions open up properly in Phase 1. See the [roadmap](ROADMAP.md),
+and [docs/development/repo-layout.md](docs/development/repo-layout.md) for how the
+codebase is arranged and which import rules hold the architecture's seams open.
 
 ## Ways to contribute
 
