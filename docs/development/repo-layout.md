@@ -101,11 +101,8 @@ directory to find in a clean checkout.
 - **No Dockerfile, Makefile, or release workflow.** Deployment artefacts are
   [PHASE-1-PLAN.md](../plans/PHASE-1-PLAN.md) §4.2, and a Dockerfile written
   before the build it packages is a Dockerfile that will be rewritten.
-- **No store interfaces beyond `HeartbeatStore`.** Method sets follow from the
-  OpenAPI operations that use them. Inventing signatures before the handlers
-  exist produces an interface shaped by guesswork that everything then has to
-  implement.
-- **No seed data in `0001_initial.sql`.** The data model says migration 0001
-  creates the schema, the sentinel organisation, and the embedded probe row; it
-  currently creates only the schema. Both rows are Phase 1 Month 1 work, and the
-  file is still editable — it becomes immutable at the first tagged release.
+- **No authentication.** The API refuses everything without
+  `--insecure-no-auth`. Setup, sessions, TOTP, and scoped API keys are specified
+  and unbuilt.
+- **No notifications, rollups, status pages, UI, or importer**, and eight of the
+  nine monitor types. Phase 1 Months 2–4.

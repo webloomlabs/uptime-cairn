@@ -2,50 +2,89 @@
 //
 // The solo-mode default and the one that has to run on a Pi: WAL mode, zero
 // external services, no Redis (ADR-002). The pragmas that are per-connection
-// rather than per-database — journal_mode, foreign_keys, busy_timeout,
-// synchronous — belong in the connection initialiser here, not in a migration;
-// auto_vacuum is the exception and is already set in 0001 because it cannot be
-// changed later without rewriting the whole file (data model §9.2).
+// rather than per-database live here in the DSN; auto_vacuum is the exception
+// and is set in migration 0001, because it cannot be changed later without
+// rewriting the whole file (data model §9.2).
 package sqlite
 
 import (
 	"context"
-	"errors"
+	"database/sql"
+	"fmt"
+	"time"
 
-	"github.com/webloomlabs/uptime-cairn/internal/model"
+	_ "modernc.org/sqlite" // pure Go: cgo would forfeit the static cross-compiled binary
+
+	"github.com/webloomlabs/uptime-cairn/internal/store"
+	"github.com/webloomlabs/uptime-cairn/internal/store/migrate"
+	"github.com/webloomlabs/uptime-cairn/migrations"
 )
 
-// ErrNotImplemented marks the parts of the skeleton Phase 1 Month 1 fills in.
-var ErrNotImplemented = errors.New("sqlite store: not implemented")
+// ErrNotFound is the package-level alias of store.ErrNotFound, returned instead
+// of sql.ErrNoRows so callers never have to import database/sql to handle a
+// missing row — which would leak the backend past the interface ADR-002 put here.
+var ErrNotFound = store.ErrNotFound
 
 // Store is the SQLite implementation of the interfaces in internal/store.
-//
-// It holds no exported fields: the connection, the statement cache, and the
-// write serialisation are its own business, and a caller reaching for them is
-// the leak ADR-002 exists to prevent.
-type Store struct{}
+type Store struct {
+	db *sql.DB
+}
 
-// Open opens the database at path, applies the connection pragmas, and runs
-// migrations to head — automatically, on start, per PHASE-1-PLAN.md §4.2. A
-// checksum mismatch against an already-applied migration is fatal here and not
-// a warning (data model §8).
+// Open opens the database at path and applies the connection pragmas.
 //
-// The driver is modernc.org/sqlite, pure Go and already justified for the load
-// harness: cgo would forfeit the static cross-compiled binary the Pi user gets.
-// It is not imported yet because nothing here needs it, and an unused dependency
-// in go.mod is a dependency the SBOM has to explain.
+// One connection, deliberately. SQLite has a single writer, and a pool of them
+// produces lock contention rather than throughput. A reader pool alongside a
+// single writer is the Phase 1 refinement; at the scale this slice runs it would
+// be optimising something nobody has measured.
 func Open(ctx context.Context, path string) (*Store, error) {
-	return nil, ErrNotImplemented
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"+
+			"&_pragma=busy_timeout(5000)&_pragma=synchronous(1)",
+		path)
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
+	}
+	return &Store{db: db}, nil
 }
 
-// WriteBatch implements store.HeartbeatStore.
-func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) error {
-	return ErrNotImplemented
+// Migrate brings the database to head. Called on every start, per
+// PHASE-1-PLAN.md §4.2, and fatal on a checksum mismatch.
+func (s *Store) Migrate(ctx context.Context) ([]migrate.Migration, error) {
+	return migrate.Apply(ctx, s.db, migrations.SQLite, "sqlite")
 }
 
-// Close releases the database. SQLite in WAL mode wants a clean close so the
-// -wal file is checkpointed; the crash-recovery test in PHASE-1-PLAN.md §4.4
-// asserts what happens when it does not get one.
-func (s *Store) Close() error {
-	return ErrNotImplemented
+// Close checkpoints and closes the database. WAL wants a clean close.
+func (s *Store) Close() error { return s.db.Close() }
+
+// millis and micros convert to the schema's integer time columns. Time is stored
+// as epoch milliseconds everywhere except heartbeats, which are microseconds
+// (data model §1) — the one exception, and the reason these are two functions
+// rather than one.
+func millis(t time.Time) int64 { return t.UnixMilli() }
+func micros(t time.Time) int64 { return t.UnixMicro() }
+
+func fromMillis(ms int64) time.Time { return time.UnixMilli(ms).UTC() }
+func fromMicros(us int64) time.Time { return time.UnixMicro(us).UTC() }
+
+func nullableTime(ms sql.NullInt64) *time.Time {
+	if !ms.Valid {
+		return nil
+	}
+	t := fromMillis(ms.Int64)
+	return &t
+}
+
+func nullableFloat(f sql.NullFloat64) *float64 {
+	if !f.Valid {
+		return nil
+	}
+	return &f.Float64
 }

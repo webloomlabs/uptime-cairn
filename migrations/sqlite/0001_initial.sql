@@ -292,3 +292,28 @@ CREATE TABLE heartbeat_1d (
 ) STRICT;
 
 CREATE INDEX idx_heartbeat_1d_lookup ON heartbeat_1d (org_id, monitor_id, bucket_start DESC);
+
+-- Seed rows. Data model §8: "0001 creates the schema, the sentinel organisation
+-- (ADR-003), and the embedded probe row (§4.11)."
+--
+-- Both ids are fixed, well-known constants so that migrations, seeds, and solo
+-- mode can reference them without a lookup (§3.1). They are shaped as valid
+-- UUIDv7 values — version nibble 7, variant bits 10 — so nothing downstream has
+-- to special-case them, and they are recognisable on sight in a hex dump.
+--
+--   org:   00000000-0000-7000-8000-000000000001
+--   probe: 00000000-0000-7000-8000-000000000002
+--
+-- The timestamp is a fixed constant rather than a clock read: a migration whose
+-- output depends on when it ran is a migration two installs disagree about, and
+-- reproducible builds are a project commitment.
+
+INSERT INTO organisations (id, name, slug, created_at, updated_at) VALUES
+    (x'00000000000070008000000000000001', 'Default', 'default', 1767225600000, 1767225600000);
+
+-- ADR-005 decision 14: solo mode performs no enrolment and holds no credentials,
+-- so this row IS the probe's identity — hence no token_hash. Its mode is
+-- 'embedded', which is what distinguishes it from a Phase 4 remote probe.
+INSERT INTO probes (id, org_id, name, region, mode, token_hash, version, last_seen_at, enabled, created_at) VALUES
+    (x'00000000000070008000000000000002', x'00000000000070008000000000000001',
+     'embedded', NULL, 'embedded', NULL, NULL, NULL, 1, 1767225600000);

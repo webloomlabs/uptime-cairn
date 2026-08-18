@@ -35,6 +35,15 @@ type Config struct {
 	// both because the dashboard is an ordinary API client and gets no
 	// privileged channel (PHASE-1-PLAN.md §2).
 	ListenAddr string
+
+	// InsecureNoAuth runs the API with no authentication at all.
+	//
+	// Temporary scaffolding, and named to be uncomfortable. Authentication —
+	// first-run setup, sessions, TOTP, scoped API keys — is specified in
+	// docs/api/openapi.yaml and is the next thing to build; until it exists the
+	// API refuses every request rather than quietly accepting them, and this
+	// flag is how an operator says "I know, run anyway".
+	InsecureNoAuth bool
 }
 
 // Default matches the published quick start in README.md — port 3000, /data as

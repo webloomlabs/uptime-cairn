@@ -4129,7 +4129,14 @@ components:
 
     HeartbeatStatus:
       type: string
-      enum: [up, down, pending, maintenance]
+      description: |
+        `unknown` and `skipped` are statements about the probe, not the target, and are
+        excluded from every uptime ratio exactly as an absent bucket is: `unknown` means
+        the probe could not perform the check, `skipped` that it never started because
+        the probe shed it under load. Collapsing either into `down` would report a probe
+        outage as a total customer outage — see
+        [ADR-005](../adr/005-probe-architecture.md) decision 16.
+      enum: [up, down, pending, maintenance, unknown, skipped]
 
     Heartbeat:
       type: object

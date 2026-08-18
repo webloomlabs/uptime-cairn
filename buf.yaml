@@ -12,7 +12,8 @@ modules:
 
 lint:
   use:
-    - DEFAULT
+    # STANDARD is what DEFAULT was renamed to; buf 1.72 warns on the old name.
+    - STANDARD
 
   # Two DEFAULT rules are deliberately off, and the reason is not convenience.
   #

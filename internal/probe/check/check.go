@@ -37,6 +37,10 @@ type Observation struct {
 	// status.
 	Code string
 
+	// Class says why, one level below Status. For humans and for grouping in
+	// probe health; never for alerting logic, which branches on Status alone.
+	Class ErrorClass
+
 	// Message is user-facing and must have every credential redacted — including
 	// on the timeout path, which is where a URL with embedded credentials
 	// usually escapes (ADR-005 decision 15).
