@@ -163,3 +163,119 @@ func toHeartbeatJSON(b model.Heartbeat) heartbeatJSON {
 	}
 	return out
 }
+
+// historyResponse is HistoryResponse in docs/api/openapi.yaml.
+type historyResponse struct {
+	MonitorID  string              `json:"monitor_id"`
+	Resolution string              `json:"resolution"`
+	From       time.Time           `json:"from"`
+	To         time.Time           `json:"to"`
+	Data       []historyBucketJSON `json:"data"`
+}
+
+// historyBucketJSON is HistoryBucket. Every response-time field is nullable
+// because a bucket can hold checks that measured nothing.
+type historyBucketJSON struct {
+	BucketStart      time.Time `json:"bucket_start"`
+	UpCount          int       `json:"up_count"`
+	DownCount        int       `json:"down_count"`
+	MaintenanceCount int       `json:"maintenance_count"`
+	PendingCount     int       `json:"pending_count"`
+	UptimeRatio      *float64  `json:"uptime_ratio"`
+	ResponseTimeAvg  *float64  `json:"response_time_avg_ms"`
+	ResponseTimeMin  *float64  `json:"response_time_min_ms"`
+	ResponseTimeMax  *float64  `json:"response_time_max_ms"`
+	ResponseTimeP95  *float64  `json:"response_time_p95_ms"`
+}
+
+func toHistoryBucketJSON(b store.HistoryBucket) historyBucketJSON {
+	out := historyBucketJSON{
+		BucketStart:      b.Start,
+		UpCount:          b.Up,
+		DownCount:        b.Down,
+		MaintenanceCount: b.Maintenance,
+		PendingCount:     b.Pending,
+		ResponseTimeMin:  b.ResponseTimeMin,
+		ResponseTimeMax:  b.ResponseTimeMax,
+		ResponseTimeP95:  b.ResponseTimeP95,
+	}
+
+	// Null, not zero, when nothing was observed. A bucket whose checks were all
+	// unknown or skipped is a gap, and a chart that draws a gap at 0% invents an
+	// outage that never happened.
+	if observed := b.Observed(); observed > 0 {
+		ratio := float64(b.Up) / float64(observed)
+		out.UptimeRatio = &ratio
+	}
+	if b.ResponseTimeCount > 0 {
+		avg := b.ResponseTimeSum / float64(b.ResponseTimeCount)
+		out.ResponseTimeAvg = &avg
+	}
+	return out
+}
+
+// uptimeSummary is UptimeSummary.
+type uptimeSummary struct {
+	// Reported back so an SLA figure carries its own method. A ratio quoted
+	// without saying what it did with maintenance is not a defensible number.
+	MaintenanceHandling string                      `json:"maintenance_handling"`
+	Windows             map[string]uptimeWindowJSON `json:"windows"`
+}
+
+type uptimeWindowJSON struct {
+	UptimeRatio        *float64 `json:"uptime_ratio"`
+	TotalChecks        int      `json:"total_checks"`
+	DownChecks         int      `json:"down_checks"`
+	DowntimeSeconds    int64    `json:"downtime_seconds"`
+	MaintenanceSeconds int64    `json:"maintenance_seconds"`
+	ResponseTimeAvg    *float64 `json:"response_time_avg_ms"`
+	ResponseTimeP95    *float64 `json:"response_time_p95_ms"`
+
+	// IncidentCount is omitted rather than reported as zero: incidents are not
+	// implemented in this build, and "no incidents" and "we do not track
+	// incidents" are different claims. The schema does not require the field.
+	IncidentCount *int `json:"incident_count,omitempty"`
+}
+
+// toUptimeWindowJSON applies the caller's maintenance policy.
+//
+// This is the reason uptime_ratio is computed at read time and never stored
+// (data model §5.3): the same buckets produce three different defensible
+// numbers, and storing one would make the other two unimplementable.
+//
+// unknown and skipped enter none of the three, in either the numerator or the
+// denominator, in any mode.
+func toUptimeWindowJSON(b store.HistoryBucket, handling string, interval time.Duration) uptimeWindowJSON {
+	out := uptimeWindowJSON{
+		TotalChecks:     b.Observed(),
+		DownChecks:      b.Down,
+		ResponseTimeP95: b.ResponseTimeP95,
+	}
+
+	numerator, denominator := b.Up, b.Observed()
+	switch handling {
+	case "count_as_up":
+		numerator += b.Maintenance
+		denominator += b.Maintenance
+	case "count_as_down":
+		denominator += b.Maintenance
+	}
+	if denominator > 0 {
+		ratio := float64(numerator) / float64(denominator)
+		out.UptimeRatio = &ratio
+	}
+
+	// A failing check stands for one interval of unavailability. Deriving it
+	// from the check count rather than from the window means a monitor that was
+	// only checked for half the window does not have the other half attributed
+	// to it either way.
+	seconds := int64(interval.Seconds())
+	out.DowntimeSeconds = int64(b.Down) * seconds
+	out.MaintenanceSeconds = int64(b.Maintenance) * seconds
+
+	if b.ResponseTimeCount > 0 {
+		avg := b.ResponseTimeSum / float64(b.ResponseTimeCount)
+		out.ResponseTimeAvg = &avg
+	}
+	return out
+}

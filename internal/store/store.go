@@ -137,3 +137,37 @@ func DecodeTimeCursor(s string) (time.Time, error) {
 	}
 	return time.UnixMicro(us).UTC(), nil
 }
+
+// HistoryBucket is one aggregated interval, whatever produced it — a rollup tier
+// or a direct aggregation of raw heartbeats. The API renders it; nothing here
+// computes a ratio, because the caller's maintenance policy decides what the
+// denominator is (data model §5.3).
+type HistoryBucket struct {
+	Start time.Time
+
+	Up, Down, Pending, Maintenance int
+
+	// Unknown and Skipped are carried even though the API's HistoryBucket schema
+	// has no field for them: they are what makes a null uptime_ratio explicable
+	// rather than mysterious, and the ratio is computed from these counts.
+	Unknown, Skipped int
+
+	// Sum and count rather than an average, all the way to the edge of the
+	// system. The API divides; nothing before it does.
+	ResponseTimeSum   float64
+	ResponseTimeCount int
+
+	ResponseTimeMin *float64
+	ResponseTimeMax *float64
+
+	// ResponseTimeP95 is nil unless it is a real percentile. A p95 quoted
+	// without its method is worse than no p95 (§11.5), and the API schema has no
+	// field in which to say "approximate" — so an approximation is reported as
+	// absent instead.
+	ResponseTimeP95 *float64
+}
+
+// Observed reports whether this bucket has anything to compute a ratio from.
+// unknown and skipped never count: they are gaps in observation, not
+// observations of failure.
+func (b HistoryBucket) Observed() int { return b.Up + b.Down }

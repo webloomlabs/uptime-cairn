@@ -1,10 +1,15 @@
 // Package sqlite implements the store interfaces against embedded SQLite.
 //
 // The solo-mode default and the one that has to run on a Pi: WAL mode, zero
-// external services, no Redis (ADR-002). The pragmas that are per-connection
-// rather than per-database live here in the DSN; auto_vacuum is the exception
-// and is set in migration 0001, because it cannot be changed later without
-// rewriting the whole file (data model §9.2).
+// external services, no Redis (ADR-002).
+//
+// auto_vacuum is here too, and it is worth saying why rather than in migration
+// 0001 where the data model puts it. auto_vacuum is a per-database setting that
+// only takes effect on a database with no tables yet, and a PRAGMA issued inside
+// a transaction is silently ignored — which is exactly what happens when the
+// migration runner wraps 0001 in one. The line in 0001 therefore documents the
+// intent and does nothing; this DSN is what actually sets it, because Open runs
+// before the first migration and outside any transaction.
 package sqlite
 
 import (
@@ -37,9 +42,15 @@ type Store struct {
 // single writer is the Phase 1 refinement; at the scale this slice runs it would
 // be optimising something nobody has measured.
 func Open(ctx context.Context, path string) (*Store, error) {
+	// auto_vacuum(2) is INCREMENTAL. It MUST be set before the first table is
+	// created: changing it afterwards needs a full VACUUM that rewrites the
+	// whole file and wants free space equal to its size, which on a Pi with a
+	// 32GB card is the difference between working and not (data model §9.2).
+	// Without it, retention deletes rows and the file never shrinks.
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"+
-			"&_pragma=busy_timeout(5000)&_pragma=synchronous(1)",
+			"&_pragma=busy_timeout(5000)&_pragma=synchronous(1)"+
+			"&_pragma=auto_vacuum(2)",
 		path)
 
 	db, err := sql.Open("sqlite", dsn)

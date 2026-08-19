@@ -203,18 +203,37 @@ func (s *Store) MonitorByPushToken(ctx context.Context, hash []byte) (model.Moni
 
 // DeleteMonitor removes the monitor; state and heartbeats follow by cascade.
 func (s *Store) DeleteMonitor(ctx context.Context, id model.ID) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM monitors WHERE id = ?`, id[:])
-	if err != nil {
-		return fmt.Errorf("delete monitor: %w", err)
-	}
-	n, err := res.RowsAffected()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if n == 0 {
+	defer func() { _ = tx.Rollback() }()
+
+	// The org is read before the row goes, because the purge queue carries it
+	// and a tenancy key recovered after the fact is a tenancy key guessed.
+	var orgID []byte
+	err = tx.QueryRowContext(ctx, `SELECT org_id FROM monitors WHERE id = ?`, id[:]).Scan(&orgID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return fmt.Errorf("delete monitor: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM monitors WHERE id = ?`, id[:]); err != nil {
+		return fmt.Errorf("delete monitor: %w", err)
+	}
+
+	// Configuration goes synchronously so the API's 204 is honest; history is
+	// enqueued for the background purge, because a cascade over a week of
+	// heartbeats and a year of buckets cannot run inside a request (§9.3).
+	var org model.ID
+	copy(org[:], orgID)
+	if err := s.EnqueuePurge(ctx, tx, "monitor", id, org, time.Now().UTC()); err != nil {
+		return fmt.Errorf("enqueue purge for monitor %s: %w", id, err)
+	}
+
+	return tx.Commit()
 }
 
 // GetState reads the current state, which ingest needs before it can decide

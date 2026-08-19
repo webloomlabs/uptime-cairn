@@ -3,7 +3,10 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** The Month 1 checkpoint is met — *"a monitor can be
+**Status: 2026-08-19.** History is now durable past the seven-day raw window and
+readable through the API: the rollup tiers are computed, `/history` and `/uptime`
+serve them, retention is enforced, and deleted monitors have their history purged
+in the background. The Month 1 checkpoint is met — *"a monitor can be
 created via `curl`, checked on schedule, and its history queried via the API"* —
 and it is met for every monitor type the spec defines, not just HTTP. The API is
 authenticated: first-run setup, sessions with CSRF, TOTP, and scoped API keys.
@@ -16,19 +19,19 @@ by which "90% done" lasts three months.
 
 | Area | Done | Total |
 |---|---|---|
-| Engine & storage | 10 | 15 |
+| Engine & storage | 13 | 15 |
 | Monitor types | 9 | 10 |
-| Core monitoring features | 2 | 8 |
+| Core monitoring features | 3 | 8 |
 | Alerting & webhooks | 0 | 10 |
 | Status pages | 0 | 5 |
-| REST API | 10 | 20 |
+| REST API | 11 | 20 |
 | Kuma migration | 0 | 5 |
 | UI | 0 | 8 |
 | Security | 6 | 8 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 3 | 8 |
-| **Total** | **41** | **114** |
+| **Total** | **46** | **114** |
 
 ---
 
@@ -44,9 +47,10 @@ by which "90% done" lasts three months.
 - [x] Idempotent heartbeat batch writes
 - [x] Control-plane state machine: consecutive failures, pending/up/down, `important` on transitions
 - [x] Migration `0002`: users, sessions, API keys, recovery codes, settings, encryption keys
-- [ ] Migration `0003`: notification channels, status pages, incidents, maintenance windows, webhooks, audit log — specified in the data model, not yet in a migration
-- [ ] Rollup pipeline: raw → 1m → 5m → hourly → daily (tables exist, nothing populates them)
-- [ ] Retention enforcement per tier, with disk actually reclaimed on SQLite
+- [x] Migration `0003`: notification channels and deliveries, certificate and domain observations, maintenance windows and targets, incidents and updates, status pages and subscribers, outbound webhooks and deliveries, audit log, imports, plus the uptime cache and purge queue the jobs below need
+- [x] Rollup pipeline: raw → 1m → 5m → hourly → daily, each tier from the tier below, buckets epoch-aligned and half-open, watermark derived from the data, every write an idempotent full recount
+- [x] Retention enforcement per tier, with disk actually reclaimed on SQLite — `auto_vacuum=INCREMENTAL` had never actually been applied; the PRAGMA in `0001` is a no-op inside the migration runner's transaction, so it now lives in the connection DSN, and a test asserts the file shrinks
+- [x] Asynchronous purge of a deleted monitor's history, in bounded batches
 - [ ] `resend_after` and dependency-suppression handling in ingest
 - [ ] Reader pool alongside the single writer (one connection today)
 
@@ -72,7 +76,7 @@ by which "90% done" lasts three months.
 - [ ] Dependency-aware suppression (parent down suppresses child alerts)
 - [ ] Maintenance windows: scheduled, recurring, attached to monitors/groups/tags
 - [ ] Certificate and domain expiry surfaced as upcoming-expiry data
-- [ ] Uptime history browsing over arbitrary past ranges via rollups
+- [x] Uptime history browsing over arbitrary past ranges via rollups
 
 ## Alerting & webhooks
 
@@ -109,7 +113,7 @@ by which "90% done" lasts three months.
 - [ ] `GET /api/v1/monitors/membership` — ADR-004's change signal and filtered count
 - [ ] Monitor list filters: status, type, tag, group, enabled, search
 - [ ] `include=last_heartbeat|uptime|tags|group`
-- [ ] `/history` and `/uptime` (need the rollup pipeline)
+- [x] `/history` and `/uptime` — auto resolution, coarsened rather than refused when a request would return too many buckets, and read from raw rather than the tiers whenever raw covers the range
 - [x] First-run setup, login, logout, session description
 - [x] TOTP enrolment, confirmation, and removal
 - [ ] Groups, tags, notification channels, status pages, incidents, maintenance windows, settings — the rest of the specified surface, currently answering `501`
@@ -186,18 +190,19 @@ by which "90% done" lasts three months.
 
 ## What to do next, and why in this order
 
-1. **Migration `0003` and the rollup pipeline.** Notifications, status pages, and
-   `/history` all sit behind tables that do not exist yet, and rollups are what
-   keep 5,000 monitors' history queryable at all.
-2. **Alerting**, once channels have somewhere to live. A monitoring tool that
+1. **Alerting**, now that channels have somewhere to live. A monitoring tool that
    detects an outage and tells nobody is a logging tool.
-3. **Monitor credentials through the encryption layer.** Nine monitor types now
+2. **Monitor credentials through the encryption layer.** Nine monitor types now
    accept secrets in their config — bearer tokens, basic-auth passwords, Docker
    client keys, gRPC metadata — and every one of them is stored in plaintext. The
    layer that would fix it already exists and already carries the TOTP secret.
-4. **The load-test harness against the real engine.** The 5,000-monitor claim is
+3. **The load-test harness against the real engine.** The 5,000-monitor claim is
    the project's central promise, and every week it goes unmeasured against real
-   code is a week the number is an assumption.
+   code is a week the number is an assumption. It now has a second thing to
+   measure: the rollup pass has never been timed against a full-size database.
+4. **`/monitors/{id}/certificate` and the observation writers behind it.** The
+   TLS and domain checkers see everything that endpoint reports and store none of
+   it; migration `0003` created the tables in the same pass.
 
 The UI comes after those deliberately: the plan puts it in Month 3, and an API
 that is not finished is a UI that gets rewritten.

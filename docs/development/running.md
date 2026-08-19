@@ -20,6 +20,7 @@ encryption key, and registers the embedded probe:
 ```
 level=INFO msg="migration applied" version=1 name=initial
 level=INFO msg="migration applied" version=2 name=identity
+level=INFO msg="migration applied" version=3 name=alerting_and_pages
 level=WARN msg="generated a new encryption key — back it up separately from the database,
                 because without it every stored secret is unrecoverable" path=/tmp/cairn-data/cairn.key
 level=INFO msg="first-run setup is required: POST /api/v1/setup to create the administrator account"
@@ -304,6 +305,161 @@ The probe ran the retries; the control plane decided what they meant. That split
 is [ADR-005](../adr/005-probe-architecture.md) decision 1 and it is not
 negotiable in either direction.
 
+## History and retention
+
+Raw heartbeats are kept for seven days. Everything longer — a status page's
+90-day uptime bar, the year Phase 2's reports quote — is made of rollup rows, and
+a background pass builds them every minute:
+
+```
+heartbeats  →  heartbeat_1m  →  heartbeat_5m  →  heartbeat_1h  →  heartbeat_1d
+```
+
+Each tier is computed **from the tier below**, not from raw. That only gives the
+right answer because the columns store a sum and a count rather than an average:
+an average cannot be re-weighted into a coarser bucket, a sum and a count can.
+Buckets are UTC and epoch-aligned, start inclusive and end exclusive, so a
+heartbeat lands in exactly one bucket at every tier.
+
+After a few minutes of a live install, with one healthy monitor, one pointed at a
+closed port, and one ping:
+
+```
+heartbeat_1m: 24 buckets
+  04:42:00 Up     up=3 down=0 sum=187.5 n=3 min=57.5 max=67.5 p95=67.5
+  04:42:00 Down   up=0 down=3 sum=1.4   n=3 min=0.4  max=0.5  p95=0.5
+
+heartbeat_5m: 3 buckets
+  04:35:00 Up     up=13 down=0 sum=907.2 n=13 min=55.6 max=152.7 p95=152.7
+  04:35:00 Down   up=0 down=13 sum=7.4   n=13 min=0.3  max=1.2   p95=1.2
+
+monitor_uptime_cache:
+  Up   24h ratio=1.0000 total=13 down=0  downtime=0s
+  Down 24h ratio=0.0000 total=13 down=13 downtime=300s
+```
+
+Three rules the numbers above are obeying, each of which is a way a monitoring
+tool can lie:
+
+- **`uptime_ratio` is not stored.** It is `up / (up + down)` at read time, so the
+  API's three-way maintenance choice stays implementable. Storing it would bake
+  one policy into the data.
+- **`unknown` and `skipped` are counted and never in the denominator.** A probe
+  that could not look is a gap in observation, not an outage.
+- **A bucket with no checks has no row; a bucket of nothing but `unknown` has
+  one, with `up + down = 0`.** Both read as a null ratio, and the second carries
+  the reason the observation is missing.
+
+`p95` is real only at the 1m tier, computed from raw by nearest rank. Coarser
+tiers carry the largest sub-bucket p95 — an approximation, deliberately the
+conservative direction, and one that has to be labelled wherever it surfaces.
+
+### Retention, and the disk it gives back
+
+Defaults are the ones in `Settings.retention`: 7 days raw, 30 days of 1m, 90 of
+5m, 365 of 1h, and 1d indefinitely. The validator enforces the rule that makes
+the chain coherent — a coarser tier must be kept at least as long as a finer one,
+or history develops a hole where detail was deleted before the summary that
+replaced it existed. The audit log is never touched: deleting an audit log
+defeats its purpose.
+
+Deleting rows from SQLite does not shrink the file. This is the trap that decides
+whether a Pi with a 32GB card keeps working, and it needs `auto_vacuum` set to
+`INCREMENTAL` **before the first table exists**; changing it afterwards means a
+full `VACUUM` that rewrites the whole file and wants free space equal to its
+size. Measured on 20,000 heartbeats:
+
+```
+6,385,664 bytes with data
+6,385,664 bytes after deleting every one of them   ← the delete alone reclaims nothing
+  622,592 bytes after PRAGMA incremental_vacuum
+```
+
+### Reading it back
+
+```sh
+curl -s -H "Authorization: Bearer $KEY" \
+  "localhost:3000/api/v1/monitors/<id>/history" | jq
+```
+
+```json
+{
+  "monitor_id": "01a0184d-a657-7118-9b70-3eeeeb666be4",
+  "resolution": "5m",
+  "from": "2026-08-18T05:06:02Z",
+  "to": "2026-08-19T05:06:02Z",
+  "data": [
+    { "bucket_start": "2026-08-19T04:35:00Z", "up_count": 13, "down_count": 0,
+      "uptime_ratio": 1, "response_time_avg_ms": 69.8, "response_time_p95_ms": 152.7 }
+  ]
+}
+```
+
+`resolution=auto` picks the coarsest tier that still gives a useful number of
+points — 5m for a day, 1h for a week, 1d for a quarter. Ask for something finer
+than the range can carry and the answer is **coarser than requested rather than
+refused**, which the spec allows and the response reports:
+
+```sh
+"…/history?resolution=1m&from=2026-01-01T00:00:00Z"   →  "resolution": "1d"
+```
+
+`resolution=raw` means one bucket per check, so its width is the monitor's own
+interval.
+
+Two things worth knowing about where the numbers come from:
+
+- **Raw wins whenever it covers the range**, even though the tiers exist. A tier
+  lags by its bucket width plus the pipeline's grace period, and that lag lands
+  on the right-hand edge of the chart — the part someone watching an incident is
+  looking at. In the example above the last bucket is the *current* five minutes,
+  which the tier does not have yet.
+- **`response_time_p95_ms` is null when it would be an approximation.** A real
+  percentile is computed from raw; the coarse tiers store the largest sub-bucket
+  p95, and the response schema has no field in which to say so. A p95 quoted to
+  an auditor without its method is worse than no p95, so it is reported absent.
+
+```sh
+curl -s -H "Authorization: Bearer $KEY" \
+  "localhost:3000/api/v1/monitors/<id>/uptime?window=1h&window=24h" | jq
+```
+
+```json
+{
+  "maintenance_handling": "exclude",
+  "windows": {
+    "1h": { "uptime_ratio": 0, "total_checks": 30, "down_checks": 30,
+            "downtime_seconds": 600, "response_time_p95_ms": 1.206 }
+  }
+}
+```
+
+`maintenance` takes `exclude` (the default), `count_as_up`, or `count_as_down`,
+and the answer says which it used. One set of buckets, three defensible numbers —
+which is the entire reason `uptime_ratio` is computed at read time and never
+stored. A ratio quoted without saying what it did with maintenance is not a
+figure anyone can defend.
+
+`incident_count` is **absent**, not zero: incidents are not implemented, and "no
+incidents" is a different claim from "we do not track incidents".
+
+A monitor that has never been checked answers `null`, not `0`:
+
+```json
+{"windows": {"24h": {"uptime_ratio": null, "total_checks": 0, "down_checks": 0}}}
+```
+
+### Deleting a monitor
+
+`DELETE /api/v1/monitors/{id}` removes the configuration row and returns `204`
+immediately. The history is enqueued in `pending_purges` and deleted by the same
+background pass, in bounded batches. The time series deliberately has no foreign
+key back to monitors, because a cascade over a week of heartbeats and a year of
+buckets cannot run inside a request without making that `204` a lie about how
+long the work takes. Orphaned rows are invisible to every API query — they all
+filter through a live monitor — so a purge that lags costs disk and never
+correctness.
+
 ## What the API answers
 
 | | Scope |
@@ -318,6 +474,7 @@ negotiable in either direction.
 | `GET /api/v1/monitors`, `GET /api/v1/monitors/{id}` | `monitors:read` |
 | `POST`, `DELETE` `/api/v1/monitors...` | `monitors:write` |
 | `GET /api/v1/monitors/{id}/heartbeats` | `heartbeats:read` |
+| `GET /api/v1/monitors/{id}/history`, `.../uptime` | `heartbeats:read` |
 | `GET/POST /api/v1/push/{token}` | None — the token is the credential |
 | Anything else under `/api/v1/` | `501`, naming the spec — the endpoint exists in the contract, not in this build |
 
@@ -350,6 +507,17 @@ they are the ones that fail open — scope enforcement, CSRF, rate limiting, key
 revocation, privilege escalation, recovery-code single use, and ciphertext
 relocation.
 
+The history tests cover the two decisions a reader can get quietly wrong: which
+source answers a range, and when a percentile is real. Both fail invisibly — the
+response is well-formed either way, just less accurate than it looks.
+
+The rollup tests assert the arithmetic directly, because a rollup bug is the
+quietest kind there is: nothing errors, the numbers are just wrong, and they are
+wrong in history that raw heartbeats no longer exist to contradict. They cover
+the bucket contract, the totals surviving all three tier hops, idempotent
+re-runs, late heartbeats being folded in, the null-versus-absent distinction, and
+the file actually shrinking.
+
 The checker tests run against servers started in-process — a DNS resolver built
 on `dnsmessage`, a TLS listener presenting a certificate generated with the
 window under test, a real gRPC health service, a fake Docker daemon, an RDAP
@@ -366,7 +534,11 @@ an aeroplane is a test that gets deleted.
   Docker client keys, and gRPC metadata all reach `monitors.config` in plaintext.
   The layer that would fix it exists and already carries the TOTP secret; nothing
   routes monitor configs through it yet.
-- **Notifications, rollups, status pages, the UI, the importer.** Phase 1
-  Months 2–4.
+- **`/monitors/{id}/certificate`.** The TLS and domain-expiry checkers observe
+  everything it reports and store none of it; migration `0003` created the tables
+  waiting for them.
+- **Notifications, status pages, the UI, the importer.** Phase 1 Months 2–4.
+  Migration `0003` creates their tables; nothing has an API or a worker behind
+  them yet.
 - **The load-test harness against the real engine.** Its `http` target still
   refuses to run, which is the honest state until someone points it here.

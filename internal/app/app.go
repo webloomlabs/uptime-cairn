@@ -35,6 +35,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
+	"github.com/webloomlabs/uptime-cairn/internal/rollup"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
 	"github.com/webloomlabs/uptime-cairn/internal/version"
@@ -81,6 +82,14 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	publisher := controlplane.NewPublisher()
 	cp := controlplane.New(store, publisher, log.With("component", "controlplane"),
 		model.EmbeddedProbeID, model.SentinelOrgID)
+
+	// The rollup pipeline. Raw heartbeats are kept for seven days, so every
+	// history range beyond that — the 90-day uptime bar a status page shows, the
+	// year Phase 2's reports quote — is made of rows this job writes and nothing
+	// else writes. It also enforces retention, which is what stops a Pi filling
+	// its card, and drains the purge queue left behind by deleted monitors.
+	rollups := rollup.NewRunner(store, rollup.DefaultRetention(), log.With("component", "rollup"))
+	go runRollups(ctx, rollups)
 
 	// Push monitors are evaluated here rather than by a probe: a dead-man's
 	// switch measures silence, and only the side holding the clock and the last
@@ -244,6 +253,31 @@ func openKeeper(ctx context.Context, store *sqlite.Store, cfg config.Config, log
 func setupRequired(ctx context.Context, store *sqlite.Store) (bool, error) {
 	n, err := store.CountUsers(ctx)
 	return n == 0, err
+}
+
+// rollupInterval is how often the pipeline runs. A minute matches the finest
+// tier: running more often would recompute the same open bucket repeatedly, and
+// running less often would leave the newest minute missing from history for
+// longer than the tier it belongs to.
+const rollupInterval = time.Minute
+
+func runRollups(ctx context.Context, runner *rollup.Runner) {
+	// One pass at startup rather than waiting out the first tick: a process that
+	// was down for a day has a day of buckets to build, and the sooner it starts
+	// the sooner history is whole again.
+	runner.Run(ctx, time.Now().UTC())
+
+	ticker := time.NewTicker(rollupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			runner.Run(ctx, now.UTC())
+		}
+	}
 }
 
 // pushSweepInterval bounds how late a push outage is noticed. Five seconds is

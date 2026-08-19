@@ -28,6 +28,16 @@ func (noopNotifier) Notify() {}
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
+	server, _ := testServerWithStore(t)
+	return server
+}
+
+// testServerWithStore also hands back the store, for the tests that need to
+// seed history directly — writing a week of heartbeats through the API is not
+// possible and would not be a better test if it were.
+func testServerWithStore(t *testing.T) (*httptest.Server, *sqlite.Store) {
+	t.Helper()
+
 	store, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "cairn.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -60,7 +70,7 @@ func testServer(t *testing.T) *httptest.Server {
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)
-	return server
+	return server, store
 }
 
 type client struct {

@@ -23,6 +23,14 @@ type MonitorStore interface {
 	DeleteMonitor(ctx context.Context, id model.ID) error
 	MonitorByPushToken(ctx context.Context, hash []byte) (model.Monitor, error)
 	ListHeartbeats(ctx context.Context, id model.ID, before *time.Time, limit int, importantOnly bool) ([]model.Heartbeat, bool, error)
+
+	// History and uptime read the rollup tiers, or raw heartbeats where those
+	// still cover the range. RawCovers is what decides between them.
+	RawCovers(ctx context.Context, id model.ID, from time.Time, tier string) (bool, error)
+	HistoryFromRaw(ctx context.Context, id model.ID, from, to time.Time, interval time.Duration) ([]store.HistoryBucket, error)
+	HistoryFromTier(ctx context.Context, id model.ID, from, to time.Time, tier string) ([]store.HistoryBucket, error)
+	UptimeFromRaw(ctx context.Context, id model.ID, from, to time.Time) (store.HistoryBucket, error)
+	UptimeFromTier(ctx context.Context, id model.ID, from, to time.Time, tier string) (store.HistoryBucket, error)
 }
 
 // IdentityStore is the credentials half.
@@ -147,6 +155,8 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsRead, s.getMonitor))
 	authed.HandleFunc("DELETE /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsWrite, s.deleteMonitor))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/heartbeats", s.require(auth.ScopeHeartbeatsRead, s.listHeartbeats))
+	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/history", s.require(auth.ScopeHeartbeatsRead, s.getMonitorHistory))
+	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/uptime", s.require(auth.ScopeHeartbeatsRead, s.getMonitorUptime))
 
 	authed.HandleFunc("/api/v1/", s.notImplemented)
 
