@@ -12,6 +12,8 @@ internal/
   config/             flags and defaults
   version/            build identity, set by -ldflags
   model/              domain types; imports nothing from this repository
+  auth/               password hashing, tokens, TOTP, scopes
+  secrets/            encryption at rest: envelopes, data keys, the root key
   store/              the persistence seam (ADR-002)
     sqlite/           embedded SQLite: the solo default, the one that runs on a Pi
     migrate/          our own forward-only migration runner
@@ -101,8 +103,8 @@ directory to find in a clean checkout.
 - **No Dockerfile, Makefile, or release workflow.** Deployment artefacts are
   [PHASE-1-PLAN.md](../plans/PHASE-1-PLAN.md) §4.2, and a Dockerfile written
   before the build it packages is a Dockerfile that will be rewritten.
-- **No authentication.** The API refuses everything without
-  `--insecure-no-auth`. Setup, sessions, TOTP, and scoped API keys are specified
-  and unbuilt.
 - **No notifications, rollups, status pages, UI, or importer**, and eight of the
   nine monitor types. Phase 1 Months 2–4.
+- **No user management beyond the first account.** One owner, created at setup.
+  Additional users, roles, and teams are Phase 3, though the role column and the
+  scope table already carry them.

@@ -36,14 +36,17 @@ type Config struct {
 	// privileged channel (PHASE-1-PLAN.md §2).
 	ListenAddr string
 
-	// InsecureNoAuth runs the API with no authentication at all.
-	//
-	// Temporary scaffolding, and named to be uncomfortable. Authentication —
-	// first-run setup, sessions, TOTP, scoped API keys — is specified in
-	// docs/api/openapi.yaml and is the next thing to build; until it exists the
-	// API refuses every request rather than quietly accepting them, and this
-	// flag is how an operator says "I know, run anyway".
-	InsecureNoAuth bool
+	// EncryptionKeyFile is the root key for encryption at rest: 32 bytes, raw or
+	// base64. Empty falls back to CAIRN_ENCRYPTION_KEY_FILE, then
+	// CAIRN_ENCRYPTION_KEY, then a key generated into DataDir on first start
+	// (data model §12.3). The default path exists so that `docker run` needs no
+	// key management to work, and the flag exists so that a real deployment can
+	// keep the key somewhere other than beside the database it protects.
+	EncryptionKeyFile string
+
+	// InstanceName is what an authenticator app shows beside the account, and
+	// what a status page will call this install.
+	InstanceName string
 }
 
 // Default matches the published quick start in README.md — port 3000, /data as
@@ -51,9 +54,10 @@ type Config struct {
 // support ticket waiting to happen.
 func Default() Config {
 	return Config{
-		Mode:       ModeSolo,
-		DataDir:    "/data",
-		ListenAddr: ":3000",
+		Mode:         ModeSolo,
+		DataDir:      "/data",
+		ListenAddr:   ":3000",
+		InstanceName: "Uptime Cairn",
 	}
 }
 

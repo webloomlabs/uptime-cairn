@@ -35,6 +35,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
+	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
 	"github.com/webloomlabs/uptime-cairn/internal/version"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
@@ -66,6 +67,16 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	for _, m := range applied {
 		log.Info("migration applied", "version", m.Version, "name", m.Name)
 	}
+
+	keeper, err := openKeeper(ctx, store, cfg, log)
+	if err != nil {
+		return err
+	}
+
+	// Sessions expire on their own; sweeping keeps the table from accumulating
+	// rows nobody can use. Hourly is often enough for a table this small and
+	// rare enough to be invisible.
+	go sweepSessions(ctx, store, log)
 
 	publisher := controlplane.NewPublisher()
 	cp := controlplane.New(store, publisher, log.With("component", "controlplane"),
@@ -118,12 +129,12 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(store, publisher, registry, log.With("component", "api"), cfg.InsecureNoAuth).Handler(),
+		Handler:           api.New(store, publisher, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	if cfg.InsecureNoAuth {
-		log.Warn("authentication is disabled: this build has none, and --insecure-no-auth says run anyway. Do not expose this port.")
+	if required, err := setupRequired(ctx, store); err == nil && required {
+		log.Info("first-run setup is required: POST /api/v1/setup to create the administrator account")
 	}
 	log.Info("listening", "addr", cfg.ListenAddr)
 
@@ -154,4 +165,88 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	// solo mode that window is one flush interval, and the honest cost is at
 	// most a second of heartbeats on a deliberate stop.
 	return nil
+}
+
+// openKeeper resolves the root key and the current data key, creating the first
+// data key on a fresh install (data model §12.3).
+//
+// The order matters: whether encrypted data already exists decides what a
+// missing key means. With data present it is fatal, because generating a
+// replacement would render every stored secret permanently unreadable while
+// appearing to work.
+func openKeeper(ctx context.Context, store *sqlite.Store, cfg config.Config, log *slog.Logger) (*secrets.Keeper, error) {
+	encrypted, err := store.HasEncryptedData(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	root, err := secrets.LoadRootKey(cfg.EncryptionKeyFile, cfg.DataDir, encrypted)
+	if err != nil {
+		return nil, err
+	}
+	if root.Generated {
+		log.Warn("generated a new encryption key — back it up separately from the database, "+
+			"because without it every stored secret is unrecoverable", "path", root.Description)
+	}
+
+	wrapped, err := store.EncryptionKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := make(map[uint32][]byte, len(wrapped)+1)
+	var current uint32
+	for _, k := range wrapped {
+		dek, err := secrets.Unwrap(root.Key, k.Wrapped)
+		if err != nil {
+			return nil, fmt.Errorf("data key %d does not unwrap with the key at %s: %w", k.Version, root.Description, err)
+		}
+		keys[k.Version] = dek
+		current = max(current, k.Version)
+	}
+
+	if len(keys) == 0 {
+		dek, err := secrets.NewDataKey()
+		if err != nil {
+			return nil, err
+		}
+		sealed, err := secrets.Wrap(root.Key, dek)
+		if err != nil {
+			return nil, err
+		}
+		current = 1
+		if err := store.InsertEncryptionKey(ctx,
+			sqlite.WrappedKey{Version: current, Wrapped: sealed}, secrets.Algorithm, time.Now().UTC()); err != nil {
+			return nil, err
+		}
+		keys[current] = dek
+	}
+
+	return secrets.NewKeeper(current, keys)
+}
+
+func setupRequired(ctx context.Context, store *sqlite.Store) (bool, error) {
+	n, err := store.CountUsers(ctx)
+	return n == 0, err
+}
+
+func sweepSessions(ctx context.Context, store *sqlite.Store, log *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			removed, err := store.DeleteExpiredSessions(ctx, time.Now().UTC())
+			if err != nil {
+				log.Warn("sweep expired sessions", "error", err)
+				continue
+			}
+			if removed > 0 {
+				log.Debug("swept expired sessions", "removed", removed)
+			}
+		}
+	}
 }

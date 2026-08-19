@@ -6,16 +6,17 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
+	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 	"github.com/webloomlabs/uptime-cairn/internal/ui"
 	"github.com/webloomlabs/uptime-cairn/internal/version"
 )
 
-// Store is what the API needs from persistence. Named by the consumer, so no
-// handler can reach a backend-specific method by accident.
-type Store interface {
+// MonitorStore is the monitoring half of what the API needs from persistence.
+type MonitorStore interface {
 	CreateMonitor(ctx context.Context, m model.Monitor) error
 	GetMonitor(ctx context.Context, id model.ID) (store.MonitorWithState, error)
 	ListMonitors(ctx context.Context, after *store.Cursor, limit int) ([]store.MonitorWithState, bool, error)
@@ -23,10 +24,41 @@ type Store interface {
 	ListHeartbeats(ctx context.Context, id model.ID, before *time.Time, limit int, importantOnly bool) ([]model.Heartbeat, bool, error)
 }
 
-// Notifier is the control plane's assignment publisher. The API calls it after
-// any write, which is what turns "the user created a monitor" into "the probe is
-// checking it" without a poll in between.
-type Notifier interface{ Notify() }
+// IdentityStore is the credentials half.
+type IdentityStore interface {
+	CountUsers(ctx context.Context) (int, error)
+	CreateUser(ctx context.Context, u model.User) error
+	UserByEmail(ctx context.Context, orgID model.ID, email string) (model.User, error)
+	UserByID(ctx context.Context, id model.ID) (model.User, error)
+	SetUserTOTP(ctx context.Context, id model.ID, secret []byte, enabledAt *time.Time) error
+	TouchUserLogin(ctx context.Context, id model.ID, at time.Time) error
+	ReplaceRecoveryCodes(ctx context.Context, userID model.ID, hashes [][]byte) error
+	ConsumeRecoveryCode(ctx context.Context, userID model.ID, hash []byte) (bool, error)
+
+	CreateSession(ctx context.Context, s model.Session) error
+	SessionByTokenHash(ctx context.Context, hash []byte, now time.Time) (model.Session, error)
+	TouchSession(ctx context.Context, id model.ID, at time.Time) error
+	DeleteSession(ctx context.Context, id model.ID) error
+	DeleteUserSessions(ctx context.Context, userID model.ID) error
+
+	InstanceName(ctx context.Context, orgID model.ID) (string, error)
+	SetInstanceName(ctx context.Context, orgID model.ID, name string) error
+
+	CreateAPIKey(ctx context.Context, k model.APIKey) error
+	APIKeyByHash(ctx context.Context, hash []byte) (model.APIKey, error)
+	GetAPIKey(ctx context.Context, id model.ID) (model.APIKey, error)
+	ListAPIKeys(ctx context.Context, after *store.Cursor, limit int) ([]model.APIKey, bool, error)
+	UpdateAPIKey(ctx context.Context, k model.APIKey) error
+	RevokeAPIKey(ctx context.Context, id model.ID, at time.Time) error
+	TouchAPIKey(ctx context.Context, id model.ID, at time.Time) error
+}
+
+// Store is everything the API touches. Named by the consumer, so no handler can
+// reach a backend-specific method by accident.
+type Store interface {
+	MonitorStore
+	IdentityStore
+}
 
 // Page sizes. The server caps rather than rejects, per the spec: a client
 // asking for 10,000 rows gets 100, not a 400.
@@ -41,21 +73,39 @@ type Server struct {
 	store    Store
 	notify   Notifier
 	registry *check.Registry
+	keeper   *secrets.Keeper
 	log      *slog.Logger
+	limiter  *loginLimiter
 
-	// insecureNoAuth is temporary scaffolding, not a feature. Authentication —
-	// first-run setup, sessions, TOTP, scoped API keys — is Phase 1 Month 1 work
-	// specified in the OpenAPI spec and not built yet, and an API that quietly
-	// accepted everything would be worse than one that says why it will not.
-	insecureNoAuth bool
+	// instanceName is the issuer shown in an authenticator app.
+	instanceName string
+	orgID        model.ID
 }
+
+// Notifier is the control plane's assignment publisher. The API calls it after
+// any write, which is what turns "the user created a monitor" into "the probe is
+// checking it" without a poll in between.
+type Notifier interface{ Notify() }
 
 // New returns a server.
-func New(s Store, notify Notifier, registry *check.Registry, log *slog.Logger, insecureNoAuth bool) *Server {
-	return &Server{store: s, notify: notify, registry: registry, log: log, insecureNoAuth: insecureNoAuth}
+func New(s Store, notify Notifier, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
+	if instanceName == "" {
+		instanceName = "Uptime Cairn"
+	}
+	return &Server{
+		store:        s,
+		notify:       notify,
+		registry:     registry,
+		keeper:       keeper,
+		log:          log,
+		limiter:      newLoginLimiter(),
+		instanceName: instanceName,
+		orgID:        model.SentinelOrgID,
+	}
 }
 
-// Handler builds the routing table.
+// Handler builds the routing table. Scopes come from each operation's
+// x-cairn-scopes in docs/api/openapi.yaml.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -65,15 +115,47 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.health)
 
-	api := http.NewServeMux()
-	api.HandleFunc("GET /api/v1/monitors", s.listMonitors)
-	api.HandleFunc("POST /api/v1/monitors", s.createMonitor)
-	api.HandleFunc("GET /api/v1/monitors/{monitorId}", s.getMonitor)
-	api.HandleFunc("DELETE /api/v1/monitors/{monitorId}", s.deleteMonitor)
-	api.HandleFunc("GET /api/v1/monitors/{monitorId}/heartbeats", s.listHeartbeats)
-	api.HandleFunc("/api/v1/", s.notImplemented)
+	// Unauthenticated by design, and each one says why in its handler: setup is
+	// available only until an administrator exists, and login is how a caller
+	// obtains a credential in the first place.
+	public := http.NewServeMux()
+	public.HandleFunc("GET /api/v1/setup", s.setupStatus)
+	public.HandleFunc("POST /api/v1/setup", s.completeSetup)
+	public.HandleFunc("POST /api/v1/auth/login", s.login)
 
-	mux.Handle("/api/v1/", s.authenticate(api))
+	authed := http.NewServeMux()
+	authed.HandleFunc("POST /api/v1/auth/logout", s.logout)
+	authed.HandleFunc("GET /api/v1/auth/session", s.describeSession)
+	authed.HandleFunc("POST /api/v1/auth/totp", s.enrolTOTP)
+	authed.HandleFunc("POST /api/v1/auth/totp/confirm", s.confirmTOTP)
+	authed.HandleFunc("DELETE /api/v1/auth/totp", s.disableTOTP)
+
+	authed.HandleFunc("GET /api/v1/api-keys", s.require(auth.ScopeAPIKeysRead, s.listAPIKeys))
+	authed.HandleFunc("POST /api/v1/api-keys", s.require(auth.ScopeAPIKeysWrite, s.createAPIKey))
+	authed.HandleFunc("GET /api/v1/api-keys/{apiKeyId}", s.require(auth.ScopeAPIKeysRead, s.getAPIKey))
+	authed.HandleFunc("PATCH /api/v1/api-keys/{apiKeyId}", s.require(auth.ScopeAPIKeysWrite, s.updateAPIKey))
+	authed.HandleFunc("DELETE /api/v1/api-keys/{apiKeyId}", s.require(auth.ScopeAPIKeysWrite, s.revokeAPIKey))
+
+	authed.HandleFunc("GET /api/v1/monitors", s.require(auth.ScopeMonitorsRead, s.listMonitors))
+	authed.HandleFunc("POST /api/v1/monitors", s.require(auth.ScopeMonitorsWrite, s.createMonitor))
+	authed.HandleFunc("GET /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsRead, s.getMonitor))
+	authed.HandleFunc("DELETE /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsWrite, s.deleteMonitor))
+	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/heartbeats", s.require(auth.ScopeHeartbeatsRead, s.listHeartbeats))
+
+	authed.HandleFunc("/api/v1/", s.notImplemented)
+
+	// One dispatcher: public routes first, everything else behind
+	// authentication. Registering both on one mux would make the difference a
+	// matter of pattern precedence, which is exactly the kind of thing that
+	// silently opens an endpoint during a refactor.
+	protected := s.authenticate(authed)
+	mux.Handle("/api/v1/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := public.Handler(r); pattern != "" {
+			public.ServeHTTP(w, r)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	}))
 
 	// Registered without a method: "GET /" would be more specific in method and
 	// less specific in path than "/api/v1/", which Go rejects as ambiguous.
@@ -100,20 +182,6 @@ func (s *Server) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeProblem(w, r, s.log, http.StatusNotImplemented, "not-implemented",
 		"Not implemented",
 		"This endpoint is in the API contract but not in this build. See docs/api/openapi.yaml and docs/plans/PHASE-1-PLAN.md.")
-}
-
-// authenticate is a placeholder that refuses rather than pretends.
-func (s *Server) authenticate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.insecureNoAuth {
-			next.ServeHTTP(w, r)
-			return
-		}
-		writeProblem(w, r, s.log, http.StatusUnauthorized, "authentication-unavailable",
-			"Authentication is not implemented in this build",
-			"Scoped API keys and session login are specified in docs/api/openapi.yaml and are the next thing to build. "+
-				"To run this build anyway, start it with --insecure-no-auth and do not expose the port.")
-	})
 }
 
 // logRequests is deliberately minimal: method, path, status, duration. Query

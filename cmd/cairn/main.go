@@ -39,8 +39,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&cfg.Mode, "mode", cfg.Mode, "solo (control plane + embedded probe) or probe (agent only)")
 	fs.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "directory holding the database and any credential file")
 	fs.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "address for the HTTP API and UI")
-	fs.BoolVar(&cfg.InsecureNoAuth, "insecure-no-auth", cfg.InsecureNoAuth,
-		"serve the API with no authentication (this build has none yet); do not expose the port")
+	fs.StringVar(&cfg.EncryptionKeyFile, "encryption-key-file", cfg.EncryptionKeyFile,
+		"root key for encryption at rest: 32 bytes, raw or base64 (default: generated into the data dir)")
+	fs.StringVar(&cfg.InstanceName, "instance-name", cfg.InstanceName,
+		"name shown in authenticator apps and on status pages")
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {
