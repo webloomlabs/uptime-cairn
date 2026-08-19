@@ -16,6 +16,7 @@ import (
 type (
 	MonitorWithState = store.MonitorWithState
 	Cursor           = store.Cursor
+	MonitorFilter    = store.MonitorFilter
 )
 
 // DecodeCursor is re-exported for callers already holding this package.
@@ -93,16 +94,42 @@ func (s *Store) GetMonitor(ctx context.Context, id model.ID) (MonitorWithState, 
 // next page. It asks for limit+1 rows and reports has_more from whether the
 // extra one came back — a count would cost a scan of the filtered set on every
 // page fetch, which is the cost cursor pagination exists to avoid.
-func (s *Store) ListMonitors(ctx context.Context, after *Cursor, limit int) ([]MonitorWithState, bool, error) {
+func (s *Store) ListMonitors(ctx context.Context, after *Cursor, limit int, filter MonitorFilter) ([]MonitorWithState, bool, error) {
 	query := `
 		SELECT ` + monitorColumns + `
-		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id`
-	args := []any{}
+		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
+		WHERE m.org_id = ?`
+	args := []any{model.SentinelOrgID[:]}
+
+	if len(filter.GroupIDs) > 0 {
+		// A group filter reaches its children too, for the same reason a group's
+		// monitor count does: filtering to a parent and getting nothing back
+		// while the child underneath holds every monitor is a filter nobody
+		// trusts twice.
+		list := placeholders(len(filter.GroupIDs))
+		query += ` AND (m.group_id IN (` + list + `)
+		            OR m.group_id IN (SELECT c.id FROM groups c WHERE c.parent_group_id IN (` + list + `)))`
+		for range 2 {
+			for _, id := range filter.GroupIDs {
+				args = append(args, id[:])
+			}
+		}
+	}
+	if len(filter.TagIDs) > 0 {
+		// OR within the parameter, per the spec: tag_id=a&tag_id=b matches
+		// monitors carrying either.
+		query += ` AND EXISTS (SELECT 1 FROM monitor_tags mt
+		            WHERE mt.monitor_id = m.id AND mt.tag_id IN (` + placeholders(len(filter.TagIDs)) + `))`
+		for _, id := range filter.TagIDs {
+			args = append(args, id[:])
+		}
+	}
+
 	if after != nil {
 		// Keyset, not OFFSET: (updated_at, id) strictly before the cursor. OFFSET
 		// re-scans everything it skips, which is exactly the behaviour that makes
 		// page 200 of 5,000 monitors slow.
-		query += ` WHERE (m.updated_at, m.id) < (?, ?)`
+		query += ` AND (m.updated_at, m.id) < (?, ?)`
 		args = append(args, millis(after.UpdatedAt), after.ID[:])
 	}
 	query += ` ORDER BY m.updated_at DESC, m.id DESC LIMIT ?`

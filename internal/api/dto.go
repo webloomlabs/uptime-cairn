@@ -28,6 +28,7 @@ type monitorJSON struct {
 	UpsideDown             bool            `json:"upside_down"`
 	GroupID                *string         `json:"group_id"`
 	ParentMonitorID        *string         `json:"parent_monitor_id"`
+	TagIDs                 []string        `json:"tag_ids"`
 	NotificationChannelIDs []string        `json:"notification_channel_ids"`
 	NotifyOnRecovery       bool            `json:"notify_on_recovery"`
 	Status                 string          `json:"status"`
@@ -79,6 +80,12 @@ type monitorWrite struct {
 	NotifyOnRecovery     *bool           `json:"notify_on_recovery"`
 
 	ParentMonitorID *string `json:"parent_monitor_id"`
+
+	// Absent or null leaves the monitor ungrouped and untagged. There is no
+	// PATCH on monitors yet, so the "unset an existing value" case these fields
+	// will eventually need does not arise.
+	GroupID *string   `json:"group_id"`
+	TagIDs  *[]string `json:"tag_ids"`
 
 	// NotificationChannelIDs is a pointer to a slice so the three cases stay
 	// distinguishable: absent means "attach the default channels", an empty
@@ -147,6 +154,14 @@ func toMonitorJSON(m store.MonitorWithState) monitorJSON {
 		out.ParentMonitorID = &id
 	}
 	out.NotificationChannelIDs = []string{}
+	out.TagIDs = []string{}
+	return out
+}
+
+// withTags fills in the tag list. Separate from toMonitorJSON because the list
+// path resolves every monitor's tags in one query rather than one per row.
+func withTags(out monitorJSON, ids []model.ID) monitorJSON {
+	out.TagIDs = idStrings(ids)
 	return out
 }
 
@@ -302,6 +317,91 @@ func toUptimeWindowJSON(b store.HistoryBucket, handling string, interval time.Du
 	if b.ResponseTimeCount > 0 {
 		avg := b.ResponseTimeSum / float64(b.ResponseTimeCount)
 		out.ResponseTimeAvg = &avg
+	}
+	return out
+}
+
+// groupJSON is Group in docs/api/openapi.yaml.
+type groupJSON struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Description   *string `json:"description"`
+	ParentGroupID *string `json:"parent_group_id"`
+	MonitorCount  int     `json:"monitor_count"`
+
+	// Status is the worst among the group's monitors, its children's included.
+	// Null when it holds none — which is a different statement from "up", and
+	// rendering it green would be the dashboard inventing health.
+	Status *string `json:"status"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type groupWrite struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+
+	// Raw, not **string, because encoding/json collapses an explicit null into
+	// an absent field for any pointer depth — and here the two mean different
+	// things: absent leaves the parent alone, null takes the group out to the
+	// top level. Nothing else in this file needs the distinction, so nothing
+	// else pays for it.
+	ParentGroupID json.RawMessage `json:"parent_group_id"`
+}
+
+func toGroupJSON(g model.GroupSummary) groupJSON {
+	out := groupJSON{
+		ID:           g.Group.ID.String(),
+		Name:         g.Group.Name,
+		MonitorCount: g.MonitorCount,
+		CreatedAt:    g.Group.CreatedAt,
+		UpdatedAt:    g.Group.UpdatedAt,
+	}
+	if g.Group.Description != "" {
+		out.Description = &g.Group.Description
+	}
+	if g.Group.ParentGroupID != nil {
+		id := g.Group.ParentGroupID.String()
+		out.ParentGroupID = &id
+	}
+	if g.Status != "" {
+		status := g.Status
+		out.Status = &status
+	}
+	return out
+}
+
+// tagJSON is Tag. slug is readOnly and derived from the name.
+type tagJSON struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Slug         string    `json:"slug"`
+	Color        string    `json:"color"`
+	Description  *string   `json:"description"`
+	MonitorCount int       `json:"monitor_count"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+type tagWrite struct {
+	Name        *string `json:"name"`
+	Color       *string `json:"color"`
+	Description *string `json:"description"`
+}
+
+func toTagJSON(t model.TagSummary) tagJSON {
+	out := tagJSON{
+		ID:           t.Tag.ID.String(),
+		Name:         t.Tag.Name,
+		Slug:         t.Tag.Slug,
+		Color:        t.Tag.Color,
+		MonitorCount: t.MonitorCount,
+		CreatedAt:    t.Tag.CreatedAt,
+		UpdatedAt:    t.Tag.UpdatedAt,
+	}
+	if t.Tag.Description != "" {
+		out.Description = &t.Tag.Description
 	}
 	return out
 }

@@ -20,7 +20,7 @@ import (
 type MonitorStore interface {
 	CreateMonitor(ctx context.Context, m model.Monitor) error
 	GetMonitor(ctx context.Context, id model.ID) (store.MonitorWithState, error)
-	ListMonitors(ctx context.Context, after *store.Cursor, limit int) ([]store.MonitorWithState, bool, error)
+	ListMonitors(ctx context.Context, after *store.Cursor, limit int, filter store.MonitorFilter) ([]store.MonitorWithState, bool, error)
 	DeleteMonitor(ctx context.Context, id model.ID) error
 	MonitorByPushToken(ctx context.Context, hash []byte) (model.Monitor, error)
 	ListHeartbeats(ctx context.Context, id model.ID, before *time.Time, limit int, importantOnly bool) ([]model.Heartbeat, bool, error)
@@ -70,6 +70,7 @@ type Store interface {
 	IdentityStore
 	ChannelStore
 	MaintenanceStore
+	TaxonomyStore
 }
 
 // Page sizes. The server caps rather than rejects, per the spec: a client
@@ -191,6 +192,18 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /api/v1/maintenance-windows/{maintenanceWindowId}", s.require(auth.ScopeMaintenanceRead, s.getMaintenanceWindow))
 	authed.HandleFunc("PATCH /api/v1/maintenance-windows/{maintenanceWindowId}", s.require(auth.ScopeMaintenanceWrite, s.updateMaintenanceWindow))
 	authed.HandleFunc("DELETE /api/v1/maintenance-windows/{maintenanceWindowId}", s.require(auth.ScopeMaintenanceWrite, s.deleteMaintenanceWindow))
+
+	authed.HandleFunc("GET /api/v1/groups", s.require(auth.ScopeGroupsRead, s.listGroups))
+	authed.HandleFunc("POST /api/v1/groups", s.require(auth.ScopeGroupsWrite, s.createGroup))
+	authed.HandleFunc("GET /api/v1/groups/{groupId}", s.require(auth.ScopeGroupsRead, s.getGroup))
+	authed.HandleFunc("PATCH /api/v1/groups/{groupId}", s.require(auth.ScopeGroupsWrite, s.updateGroup))
+	authed.HandleFunc("DELETE /api/v1/groups/{groupId}", s.require(auth.ScopeGroupsWrite, s.deleteGroup))
+
+	authed.HandleFunc("GET /api/v1/tags", s.require(auth.ScopeTagsRead, s.listTags))
+	authed.HandleFunc("POST /api/v1/tags", s.require(auth.ScopeTagsWrite, s.createTag))
+	authed.HandleFunc("GET /api/v1/tags/{tagId}", s.require(auth.ScopeTagsRead, s.getTag))
+	authed.HandleFunc("PATCH /api/v1/tags/{tagId}", s.require(auth.ScopeTagsWrite, s.updateTag))
+	authed.HandleFunc("DELETE /api/v1/tags/{tagId}", s.require(auth.ScopeTagsWrite, s.deleteTag))
 
 	authed.HandleFunc("/api/v1/", s.notImplemented)
 

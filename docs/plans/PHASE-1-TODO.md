@@ -3,7 +3,14 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** It pages appropriately. A maintenance window silences
+**Status: 2026-08-19.** Monitors can be organised. Groups nest one level and roll
+their worst status up from their children; tags carry a derived slug so two that
+look alike cannot both exist; the monitor list filters by either. That last part
+is what makes the maintenance windows built before them worth having — a window
+targeting a tag keeps covering monitors created after it, which was verified
+live by adding one mid-window.
+
+It pages appropriately. A maintenance window silences
 what it covers and annotates the history so the period can be excluded from an
 SLA figure; a dependency parent silences everything behind it without touching
 those monitors' own uptime. Those are deliberately different operations — one
@@ -43,17 +50,17 @@ by which "90% done" lasts three months.
 |---|---|---|
 | Engine & storage | 14 | 15 |
 | Monitor types | 9 | 10 |
-| Core monitoring features | 5 | 8 |
+| Core monitoring features | 7 | 8 |
 | Alerting & webhooks | 10 | 10 |
 | Status pages | 0 | 5 |
-| REST API | 13 | 22 |
+| REST API | 14 | 23 |
 | Kuma migration | 0 | 5 |
 | UI | 0 | 8 |
 | Security | 7 | 8 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 3 | 8 |
-| **Total** | **62** | **116** |
+| **Total** | **65** | **117** |
 
 ---
 
@@ -94,8 +101,8 @@ by which "90% done" lasts three months.
 
 - [x] Retries, timeouts, intervals down to 20s
 - [x] Upside-down mode
-- [ ] Groups — tables exist, no API or engine behaviour
-- [ ] Tags — tables exist, no API or engine behaviour
+- [x] Groups — one level of nesting, and a parent reports the worst status among its monitors *and its children's*, because a parent group showing green during an outage underneath it is the worst thing a monitoring tool can do. Deleting a group ungroups its monitors and promotes its child groups; it never deletes what it contained
+- [x] Tags — the slug is derived from the name rather than supplied, so two tags that render identically in a list cannot both exist; a name colliding on slug is a `409` naming the slug
 - [x] Dependency-aware suppression — transitive up the chain, and a parent under maintenance suppresses its children as surely as a parent that is down: taking the router down for a firmware upgrade is the most known problem there is. The child's own heartbeat still records the real outage, so its uptime figure is unaffected; only the page is withheld
 - [x] Maintenance windows: single, daily, weekly, monthly, and cron, evaluated in the window's own IANA zone with the zone database embedded in the binary — "02:00 every Sunday" survives a daylight-saving transition still meaning 02:00. Targets resolve by query through monitors, groups, and tags, so a window covering a tag keeps covering monitors added later. **Groups and tags have tables and no API**, so only monitor targets can be created today; referencing a group or tag is a validation error naming the field rather than a foreign-key failure
 - [ ] Certificate and domain expiry surfaced as upcoming-expiry data
@@ -134,14 +141,15 @@ by which "90% done" lasts three months.
 - [x] RFC 9457 problem responses with stable `type` URIs
 - [ ] `PATCH /api/v1/monitors/{id}`, pause, resume, check-now, bulk operations
 - [ ] `GET /api/v1/monitors/membership` — ADR-004's change signal and filtered count
-- [ ] Monitor list filters: status, type, tag, group, enabled, search
+- [ ] Monitor list filters — `tag_id` and `group_id` are done, including the spec's rule that repeated values OR within a parameter and AND across them, and a group filter reaching its children. `status`, `type`, `enabled`, and `search` are not; the filter now has a struct to live in, so each is a clause rather than a signature change
 - [ ] `include=last_heartbeat|uptime|tags|group`
 - [x] `/history` and `/uptime` — auto resolution, coarsened rather than refused when a request would return too many buckets, and read from raw rather than the tiers whenever raw covers the range
 - [x] First-run setup, login, logout, session description
 - [x] TOTP enrolment, confirmation, and removal
 - [x] Notification channels — CRUD, test-fire, template preview, and the published variable catalogue
 - [x] Maintenance windows — CRUD, with a schedule that will never fire refused at write time rather than discovered by its silence
-- [ ] Groups, tags, status pages, incidents, settings — the rest of the specified surface, currently answering `501`
+- [x] Groups and tags — CRUD, monitor counts, group status rollup, and assignment from the monitor write path
+- [ ] Status pages, incidents, settings — the rest of the specified surface, currently answering `501`
 - [ ] Scoped API keys: permissions, expiry, last-used, revocation
 - [ ] Outbound webhooks for every state change
 - [ ] Prometheus `/metrics` and OpenTelemetry export
@@ -215,20 +223,20 @@ by which "90% done" lasts three months.
 
 ## What to do next, and why in this order
 
-1. **Groups and tags.** They are now the thing blocking two features rather than
-   one: maintenance windows can resolve targets through them and there is no way
-   to create one, and the monitor list still cannot be filtered by either. Both
-   are small tables with an obvious API.
-2. **The load-test harness against the real engine.** The 5,000-monitor claim is
+1. **The load-test harness against the real engine.** The 5,000-monitor claim is
    the project's central promise, and every week it goes unmeasured against real
    code is a week the number is an assumption. It now has a third thing to
    measure: a partition that marks several thousand monitors down within one
    scheduler tick is precisely the burst the delivery queue is sized against, and
-   that size is currently an argument rather than a measurement.
-3. **`/monitors/{id}/certificate` and the observation writers behind it.** The
+   that size is currently an argument rather than a measurement. The list view is
+   also the endpoint the CI gate covers, and it has just gained joins.
+2. **`/monitors/{id}/certificate` and the observation writers behind it.** The
    TLS and domain checkers see everything that endpoint reports and store none of
    it; migration `0003` created the tables in the same pass, and
    `monitor.certificate_expiring` is an event type with nothing raising it.
+3. **The rest of the monitor list filters.** `status`, `type`, `enabled`, and
+   `search` are four clauses in a struct that now exists, and they are what the
+   dashboard's list view will ask for on its first day.
 
 The UI comes after those deliberately: the plan puts it in Month 3, and an API
 that is not finished is a UI that gets rewritten.

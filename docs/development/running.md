@@ -568,6 +568,111 @@ space of its own page — but it applies from that connection onward. A credenti
 that was ever stored in plaintext should be rotated. [Data model §12.7](../data-model/README.md)
 is the list of things encryption at rest does not do, and this belongs on it.
 
+## Groups and tags
+
+Two organisational primitives, and they are deliberately not the same idea. A
+monitor belongs to at most one **group**, which is where it lives; it carries any
+number of **tags**, which is what it is. Collapsing them into one mechanism costs
+you the ability to ask both questions — "show me the EU stack" and "show me
+everything customer-facing" are different queries over the same monitors.
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/groups \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"name": "Production"}'
+
+curl -sS -X POST localhost:3000/api/v1/tags \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"name": "Edge / Customer Facing", "color": "#c026d3"}'
+```
+
+Then hang monitors off them with `group_id` and `tag_ids` on the monitor write.
+
+### A group reports what is worst underneath it
+
+```
+Production / EU      monitors=1  status=pending  parent=yes
+Production           monitors=2  status=down     parent=-
+```
+
+`Production` holds one monitor directly and one through its child, and its status
+is the worse of the two. A parent group showing green while the child underneath
+it is down would be a dashboard that goes clear during an outage, which is the
+single worst thing a monitoring tool can do — so both the count and the status
+reach into children.
+
+An empty group reports `"status": null`. Null is a different statement from `up`,
+and rendering it green would be the dashboard inventing health.
+
+Groups nest **one level** in this release, enforced by two rules that also make a
+cycle impossible: a parent must itself have no parent, and a group that already
+has children cannot be given one.
+
+```json
+{"code": "too_deep",
+ "message": "\"Production / EU\" is already nested, and groups nest one level deep in this release"}
+```
+
+Deleting a group ungroups its monitors and promotes its children to the top
+level. Deleting a container never deletes what it contained.
+
+### A tag's slug is derived, not supplied
+
+```json
+{"name": "Edge / Customer Facing", "slug": "edge-customer-facing", "color": "#c026d3"}
+```
+
+The slug is lower-case ASCII letters, digits, and single hyphens, so it never
+needs percent-encoding in a URL. Everything else becomes a separator, which means
+`Edge / Customer Facing` and `edge  customer facing` are the same tag — and that
+is the point, because two tags that render identically in a list are two tags
+nobody can tell apart. The second one is a `409`:
+
+```json
+{"status": 409, "title": "Tag name already in use",
+ "detail": "another tag already uses the slug \"edge-customer-facing\"; tag names must be distinguishable once reduced to a URL-safe form"}
+```
+
+A `409` rather than a `422` because the request is well-formed and the current
+state is the problem: the caller resolves it by choosing another name, not by
+correcting a field.
+
+A name written entirely in another script leaves nothing behind, and that is a
+`422` saying so rather than an identifier the user did not choose. `color`
+defaults to a neutral grey, so a tag created without one does not claim a meaning
+it was not given.
+
+### Filtering
+
+```
+(none)                       3 monitors
+?group_id=<production>       2 monitors   ← reaches the child group
+?group_id=<production/eu>    1 monitor
+?tag_id=<database>           1 monitor
+?tag_id=<database>&tag_id=<edge>   2 monitors   ← OR within the parameter
+?group_id=<production/eu>&tag_id=<edge>  1 monitor   ← AND across them
+```
+
+Repeated values combine with OR within a parameter and AND across parameters,
+per the spec. A group filter reaches its children for the same reason the count
+does: filtering to a parent and getting nothing back while the child holds every
+monitor is a filter nobody trusts twice.
+
+`status`, `type`, `enabled`, and `search` are specified and **not implemented**.
+
+### What this unblocks
+
+A maintenance window can now target a tag rather than a list of monitor ids:
+
+```json
+{"targets": {"tag_ids": ["<edge>"]}}
+```
+
+Live, that window put both tagged monitors into maintenance and left the untagged
+one alone — and a monitor created **after** the window opened, carrying the tag,
+was swept in on the next pass. That is why targets resolve by query at evaluation
+time and are never snapshotted into a list of ids at creation.
+
 ## Maintenance windows
 
 Planned downtime that pages somebody is not planned downtime.
@@ -942,6 +1047,10 @@ through `ps`.
 | `POST/PATCH/DELETE /api/v1/notification-channels...`, `.../{id}/test` | `notifications:write` |
 | `GET /api/v1/maintenance-windows`, `.../{id}` | `maintenance:read` |
 | `POST/PATCH/DELETE /api/v1/maintenance-windows...` | `maintenance:write` |
+| `GET /api/v1/groups`, `.../{id}` | `groups:read` |
+| `POST/PATCH/DELETE /api/v1/groups...` | `groups:write` |
+| `GET /api/v1/tags`, `.../{id}` | `tags:read` |
+| `POST/PATCH/DELETE /api/v1/tags...` | `tags:write` |
 | `GET/POST /api/v1/push/{token}` | None — the token is the credential |
 | Anything else under `/api/v1/` | `501`, naming the spec — the endpoint exists in the contract, not in this build |
 
@@ -982,6 +1091,14 @@ half a config — an HTTP monitor missing its bearer token would authenticate as
 nobody and report the target down, which is a lie about the target. The
 re-sealing pass has its own tests, because a migration path nobody runs twice is
 a migration path nobody has tested.
+
+The group and tag tests are mostly about the two places these can be quietly
+wrong. One is the slug: a table of names that must collapse to the same
+identifier, because a lookalike pair that both save is a pair nobody can tell
+apart afterwards. The other is the status rollup, where the failure is a parent
+group reading green during an outage in the child underneath it — the assertion
+is that the count and the status both reach into children, and that an empty
+group reports null rather than up.
 
 The maintenance tests are mostly about the schedule, because a recurrence rule
 is where being approximately right is worst: a window that fires an hour late
@@ -1030,9 +1147,8 @@ an aeroplane is a test that gets deleted.
 - **`/monitors/{id}/certificate`.** The TLS and domain-expiry checkers observe
   everything it reports and store none of it; migration `0003` created the tables
   waiting for them.
-- **Groups and tags.** Tables, no API. Maintenance windows can already resolve
-  targets through both, so a window covering "everything tagged production" is
-  one endpoint away from working; today only monitor targets can be created.
+- **The rest of the monitor list filters.** `tag_id` and `group_id` work;
+  `status`, `type`, `enabled`, and `search` are specified and not built.
 - **Instance-wide SMTP settings, and everything else under `/settings`.** See the
   email caveat above.
 - **Status pages, the UI, the importer.** Phase 1 Months 2–4. Migration `0003`

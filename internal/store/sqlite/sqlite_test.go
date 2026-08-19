@@ -131,7 +131,7 @@ func TestListMonitorsPaginates(t *testing.T) {
 		if pages > total {
 			t.Fatal("pagination did not terminate")
 		}
-		batch, hasMore, err := s.ListMonitors(t.Context(), cursor, 3)
+		batch, hasMore, err := s.ListMonitors(t.Context(), cursor, 3, MonitorFilter{})
 		if err != nil {
 			t.Fatalf("list: %v", err)
 		}

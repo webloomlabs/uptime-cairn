@@ -18,20 +18,16 @@ import (
 )
 
 func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
-	limit := s.limit(r)
-
-	var after *store.Cursor
-	if raw := r.URL.Query().Get("cursor"); raw != "" {
-		c, err := store.DecodeCursor(raw)
-		if err != nil {
-			writeProblem(w, r, s.log, http.StatusBadRequest, "malformed-cursor",
-				"Malformed cursor", "The cursor must be one returned by a previous page of this collection.")
-			return
-		}
-		after = &c
+	after, ok := s.cursor(w, r)
+	if !ok {
+		return
+	}
+	filter, ok := s.monitorFilter(w, r)
+	if !ok {
+		return
 	}
 
-	monitors, hasMore, err := s.store.ListMonitors(r.Context(), after, limit)
+	monitors, hasMore, err := s.store.ListMonitors(r.Context(), after, s.limit(r), filter)
 	if err != nil {
 		s.internal(w, r, "list monitors", err)
 		return
@@ -46,6 +42,11 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, "list channel assignments", err)
 		return
 	}
+	tags, err := s.store.TagIDsForMonitors(r.Context(), ids)
+	if err != nil {
+		s.internal(w, r, "list monitor tags", err)
+		return
+	}
 
 	body := page[monitorJSON]{Data: []monitorJSON{}, Pagination: pagination{HasMore: hasMore}}
 	for _, m := range monitors {
@@ -54,7 +55,8 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 			s.internal(w, r, "render monitor", err)
 			return
 		}
-		body.Data = append(body.Data, withChannels(rendered, assignments[m.Monitor.ID]))
+		body.Data = append(body.Data,
+			withTags(withChannels(rendered, assignments[m.Monitor.ID]), tags[m.Monitor.ID]))
 	}
 	if hasMore && len(monitors) > 0 {
 		last := monitors[len(monitors)-1]
@@ -80,6 +82,10 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 	channelIDs, channelProblems := s.resolveChannels(r.Context(), body.NotificationChannelIDs)
 	problems = append(problems, channelProblems...)
 	problems = append(problems, s.resolveParent(r.Context(), &monitor, body.ParentMonitorID)...)
+	problems = append(problems, s.resolveGroup(r.Context(), &monitor, body.GroupID)...)
+
+	tagIDs, tagProblems := s.resolveTags(r.Context(), body.TagIDs)
+	problems = append(problems, tagProblems...)
 
 	if len(problems) > 0 {
 		writeProblem(w, r, s.log, http.StatusUnprocessableEntity, "validation-failed",
@@ -124,6 +130,12 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if len(tagIDs) > 0 {
+		if err := s.store.SetMonitorTags(r.Context(), monitor.ID, monitor.OrgID, tagIDs); err != nil {
+			s.internal(w, r, "assign tags", err)
+			return
+		}
+	}
 
 	// Tell the control plane immediately. The monitor begins checking on the
 	// next scheduler tick, not synchronously with this call — which is what the
@@ -144,7 +156,7 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/api/v1/monitors/"+monitor.ID.String())
 	writeJSON(w, s.log, http.StatusCreated,
-		withPushToken(withChannels(rendered, channelIDs), pushToken, pushURL(r, pushToken)))
+		withPushToken(withTags(withChannels(rendered, channelIDs), tagIDs), pushToken, pushURL(r, pushToken)))
 }
 
 func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
@@ -167,13 +179,18 @@ func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, "get channel assignments", err)
 		return
 	}
+	tagIDs, err := s.store.TagIDsForMonitor(r.Context(), id)
+	if err != nil {
+		s.internal(w, r, "get monitor tags", err)
+		return
+	}
 
 	rendered, err := s.renderMonitor(m)
 	if err != nil {
 		s.internal(w, r, "render monitor", err)
 		return
 	}
-	writeJSON(w, s.log, http.StatusOK, withChannels(rendered, channelIDs))
+	writeJSON(w, s.log, http.StatusOK, withTags(withChannels(rendered, channelIDs), tagIDs))
 }
 
 func (s *Server) deleteMonitor(w http.ResponseWriter, r *http.Request) {

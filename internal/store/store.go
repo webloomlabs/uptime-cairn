@@ -41,6 +41,13 @@ import (
 // exists to prevent.
 var ErrNotFound = errors.New("not found")
 
+// ErrConflict is the other one: the write is well-formed and refers to real
+// things, and the current state will not have it — a tag slug already taken, a
+// referenced row still in use. Distinct from ErrNotFound because the caller's
+// answer is different: a 409 asks the user to choose another name, a 404 tells
+// them the thing is not there.
+var ErrConflict = errors.New("conflict")
+
 // HeartbeatStore owns the hottest write path in the system.
 //
 // Batch, not single-row, because the storage layer's primary operation is a
@@ -81,6 +88,26 @@ type ChannelWithCount struct {
 	Channel      model.NotificationChannel
 	MonitorCount int
 }
+
+// MonitorFilter narrows a monitor listing. Every field is optional; the zero
+// value lists everything.
+//
+// Only the two taxonomy filters are here so far. status, type, enabled, and
+// search are specified and not implemented, and they belong in this struct when
+// they are — the shape is the point, so that adding one is a clause rather than
+// a signature change.
+type MonitorFilter struct {
+	// GroupIDs match monitors in any of these groups, or in a child of one.
+	// A parent group filtering to nothing while its children hold the monitors
+	// would be the same lie the monitor count avoids.
+	GroupIDs []model.ID
+
+	// TagIDs match monitors carrying any of these tags.
+	TagIDs []model.ID
+}
+
+// Empty reports whether the filter narrows anything.
+func (f MonitorFilter) Empty() bool { return len(f.GroupIDs)+len(f.TagIDs) == 0 }
 
 // ChannelFilter narrows a channel listing. Every field is optional; the zero
 // value lists everything.
