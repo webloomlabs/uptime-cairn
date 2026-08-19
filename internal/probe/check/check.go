@@ -122,6 +122,22 @@ func (r *Registry) Types() []string {
 	return types
 }
 
+// SecretFields returns the config paths a monitor type keeps encrypted, or nil
+// when it has none. Asking the registry rather than the checker keeps the type
+// switch in one place: a caller holding a monitor row has a type string, not a
+// Checker.
+func (r *Registry) SecretFields(monitorType string) []string {
+	checker, ok := r.Lookup(monitorType)
+	if !ok {
+		return nil
+	}
+	confidential, ok := checker.(Confidential)
+	if !ok {
+		return nil
+	}
+	return confidential.SecretFields()
+}
+
 // Availability is an optional interface a Checker may implement when whether it
 // can run is a property of the host rather than of the build.
 //
@@ -155,4 +171,28 @@ type Targeter interface {
 	// domain, a container name. Never a credential, because it is stored
 	// unencrypted, indexed, and rendered into alerts.
 	Target(config []byte) string
+}
+
+// Confidential is an optional interface a Checker may implement when its config
+// carries values that must not be stored in plaintext.
+//
+// It is the checker's job because the checker owns the config schema: HTTP knows
+// that a bearer token lives at auth.token, and nothing else should have to. A
+// second list of field names in the storage layer would be a list that goes
+// stale the first time a monitor type gains a credential — and it would go stale
+// silently, because the symptom is a secret sitting in the clear rather than an
+// error.
+//
+// A checker that does not implement this has no secrets in its config, which is
+// true of TCP, ICMP, DNS, TLS expiry, and domain expiry: every one of them
+// checks something anonymously.
+type Confidential interface {
+	// SecretFields returns dotted paths from the root of the config object —
+	// "auth.password", "tls.client_key", "metadata". They are removed from the
+	// stored config, sealed into their own column, and redacted on read.
+	//
+	// The list must match the writeOnly properties of this type's config schema
+	// in docs/api/openapi.yaml. That correspondence is asserted by a test rather
+	// than left to review.
+	SecretFields() []string
 }

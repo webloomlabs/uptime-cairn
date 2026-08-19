@@ -3,7 +3,13 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** It alerts. Thirteen channel types deliver, every one of
+**Status: 2026-08-19.** Nothing in the database is a credential in the clear. The
+last plaintext store — HTTP auth, Docker client keys, gRPC metadata sitting in
+`monitors.config` — is closed, sealed through the same envelope the TOTP secret
+and the notification channels use, and a pre-existing database is migrated on
+start rather than left behind.
+
+It alerts. Thirteen channel types deliver, every one of
 them test-fireable, with credentials encrypted at rest and redacted on read, and
 webhook payloads templated against a variable catalogue the API publishes so the
 UI's autocomplete cannot drift from the renderer. Failures are recorded, retried
@@ -35,11 +41,11 @@ by which "90% done" lasts three months.
 | REST API | 12 | 21 |
 | Kuma migration | 0 | 5 |
 | UI | 0 | 8 |
-| Security | 6 | 8 |
+| Security | 7 | 8 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 3 | 8 |
-| **Total** | **57** | **115** |
+| **Total** | **58** | **115** |
 
 ---
 
@@ -55,6 +61,7 @@ by which "90% done" lasts three months.
 - [x] Idempotent heartbeat batch writes
 - [x] Control-plane state machine: consecutive failures, pending/up/down, `important` on transitions
 - [x] Migration `0002`: users, sessions, API keys, recovery codes, settings, encryption keys
+- [x] Migration `0004`: the encrypted half of a monitor's configuration, with the plaintext half left as queryable JSON
 - [x] Migration `0003`: notification channels and deliveries, certificate and domain observations, maintenance windows and targets, incidents and updates, status pages and subscribers, outbound webhooks and deliveries, audit log, imports, plus the uptime cache and purge queue the jobs below need
 - [x] Rollup pipeline: raw → 1m → 5m → hourly → daily, each tier from the tier below, buckets epoch-aligned and half-open, watermark derived from the data, every write an idempotent full recount
 - [x] Retention enforcement per tier, with disk actually reclaimed on SQLite — `auto_vacuum=INCREMENTAL` had never actually been applied; the PRAGMA in `0001` is a no-op inside the migration runner's transaction, so it now lives in the connection DSN, and a test asserts the file shrinks
@@ -158,7 +165,7 @@ by which "90% done" lasts three months.
 - [x] TOTP two-factor, with single-use recovery codes
 - [x] API-key authentication with scope enforcement and no privilege escalation
 - [x] Encryption at rest: AES-256-GCM envelopes, AAD-bound rows, wrapped data keys, root-key precedence — carrying the TOTP secret today
-- [ ] Monitor credentials encrypted through the same layer — **notification credentials now are.** A channel's secrets are split out of `config` at the storage boundary and sealed with AAD binding them to their row, so a read path cannot serialise what is not there; verified by grepping the database file. HTTP bearer tokens and basic-auth passwords, Docker client keys, and gRPC metadata still reach `monitors.config` in plaintext
+- [x] Monitor and notification credentials encrypted through the same layer — HTTP basic and bearer auth, Docker client TLS material, gRPC metadata, and every channel's secrets are split out of `config` at the storage boundary and sealed with AAD binding them to their row, so a read path cannot serialise what is not there. Which fields are secret is declared by the checker that owns the config schema, and a test asserts that declaration against the `writeOnly` properties of the frozen spec. Migration `0004` adds the column; monitors written before it are re-sealed on start, verified live against a database that predated it
 - [ ] `SECURITY.md`, dependency and container scanning in CI
 
 ## Deployment & operations
@@ -199,23 +206,17 @@ by which "90% done" lasts three months.
 
 ## What to do next, and why in this order
 
-1. **Monitor credentials through the encryption layer.** Nine monitor types
-   accept secrets in their config — bearer tokens, basic-auth passwords, Docker
-   client keys, gRPC metadata — and every one of them is stored in plaintext. The
-   layer that would fix it now carries the TOTP secret *and* every notification
-   channel's credentials, so the pattern to copy is written and tested; this is
-   the last plaintext credential store in the product.
-2. **Maintenance windows and dependency suppression.** Both suppress alerts, both
+1. **Maintenance windows and dependency suppression.** Both suppress alerts, both
    have their tables, and neither exists in ingest. Now that alerting works, they
    are the difference between "it pages me" and "it pages me appropriately" —
    a router going down should page once, not forty times.
-3. **The load-test harness against the real engine.** The 5,000-monitor claim is
+2. **The load-test harness against the real engine.** The 5,000-monitor claim is
    the project's central promise, and every week it goes unmeasured against real
    code is a week the number is an assumption. It now has a third thing to
    measure: a partition that marks several thousand monitors down within one
    scheduler tick is precisely the burst the delivery queue is sized against, and
    that size is currently an argument rather than a measurement.
-4. **`/monitors/{id}/certificate` and the observation writers behind it.** The
+3. **`/monitors/{id}/certificate` and the observation writers behind it.** The
    TLS and domain checkers see everything that endpoint reports and store none of
    it; migration `0003` created the tables in the same pass, and
    `monitor.certificate_expiring` is an event type with nothing raising it.

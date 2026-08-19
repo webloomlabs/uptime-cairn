@@ -32,7 +32,7 @@ func newAlertingServer(t *testing.T, monitor model.Monitor) (*Server, *fakeStore
 	}
 	alerts := &recordingAlerter{}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, NewPublisher(), alerts, log, model.EmbeddedProbeID, model.SentinelOrgID), store, alerts
+	return New(store, NewPublisher(), alerts, nil, log, model.EmbeddedProbeID, model.SentinelOrgID), store, alerts
 }
 
 func monitorFor(t *testing.T) model.Monitor {

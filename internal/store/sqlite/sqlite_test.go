@@ -264,3 +264,24 @@ func TestStatusUptimeEligibility(t *testing.T) {
 		}
 	}
 }
+
+// secure_delete is asserted rather than assumed, because it is a connection
+// pragma: a DSN typo would leave it off and nothing else would notice.
+//
+// FAST (2), not ON (1). ON zeroes freed content everywhere, and the hot path
+// here deletes millions of heartbeat rows a day under retention; FAST zeroes
+// only what is inside a page being rewritten anyway, which is where an
+// overwritten credential lands.
+func TestSecureDeleteIsFast(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+
+	var mode int
+	if err := s.db.QueryRowContext(t.Context(), `PRAGMA secure_delete`).Scan(&mode); err != nil {
+		t.Fatalf("read secure_delete: %v", err)
+	}
+	if mode != 2 {
+		t.Errorf("secure_delete = %d, want 2 (FAST)", mode)
+	}
+}

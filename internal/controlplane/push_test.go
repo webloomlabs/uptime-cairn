@@ -37,7 +37,7 @@ func pushServer(t *testing.T, config string, retries int, lastCheck *time.Time) 
 	store.state.OrgID = store.monitor.OrgID
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, NewPublisher(), &recordingAlerter{}, log, model.EmbeddedProbeID, model.SentinelOrgID), store
+	return New(store, NewPublisher(), &recordingAlerter{}, nil, log, model.EmbeddedProbeID, model.SentinelOrgID), store
 }
 
 func TestPushDeadline(t *testing.T) {

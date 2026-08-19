@@ -65,7 +65,7 @@ func newTestServer(retries int) (*Server, *fakeStore) {
 		state:   model.MonitorState{MonitorID: id, OrgID: model.SentinelOrgID, Status: model.MonitorStatusPending},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, NewPublisher(), &recordingAlerter{}, log, model.EmbeddedProbeID, model.SentinelOrgID), store
+	return New(store, NewPublisher(), &recordingAlerter{}, nil, log, model.EmbeddedProbeID, model.SentinelOrgID), store
 }
 
 // recordingAlerter captures what ingest decided to tell the world, which is the

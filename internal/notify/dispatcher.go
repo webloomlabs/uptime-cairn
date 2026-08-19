@@ -38,21 +38,15 @@ type ChannelStore interface {
 	MarkChannelResult(ctx context.Context, id model.ID, at time.Time, deliveryError string) error
 }
 
-// Vault seals and opens a channel's secrets, binding each blob to the row it
-// belongs to. One place holds the AAD, so a ciphertext moved between rows fails
-// to open rather than being read against the wrong channel (data model §12.2).
-type Vault struct{ keeper *secrets.Keeper }
+// Vault seals and opens a channel's secrets. The AAD binding each blob to its
+// row lives in secrets.Vault, which the monitor-credential path uses too — one
+// implementation, so the two cannot drift into binding different things (data
+// model §12.2).
+type Vault struct{ inner *secrets.Vault }
 
 // NewVault wraps a keeper.
-func NewVault(keeper *secrets.Keeper) *Vault { return &Vault{keeper: keeper} }
-
-func (v *Vault) aad(orgID, channelID model.ID) secrets.AAD {
-	return secrets.AAD{
-		OrgID:  orgID[:],
-		Table:  "notification_channels",
-		Column: "secrets",
-		RowID:  channelID[:],
-	}
+func NewVault(keeper *secrets.Keeper) *Vault {
+	return &Vault{inner: secrets.NewVault(keeper, "notification_channels", "secrets")}
 }
 
 // Seal encrypts the secret half of a channel's configuration. A channel with no
@@ -66,18 +60,19 @@ func (v *Vault) Seal(orgID, channelID model.ID, secret map[string]any) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("encode channel secrets: %w", err)
 	}
-	return v.keeper.Encrypt(plaintext, v.aad(orgID, channelID))
+	return v.inner.Seal(orgID[:], channelID[:], plaintext)
 }
 
 // Open decrypts it.
 func (v *Vault) Open(orgID, channelID model.ID, envelope []byte) (map[string]any, error) {
-	if len(envelope) == 0 {
-		return map[string]any{}, nil
-	}
-	plaintext, err := v.keeper.Decrypt(envelope, v.aad(orgID, channelID))
+	plaintext, err := v.inner.Open(orgID[:], channelID[:], envelope)
 	if err != nil {
 		return nil, err
 	}
+	if len(plaintext) == 0 {
+		return map[string]any{}, nil
+	}
+
 	var out map[string]any
 	if err := json.Unmarshal(plaintext, &out); err != nil {
 		return nil, fmt.Errorf("decode channel secrets: %w", err)

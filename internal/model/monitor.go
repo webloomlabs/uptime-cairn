@@ -34,12 +34,21 @@ type Monitor struct {
 	// would make the monitor's own history incomparable with itself.
 	Type string
 
-	// Config is the type-specific JSON, stored and transmitted verbatim. The
-	// probe treats it as opaque bytes; only the checker for Type parses it.
+	// Config is the type-specific JSON. The probe treats it as opaque bytes;
+	// only the checker for Type parses it.
 	//
-	// It carries secrets. Everything in data model §12 belonging to this monitor
-	// is here in plaintext once decrypted, which is why it is never logged.
+	// As stored, it holds the non-secret half only: the credentials named by the
+	// checker's SecretFields have been moved into ConfigSecrets. In memory it may
+	// be either half or the whole thing, depending on where in the path it is —
+	// merged in the API while it is validated, merged again on the way to the
+	// probe that will use it, and never logged in either state.
 	Config json.RawMessage
+
+	// ConfigSecrets is the AES-256-GCM envelope holding the credentials that were
+	// taken out of Config — HTTP basic and bearer auth, gRPC metadata, Docker
+	// client TLS material (data model §12.1). Nil when the type has none, or when
+	// the user set none.
+	ConfigSecrets []byte
 
 	// Target is promoted out of Config so "what else points at this host?" is an
 	// indexed query rather than a JSON scan across 5,000 rows.

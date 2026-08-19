@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"time"
@@ -26,6 +27,18 @@ type Store interface {
 	GetState(ctx context.Context, id model.ID) (model.MonitorState, error)
 	SaveState(ctx context.Context, state model.MonitorState) error
 	WriteBatch(ctx context.Context, beats []model.Heartbeat) error
+}
+
+// ConfigOpener decrypts the credential half of a monitor's configuration.
+//
+// The control plane is the only place other than the API that ever holds a
+// monitor's config whole, and it holds it for exactly as long as it takes to put
+// an assignment on the wire. That is the arrangement data model §12.1 describes
+// as "decrypted only at delivery": at rest the credentials are an opaque blob,
+// in flight they are protected by the transport the probe dialled — a bufconn
+// inside this process in solo mode, mutual TLS in Phase 4.
+type ConfigOpener interface {
+	Open(orgID, rowID, envelope []byte) ([]byte, error)
 }
 
 // Alerter is where state changes go. Declared here by the consumer, and
@@ -58,16 +71,19 @@ type Server struct {
 	store   Store
 	pub     *Publisher
 	alerts  Alerter
+	configs ConfigOpener
 	log     *slog.Logger
 	probeID model.ID
 	orgID   model.ID
 }
 
-// New returns a control-plane server bound to one store. alerts may be nil, in
-// which case transitions are recorded and nothing is sent — which is what a test
-// that is not exercising delivery wants.
-func New(store Store, pub *Publisher, alerts Alerter, log *slog.Logger, probeID, orgID model.ID) *Server {
-	return &Server{store: store, pub: pub, alerts: alerts, log: log, probeID: probeID, orgID: orgID}
+// New returns a control-plane server bound to one store.
+//
+// alerts may be nil, in which case transitions are recorded and nothing is sent.
+// configs may be nil, in which case a monitor's stored config is passed through
+// as-is; both are what a test that is not exercising those paths wants.
+func New(store Store, pub *Publisher, alerts Alerter, configs ConfigOpener, log *slog.Logger, probeID, orgID model.ID) *Server {
+	return &Server{store: store, pub: pub, alerts: alerts, configs: configs, log: log, probeID: probeID, orgID: orgID}
 }
 
 // raise publishes the events a batch produced, after the batch is durable.
@@ -251,20 +267,36 @@ func (s *Server) assignments(ctx context.Context) (map[string]*probev1.Assignmen
 
 	out := make(map[string]*probev1.Assignment, len(monitors))
 	for _, m := range monitors {
-		out[m.ID.String()] = toAssignment(m)
+		assignment, err := s.toAssignment(m)
+		if err != nil {
+			// Withheld rather than sent with half a config. An HTTP monitor
+			// missing its bearer token would authenticate as nobody and report
+			// the target down, which is a lie about the target; leaving it
+			// unassigned is at least visibly wrong.
+			s.log.Error("cannot decrypt monitor credentials, monitor withheld from the probe",
+				"monitor", m.ID.String(), "name", m.Name, "error", err)
+			continue
+		}
+		out[m.ID.String()] = assignment
 	}
 	return out, rev, nil
 }
 
-func toAssignment(m model.Monitor) *probev1.Assignment {
+func (s *Server) toAssignment(m model.Monitor) (*probev1.Assignment, error) {
 	retryInterval := m.RetryInterval
 	if retryInterval <= 0 {
 		retryInterval = m.Interval
 	}
+
+	config, err := s.wholeConfig(m)
+	if err != nil {
+		return nil, err
+	}
+
 	return &probev1.Assignment{
 		MonitorId:            append([]byte(nil), m.ID[:]...),
 		Type:                 m.Type,
-		Config:               append([]byte(nil), m.Config...),
+		Config:               config,
 		IntervalSeconds:      uint32(m.Interval.Seconds()),
 		TimeoutSeconds:       uint32(m.Timeout.Seconds()),
 		Retries:              uint32(m.Retries),
@@ -275,7 +307,32 @@ func toAssignment(m model.Monitor) *probev1.Assignment {
 		// nothing to compute and nothing to store, and the probe only ever
 		// compares it for equality.
 		ConfigVersion: strconv.FormatInt(m.UpdatedAt.UnixMilli(), 10),
+	}, nil
+}
+
+// wholeConfig merges the encrypted credentials back into the stored config.
+//
+// No field list is needed: the sealed half keeps the shape it was cut from, so
+// putting it back is a deep merge rather than a lookup. That is why the control
+// plane can do this without importing the checkers, which live on the other side
+// of the ADR-001 seam.
+func (s *Server) wholeConfig(m model.Monitor) ([]byte, error) {
+	if len(m.ConfigSecrets) == 0 {
+		return append([]byte(nil), m.Config...), nil
 	}
+	if s.configs == nil {
+		return nil, fmt.Errorf("monitor holds encrypted credentials and this control plane has no key")
+	}
+
+	secret, err := s.configs.Open(m.OrgID[:], m.ID[:], m.ConfigSecrets)
+	if err != nil {
+		return nil, err
+	}
+	merged, err := model.MergeConfig(m.Config, secret)
+	if err != nil {
+		return nil, err
+	}
+	return merged, nil
 }
 
 // sendFullSet chunks the set. gRPC's default 4 MiB receive limit is smaller than

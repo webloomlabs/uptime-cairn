@@ -47,10 +47,22 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	// whole file and wants free space equal to its size, which on a Pi with a
 	// 32GB card is the difference between working and not (data model §9.2).
 	// Without it, retention deletes rows and the file never shrinks.
+	// secure_delete(fast) zeroes freed content inside pages SQLite is rewriting
+	// anyway, and skips the ones that would need an extra write. Full
+	// secure_delete zeroes everything, which on a table deleting twenty million
+	// heartbeats a day is a cost nobody asked for; FAST is close to free and
+	// covers what actually matters — an overwritten or deleted credential should
+	// not stay legible in the slack space of its own page.
+	//
+	// It bounds the problem rather than solving it, and the difference is worth
+	// stating: it applies from this connection onward, so bytes already sitting
+	// in a database written by an earlier version stay there until the pages are
+	// reused. A credential that was ever stored in plaintext has to be rotated,
+	// not scrubbed — it was in every backup too (data model §12.7).
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"+
 			"&_pragma=busy_timeout(5000)&_pragma=synchronous(1)"+
-			"&_pragma=auto_vacuum(2)",
+			"&_pragma=auto_vacuum(2)&_pragma=secure_delete(fast)",
 		path)
 
 	db, err := sql.Open("sqlite", dsn)

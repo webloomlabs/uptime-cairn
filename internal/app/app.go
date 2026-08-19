@@ -80,6 +80,29 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	// rare enough to be invisible.
 	go sweepSessions(ctx, store, log)
 
+	// Every monitor type this build can run. push is absent by design: it is
+	// evaluated by the control plane against the clock and is never assigned to
+	// a probe at all (ADR-005 decision 6).
+	registry := check.NewRegistry()
+	registry.Register(check.NewHTTP())
+	registry.Register(check.NewTCP())
+	registry.Register(check.NewICMP())
+	registry.Register(check.NewDNS())
+	registry.Register(check.NewTLSExpiry())
+	registry.Register(check.NewDomainExpiry())
+	registry.Register(check.NewDocker())
+	registry.Register(check.NewGRPC())
+
+	// Monitors written before credentials were encrypted still hold them in
+	// config. Moving them now, rather than when the monitor is next edited,
+	// means the guarantee is true of the database rather than true of new rows.
+	configVault := secrets.NewVault(keeper, "monitors", "config")
+	if resealed, err := resealCredentials(ctx, store, registry, configVault); err != nil {
+		return err
+	} else if resealed > 0 {
+		log.Info("moved monitor credentials out of plaintext configuration", "monitors", resealed)
+	}
+
 	// Alerting. Started before the control plane because the control plane
 	// publishes into it: a transition that happens in the first second of a
 	// process's life is as real as any other.
@@ -97,7 +120,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	}
 
 	publisher := controlplane.NewPublisher()
-	cp := controlplane.New(store, publisher, alerts, log.With("component", "controlplane"),
+	cp := controlplane.New(store, publisher, alerts, configVault, log.With("component", "controlplane"),
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
 	// The rollup pipeline. Raw heartbeats are kept for seven days, so every
@@ -142,19 +165,6 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		return fmt.Errorf("dial embedded probe transport: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-
-	// Every monitor type this build can run. push is absent by design: it is
-	// evaluated by the control plane against the clock and is never assigned to
-	// a probe at all (ADR-005 decision 6).
-	registry := check.NewRegistry()
-	registry.Register(check.NewHTTP())
-	registry.Register(check.NewTCP())
-	registry.Register(check.NewICMP())
-	registry.Register(check.NewDNS())
-	registry.Register(check.NewTLSExpiry())
-	registry.Register(check.NewDomainExpiry())
-	registry.Register(check.NewDocker())
-	registry.Register(check.NewGRPC())
 
 	session := probe.NewSession(probev1.NewProbeServiceClient(conn), probe.Config{
 		Name:          "embedded",
@@ -273,6 +283,61 @@ func openKeeper(ctx context.Context, store *sqlite.Store, cfg config.Config, log
 	}
 
 	return secrets.NewKeeper(current, keys)
+}
+
+// resealCredentials moves any credential still sitting in a monitor's plaintext
+// config into its encrypted column, and reports how many it moved.
+//
+// Idempotent, and a no-op on every start after the first: a monitor whose config
+// no longer holds any of its type's secret fields splits to an empty secret half
+// and is left alone. It runs before anything reads a config, so no probe ever
+// sees the half-migrated state.
+//
+// Failing here is fatal rather than logged. A pass that gives up partway leaves
+// some monitors encrypted and some not, and the difference is invisible from the
+// outside — which is the property that makes a security guarantee worthless.
+func resealCredentials(ctx context.Context, store *sqlite.Store, registry *check.Registry, vault *secrets.Vault) (int, error) {
+	monitors, err := store.AllMonitors(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reseal monitor credentials: %w", err)
+	}
+
+	resealed := 0
+	for _, m := range monitors {
+		fields := registry.SecretFields(m.Type)
+		if len(fields) == 0 {
+			continue
+		}
+
+		public, secret, err := model.SplitConfig(m.Config, fields)
+		if err != nil {
+			return resealed, fmt.Errorf("reseal monitor %s: %w", m.ID, err)
+		}
+		if len(secret) == 0 {
+			continue
+		}
+
+		// Merged with whatever is already sealed, so a monitor that has some
+		// credentials encrypted and one added later in plaintext ends up with
+		// both rather than with only the newer one.
+		existing, err := vault.Open(m.OrgID[:], m.ID[:], m.ConfigSecrets)
+		if err != nil {
+			return resealed, fmt.Errorf("reseal monitor %s: %w", m.ID, err)
+		}
+		combined, err := model.MergeConfig(existing, secret)
+		if err != nil {
+			return resealed, fmt.Errorf("reseal monitor %s: %w", m.ID, err)
+		}
+		sealed, err := vault.Seal(m.OrgID[:], m.ID[:], combined)
+		if err != nil {
+			return resealed, fmt.Errorf("reseal monitor %s: %w", m.ID, err)
+		}
+		if err := store.SetMonitorConfig(ctx, m.ID, public, sealed); err != nil {
+			return resealed, fmt.Errorf("reseal monitor %s: %w", m.ID, err)
+		}
+		resealed++
+	}
+	return resealed, nil
 }
 
 func setupRequired(ctx context.Context, store *sqlite.Store) (bool, error) {

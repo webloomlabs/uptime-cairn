@@ -460,6 +460,114 @@ long the work takes. Orphaned rows are invisible to every API query — they all
 filter through a live monitor — so a purge that lags costs disk and never
 correctness.
 
+## Monitor credentials
+
+Four of the nine monitor types take a credential: HTTP basic and bearer auth,
+Docker client TLS material, and gRPC request metadata. None of them is stored in
+the clear.
+
+Create one and read it back:
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/monitors \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Authenticated endpoint",
+    "type": "http",
+    "config": {
+      "url": "https://api.example.com/health",
+      "auth": {"type": "basic", "username": "cairn", "password": "s3cret"}
+    }
+  }'
+```
+
+```json
+{
+  "config": {
+    "url": "https://api.example.com/health",
+    "auth": {"type": "basic", "username": "cairn", "password": "__redacted__"}
+  }
+}
+```
+
+The username survives and the password does not. A username is not a credential
+on its own, and it is the half worth being able to read back when working out
+which account a monitor is using.
+
+What is in the row:
+
+```sql
+sqlite> SELECT config, length(config_secrets) FROM monitors WHERE name = 'Authenticated endpoint';
+{"auth":{"type":"basic","username":"cairn"},"url":"https://api.example.com/health"}|68
+```
+
+The credential is not in `config` to be redacted — it was moved into
+`config_secrets` on the way in, sealed with AES-256-GCM and bound to
+`(org_id, 'monitors', 'config', id)` so a blob relocated onto another monitor's
+row fails to open rather than being read against the wrong monitor. The rest of
+the config stays as queryable JSON, which is why the `json_valid` constraint and
+every future query over monitor settings still work.
+
+It goes back together in exactly one place: the control plane, when it hands the
+monitor to a probe. That is what "decrypted only at delivery" means — at rest an
+opaque blob, in flight protected by the transport the probe dialled.
+
+### Which fields are secret
+
+Declared by the checker that owns the config schema, because the checker is the
+only thing that knows a bearer token lives at `auth.token`:
+
+| Type | Encrypted |
+|---|---|
+| `http` | `auth.password`, `auth.token` |
+| `docker` | `tls.ca_cert`, `tls.client_cert`, `tls.client_key` |
+| `grpc` | `metadata` — keys are returned, values are not |
+| everything else | nothing; they check anonymously |
+
+That table is not maintained by hand against the spec. A test reads
+`docs/api/openapi.yaml`, finds every `writeOnly` property of each monitor type's
+config schema, and fails if a checker's declaration disagrees. The failure it
+exists to catch is silent: a monitor type gains a credential in the spec, nobody
+adds it here, and the result is not an error — it is a password in the clear.
+
+### Sending a redaction back
+
+A create carrying `"__redacted__"` is refused:
+
+```json
+{"pointer": "/config/auth/password", "code": "redacted",
+ "message": "auth.password came back from a read with its value hidden; supply the real credential, or omit it"}
+```
+
+Accepting it would produce a monitor that looks configured and authenticates as
+nobody, and the failure would arrive hours later as a 401 attributed to the
+target.
+
+### Upgrading a database that predates this
+
+Migration `0004` adds the column; it cannot encrypt anything, because SQL has no
+key. So the process does it on start, before anything reads a config:
+
+```
+level=INFO msg="migration applied" version=4 name=monitor_config_secrets
+level=INFO msg="moved monitor credentials out of plaintext configuration" monitors=1
+```
+
+It covers disabled and paused monitors too — a monitor nobody is checking today
+still has its password in the database — and it is a no-op on every start
+afterwards. `updated_at` is deliberately not touched: the probe's config version
+is derived from it, and re-sealing changes where a credential is stored rather
+than what the monitor checks.
+
+**It does not scrub history, and nothing can.** The bytes may still sit in
+unallocated space in the database file until those pages are reused, and they
+were in every backup taken before the upgrade. The connection sets
+`secure_delete=FAST`, which zeroes freed content inside pages SQLite is rewriting
+anyway — cheap, and enough to stop a rotated credential lingering in the slack
+space of its own page — but it applies from that connection onward. A credential
+that was ever stored in plaintext should be rotated. [Data model §12.7](../data-model/README.md)
+is the list of things encryption at rest does not do, and this belongs on it.
+
 ## Alerting
 
 A monitoring tool that detects an outage and tells nobody is a logging tool. This
@@ -711,6 +819,15 @@ they are the ones that fail open — scope enforcement, CSRF, rate limiting, key
 revocation, privilege escalation, recovery-code single use, and ciphertext
 relocation.
 
+The credential tests assert the property rather than the response: that the
+password is absent from the stored `config`, that the sealed column does not
+contain it either, that all three read paths redact it, and that a monitor whose
+credentials cannot be decrypted is withheld from the probe rather than sent with
+half a config — an HTTP monitor missing its bearer token would authenticate as
+nobody and report the target down, which is a lie about the target. The
+re-sealing pass has its own tests, because a migration path nobody runs twice is
+a migration path nobody has tested.
+
 The alerting tests cover the two things that fail invisibly. One is the secret
 boundary: that a token is not in the serialised config, does not appear in any
 read response, and survives a form round-tripping its own `GET`. The other is the
@@ -744,10 +861,6 @@ an aeroplane is a test that gets deleted.
   in solo mode, which is the only mode this build has. In a multi-probe install
   "is this container running" is only answerable by the probe on that host, and
   nothing yet makes the assignment land there.
-- **Encryption of monitor credentials.** Bearer tokens, basic-auth passwords,
-  Docker client keys, and gRPC metadata all reach `monitors.config` in plaintext.
-  The layer that would fix it exists and already carries the TOTP secret; nothing
-  routes monitor configs through it yet.
 - **`/monitors/{id}/certificate`.** The TLS and domain-expiry checkers observe
   everything it reports and store none of it; migration `0003` created the tables
   waiting for them.

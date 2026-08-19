@@ -22,7 +22,7 @@ type (
 var DecodeCursor = store.DecodeCursor
 
 const monitorColumns = `
-	m.id, m.org_id, m.name, m.description, m.type, m.config, m.target,
+	m.id, m.org_id, m.name, m.description, m.type, m.config, m.config_secrets, m.target,
 	m.push_token_hash, m.enabled, m.interval_seconds, m.timeout_seconds, m.retries,
 	m.retry_interval_seconds, m.resend_after, m.upside_down, m.notify_on_recovery,
 	m.group_id, m.parent_monitor_id, m.created_at, m.updated_at,
@@ -42,12 +42,13 @@ func (s *Store) CreateMonitor(ctx context.Context, m model.Monitor) error {
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO monitors (
-			id, org_id, name, description, type, config, target, push_token_hash,
+			id, org_id, name, description, type, config, config_secrets, target, push_token_hash,
 			enabled, interval_seconds, timeout_seconds, retries, retry_interval_seconds,
 			resend_after, upside_down, notify_on_recovery, group_id,
 			parent_monitor_id, created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID[:], m.OrgID[:], m.Name, nullString(m.Description), m.Type, string(m.Config),
+		nullBytes(m.ConfigSecrets),
 		nullString(m.Target), nullBytes(m.PushTokenHash), boolToInt(m.Enabled),
 		int64(m.Interval.Seconds()), int64(m.Timeout.Seconds()), m.Retries,
 		nullSeconds(m.RetryInterval), m.ResendAfter, boolToInt(m.UpsideDown),
@@ -156,6 +157,51 @@ func (s *Store) ListAssignable(ctx context.Context) ([]model.Monitor, error) {
 		out = append(out, m.Monitor)
 	}
 	return out, rows.Err()
+}
+
+// AllMonitors returns every monitor, enabled or not, configuration only.
+//
+// Exists for the credential re-sealing pass, which has to reach the disabled and
+// the paused ones too: a monitor nobody is checking today still has its password
+// sitting in the database.
+func (s *Store) AllMonitors(ctx context.Context) ([]model.Monitor, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+monitorColumns+`
+		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
+		ORDER BY m.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list all monitors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.Monitor
+	for rows.Next() {
+		m, err := scanMonitor(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m.Monitor)
+	}
+	return out, rows.Err()
+}
+
+// SetMonitorConfig replaces both halves of a monitor's configuration.
+//
+// updated_at is deliberately not touched. The config version the probe compares
+// is derived from it, and re-sealing changes where the credentials are stored
+// rather than what the monitor checks — bumping it would make every probe in the
+// fleet reload every monitor for a change none of them can see.
+func (s *Store) SetMonitorConfig(ctx context.Context, id model.ID, config []byte, sealed []byte) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE monitors SET config = ?, config_secrets = ? WHERE id = ?`,
+		string(config), nullBytes(sealed), id[:])
+	if err != nil {
+		return fmt.Errorf("set monitor config: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListPushMonitors returns every enabled push monitor with its state. It is the
@@ -297,7 +343,7 @@ type scanner interface {
 func scanMonitor(row scanner) (MonitorWithState, error) {
 	var (
 		out                                 MonitorWithState
-		id, orgID, config                   []byte
+		id, orgID, config, configSecrets    []byte
 		groupID, parentID, pushTokenHash    []byte
 		description, target, message        sql.NullString
 		retryInterval                       sql.NullInt64
@@ -309,7 +355,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 	)
 
 	if err := row.Scan(
-		&id, &orgID, &out.Monitor.Name, &description, &out.Monitor.Type, &config, &target,
+		&id, &orgID, &out.Monitor.Name, &description, &out.Monitor.Type, &config, &configSecrets, &target,
 		&pushTokenHash, &enabled, &intervalSeconds, &timeoutSeconds, &out.Monitor.Retries,
 		&retryInterval, &out.Monitor.ResendAfter, &upsideDown, &notifyRecovery,
 		&groupID, &parentID, &createdAt, &updatedAt,
@@ -323,6 +369,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 	copy(out.Monitor.OrgID[:], orgID)
 	out.Monitor.Description = description.String
 	out.Monitor.Config = append([]byte(nil), config...)
+	out.Monitor.ConfigSecrets = append([]byte(nil), configSecrets...)
 	out.Monitor.Target = target.String
 	out.Monitor.PushTokenHash = append([]byte(nil), pushTokenHash...)
 	out.Monitor.Enabled = enabled == 1

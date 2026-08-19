@@ -102,3 +102,33 @@ func (g *GRPC) Target(config []byte) string {
 	}
 	return cfg.Address
 }
+
+// SecretFields implements Confidential.
+//
+// Exactly the writeOnly properties of HttpConfig: the password and the bearer
+// token. The username is not one — it is not a credential on its own, and it is
+// the half of a basic-auth pair worth being able to read back when working out
+// which account a monitor is using.
+func (h *HTTP) SecretFields() []string {
+	return []string{"auth.password", "auth.token"}
+}
+
+// SecretFields implements Confidential.
+//
+// The client key is the credential; the two certificates are marked writeOnly in
+// the spec alongside it and are treated the same way. A CA certificate is public
+// information, but it is also the thing that decides which daemon this monitor
+// will trust, and a config read that hands it back in full is a config read that
+// hands back the whole trust configuration of somebody's Docker host.
+func (d *Docker) SecretFields() []string {
+	return []string{"tls.ca_cert", "tls.client_cert", "tls.client_key"}
+}
+
+// SecretFields implements Confidential.
+//
+// The whole metadata map. Its keys survive redaction and its values do not,
+// because "an authorization header is set on this monitor" is configuration the
+// operator needs to see and the token is not.
+func (g *GRPC) SecretFields() []string {
+	return []string{"metadata"}
+}

@@ -37,7 +37,7 @@ func testServer(t *testing.T) *httptest.Server {
 // testServerWithStore also hands back the store, for the tests that need to
 // seed history directly — writing a week of heartbeats through the API is not
 // possible and would not be a better test if it were.
-func testServerWithStore(t *testing.T) (*httptest.Server, *sqlite.Store) {
+func testServerWithStore(t *testing.T, extra ...check.Checker) (*httptest.Server, *sqlite.Store) {
 	t.Helper()
 
 	store, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "cairn.db"))
@@ -58,8 +58,13 @@ func testServerWithStore(t *testing.T) (*httptest.Server, *sqlite.Store) {
 		t.Fatalf("keeper: %v", err)
 	}
 
+	// http only by default, so the "this build cannot run that type" path stays
+	// testable; a test that needs another checker asks for it.
 	registry := check.NewRegistry()
 	registry.Register(check.NewHTTP())
+	for _, checker := range extra {
+		registry.Register(checker)
+	}
 
 	// A real control plane, not a stand-in: push ingest is only interesting if
 	// the heartbeat it produces goes through the same state machine every other
@@ -77,7 +82,8 @@ func testServerWithStore(t *testing.T) (*httptest.Server, *sqlite.Store) {
 		alerts.Wait()
 	})
 
-	cp := controlplane.New(store, controlplane.NewPublisher(), alerts, log,
+	cp := controlplane.New(store, controlplane.NewPublisher(), alerts,
+		secrets.NewVault(keeper, "monitors", "config"), log,
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
 	api := New(store, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance")

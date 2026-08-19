@@ -49,7 +49,12 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 
 	body := page[monitorJSON]{Data: []monitorJSON{}, Pagination: pagination{HasMore: hasMore}}
 	for _, m := range monitors {
-		body.Data = append(body.Data, withChannels(toMonitorJSON(m), assignments[m.Monitor.ID]))
+		rendered, err := s.renderMonitor(m)
+		if err != nil {
+			s.internal(w, r, "render monitor", err)
+			return
+		}
+		body.Data = append(body.Data, withChannels(rendered, assignments[m.Monitor.ID]))
 	}
 	if hasMore && len(monitors) > 0 {
 		last := monitors[len(monitors)-1]
@@ -95,6 +100,14 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 		monitor.PushTokenHash = auth.HashToken(token)
 	}
 
+	// The credentials come out of config here, on the way in, and go back
+	// together only in memory: in the control plane when it hands the monitor to
+	// a probe, and nowhere else (data model §12.1).
+	if err := s.sealMonitor(&monitor); err != nil {
+		s.internal(w, r, "seal monitor credentials", err)
+		return
+	}
+
 	if err := s.store.CreateMonitor(r.Context(), monitor); err != nil {
 		s.internal(w, r, "create monitor", err)
 		return
@@ -122,10 +135,15 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, "read back monitor", err)
 		return
 	}
+	rendered, err := s.renderMonitor(created)
+	if err != nil {
+		s.internal(w, r, "render monitor", err)
+		return
+	}
 
 	w.Header().Set("Location", "/api/v1/monitors/"+monitor.ID.String())
 	writeJSON(w, s.log, http.StatusCreated,
-		withPushToken(withChannels(toMonitorJSON(created), channelIDs), pushToken, pushURL(r, pushToken)))
+		withPushToken(withChannels(rendered, channelIDs), pushToken, pushURL(r, pushToken)))
 }
 
 func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +167,12 @@ func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, s.log, http.StatusOK, withChannels(toMonitorJSON(m), channelIDs))
+	rendered, err := s.renderMonitor(m)
+	if err != nil {
+		s.internal(w, r, "render monitor", err)
+		return
+	}
+	writeJSON(w, s.log, http.StatusOK, withChannels(rendered, channelIDs))
 }
 
 func (s *Server) deleteMonitor(w http.ResponseWriter, r *http.Request) {
@@ -268,6 +291,15 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 		// The same validation the probe will run at assignment time, run here so
 		// a bad URL is a 422 the caller can read rather than a rejection they
 		// would have to go looking for in the logs.
+		// A config echoing a redacted read is refused rather than stored.
+		// Accepting "__redacted__" as a password produces a monitor that looks
+		// configured and authenticates as nobody, and the failure surfaces hours
+		// later as a 401 attributed to the target.
+		for _, path := range model.FindRedacted(body.Config, s.registry.SecretFields(m.Type)) {
+			bad("/config/"+strings.ReplaceAll(path, ".", "/"), "redacted",
+				fmt.Sprintf("%s came back from a read with its value hidden; supply the real credential, or omit it", path))
+		}
+
 		switch checker, ok := s.registry.Lookup(m.Type); {
 		case ok:
 			if err := checker.Validate(body.Config); err != nil {
@@ -352,6 +384,52 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 	}
 
 	return m, problems
+}
+
+// renderMonitor assembles the read shape: the stored config plus a marker
+// wherever the encrypted half holds a credential.
+//
+// The redaction is assembled rather than applied — the secret is not in the
+// column being serialised, so there is nothing here that could forget to hide
+// it. That is the property worth having; a redacting serialiser is one refactor
+// away from not redacting.
+func (s *Server) renderMonitor(m store.MonitorWithState) (monitorJSON, error) {
+	out := toMonitorJSON(m)
+
+	fields := s.registry.SecretFields(m.Monitor.Type)
+	if len(fields) == 0 || len(m.Monitor.ConfigSecrets) == 0 {
+		return out, nil
+	}
+
+	secret, err := s.configs.Open(m.Monitor.OrgID[:], m.Monitor.ID[:], m.Monitor.ConfigSecrets)
+	if err != nil {
+		return monitorJSON{}, err
+	}
+	config, err := model.RedactConfig(m.Monitor.Config, secret, fields)
+	if err != nil {
+		return monitorJSON{}, err
+	}
+	out.Config = config
+	return out, nil
+}
+
+// sealMonitor splits a validated config and encrypts the credential half.
+func (s *Server) sealMonitor(m *model.Monitor) error {
+	fields := s.registry.SecretFields(m.Type)
+	if len(fields) == 0 {
+		return nil
+	}
+
+	public, secret, err := model.SplitConfig(m.Config, fields)
+	if err != nil {
+		return err
+	}
+	sealed, err := s.configs.Seal(m.OrgID[:], m.ID[:], secret)
+	if err != nil {
+		return err
+	}
+	m.Config, m.ConfigSecrets = public, sealed
+	return nil
 }
 
 // resolveChannels turns the request's channel ids into a validated set.

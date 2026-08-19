@@ -90,9 +90,12 @@ type Server struct {
 	log      *slog.Logger
 	limiter  *loginLimiter
 
-	// vault seals and opens notification-channel secrets. Built from the same
-	// keeper the TOTP path uses, so there is one key hierarchy rather than two.
-	vault *notify.Vault
+	// vault seals and opens notification-channel secrets, and configs does the
+	// same for the credential half of a monitor's configuration. Both are built
+	// from the keeper the TOTP path uses, so there is one key hierarchy rather
+	// than three.
+	vault   *notify.Vault
+	configs *secrets.Vault
 
 	// instanceName is the issuer shown in an authenticator app.
 	instanceName string
@@ -117,6 +120,7 @@ func New(s Store, publisher Notifier, push PushIngest, alerts Alerts, registry *
 		registry:     registry,
 		keeper:       keeper,
 		vault:        notify.NewVault(keeper),
+		configs:      secrets.NewVault(keeper, "monitors", "config"),
 		log:          log,
 		limiter:      newLoginLimiter(),
 		instanceName: instanceName,
