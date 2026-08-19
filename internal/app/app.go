@@ -41,6 +41,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
+	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 	"github.com/webloomlabs/uptime-cairn/internal/version"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
@@ -53,6 +54,11 @@ const shutdownGrace = 10 * time.Second
 func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	log := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	log.Info("starting", "version", version.Version, "mode", cfg.Mode, "data_dir", cfg.DataDir)
+
+	// Stamped before anything else so /metrics reports uptime from the same
+	// moment the log does. A process that has been up for two seconds and one
+	// that has been up for two days answer "why is the rate low" differently.
+	telemetry.MarkStart(time.Now())
 
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return fmt.Errorf("create data dir: %w", err)

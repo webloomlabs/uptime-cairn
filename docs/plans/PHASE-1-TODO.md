@@ -3,7 +3,35 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** The REST API is finished. Every Phase 1 operation in the
+**Status: 2026-08-19.** The 5,000-monitor claim is measured against the real
+engine rather than against the schema. The load-test harness starts a `cairn`,
+creates the workload through the real API, and measures what the engine achieves:
+239.6 heartbeats a second against the 250 its schedule implies, with 7,620
+requests counted independently on the other side of the network — the one figure
+the engine cannot fake. Then it breaks every monitored endpoint at once, because
+that burst is what the delivery queues were sized against and nothing had counted
+the deliveries on the other end. All 5,000 marked down in 20.6 seconds, all back
+afterwards, 9,682 alerts and 9,682 webhook deliveries with nothing shed.
+
+It found three things on its first real run, one of which was in the gate itself.
+The `list: filter status=down` growth cap had never actually executed at the
+scales it was written for — the harness had no committed `go.sum`, so CI refused
+it before it got there — and when it did it failed at 4.8x against a 4.0x bound.
+The query plan was identical at both scales; what grew was the matched set, 13
+rows to 159, because the workload keeps a fixed proportion down. Sub-linear
+latency against super-linear work is the hypothesis holding. The bound is now 6.0
+with the evidence written beside it.
+
+Creating monitors was quadratic — every
+write reloaded and re-diffed the whole assignment set, 2,116 recomputations for
+5,000 monitors, and the run never finished. It also caught its own first answer
+being wrong, which is the more instructive half: it reported 499 heartbeats a
+second against 250 implied, and the engine was fine. It was draining the backlog
+built while seeding saturated the writer. Rows counted by check time said 250;
+rows counted by write time said 500. Both were true, and the fix was to wait for
+the rate to settle rather than to sleep a fixed interval and hope.
+
+The REST API is finished. Every Phase 1 operation in the
 frozen spec answers for real except the two Kuma import endpoints, which stay at
 `501` on purpose — the endpoint without the importer behind it would accept a file
 and report success for an import that never happened.
@@ -71,7 +99,7 @@ by which "90% done" lasts three months.
 
 | Area | Done | Total |
 |---|---|---|
-| Engine & storage | 16 | 17 |
+| Engine & storage | 18 | 19 |
 | Monitor types | 9 | 10 |
 | Core monitoring features | 7 | 8 |
 | Alerting & webhooks | 10 | 10 |
@@ -82,8 +110,8 @@ by which "90% done" lasts three months.
 | Security | 8 | 9 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
-| Quality gates | 3 | 8 |
-| **Total** | **79** | **120** |
+| Quality gates | 4 | 8 |
+| **Total** | **82** | **122** |
 
 The Engine & storage row read 14/15 until now and was simply stale — two items had
 been ticked without the table being updated. A tracker that quietly disagrees with
@@ -110,7 +138,9 @@ carried forward.
 - [x] Retention enforcement per tier, with disk actually reclaimed on SQLite — `auto_vacuum=INCREMENTAL` had never actually been applied; the PRAGMA in `0001` is a no-op inside the migration runner's transaction, so it now lives in the connection DSN, and a test asserts the file shrinks
 - [x] Asynchronous purge of a deleted monitor's history, in bounded batches
 - [x] `resend_after` and dependency-suppression handling in ingest — both derived rather than stored: the resend from `consecutive_failures`, the suppression from the parent's current state at the moment the result lands, because a parent and its children can fail within the same second and a sweep would be a tick behind
-- [ ] Reader pool alongside the single writer (one connection today)
+- [x] Engine self-metrics: heartbeats written and results ingested counted separately, so a probe redelivering is distinguishable from the system doing twice the work; alerts published and shed; and each probe's own report — shed results, skipped checks, due-queue depth, buffer depth, clock offset — republished from the result stream, because a probe has no inbound port to scrape. This is what the load test reads, and reading the same endpoint an operator scrapes is the point: a harness with a private back door measures a system nobody else can see
+- [x] Assignment publishing coalesces a burst of writes into one recompute. Each write used to reload and re-diff the whole assignment set, making the creation of N monitors O(N²) — the load-test harness measured 2,116 full recomputations while creating 5,000 through the API, and the run never finished. A one-second settle window is invisible against the 20-second interval floor
+- [ ] Reader pool alongside the single writer (one connection today) — **now measured rather than assumed.** Monitor creation runs at 1,144/sec at 500 monitors and 38/sec at 5,000, because the assignment reload holds the single connection while it scans every assignable monitor and writes queue behind it. That is the shape of an import of somebody's existing install, which is the first thing this product asks a new user to do
 
 ## Monitor types
 
@@ -244,33 +274,33 @@ carried forward.
 - [x] gofmt, vet, build, and buf lint/format/breaking in CI
 - [ ] Contract tests verifying the server against the frozen OpenAPI spec
 - [ ] Golden-path E2E: install → create monitor → down event → alert fires → recovery → status page reflects it
-- [ ] Load-test harness pointed at the real engine (`http` target still refuses to run)
-- [ ] 5,000-monitor CI acceptance gate against the engine, then the UI benchmark
+- [x] Load-test harness pointed at the real engine — the `http` target starts a `cairn`, creates the workload through the real API against an endpoint the harness serves, and measures what the engine achieves rather than what storage can absorb. Those are opposite claims and the report labels which is which: a driven rate is a ceiling, an observed rate is bounded by arithmetic, and a rate *above* the schedule means a backlog draining rather than headroom. It also breaks every monitored endpoint at once, because a burst that marks several thousand monitors down inside one scheduler tick is what the delivery queues were sized against and nothing had ever counted the deliveries on the other end. The 5,000-monitor gate passes: 239.6 heartbeats/sec against 250 implied, 5,000/5,000 marked down in 20.6s, 9,682 alerts and 9,682 webhook deliveries with nothing shed
+- [ ] 5,000-monitor CI acceptance gate against the engine, then the UI benchmark — **the gate runs and passes locally; the workflow still points at the SQLite target.** Wiring the engine run in is a change to `.github/workflows/load-test.yml`, which is CI configuration and not edited without being asked (AGENTS.md rule 7). The command is one line and takes about eight minutes
 - [ ] Crash-recovery test: kill mid-cycle, assert at most one tick lost and checks resume
 
 ---
 
 ## What to do next, and why in this order
 
-1. **The load-test harness against the real engine.** The 5,000-monitor claim is
-   the project's central promise, and every week it goes unmeasured against real
-   code is a week the number is an assumption. It now has more to measure than it
-   did: the list endpoint has gained joins, four filter clauses, and optional
-   embeds, and it is the endpoint the CI gate covers. A partition that marks
-   several thousand monitors down inside one scheduler tick is also the burst two
-   delivery queues are now sized against, and both sizes are arguments rather
-   than measurements.
+1. **The reader pool alongside the single writer.** No longer a hunch: monitor
+   creation runs at 1,144/sec at 500 monitors and 38/sec at 5,000, because the
+   assignment reload holds the one connection while it scans every assignable
+   monitor. That is precisely the shape of an import of somebody's existing
+   install — the first thing this product asks a new user to do — and it is the
+   only measured number in the system that gets worse as the install grows.
 2. **Certificate and domain observations.** `/monitors/{id}/certificate`,
    `include=certificate`, and the overview's expiring-soon counts are built and
    read tables nothing writes. Closing that needs the observation carried from the
    checker to the control plane — a field on the probe protocol's result frame,
-   which is the one change in this list that is not API work. `monitor.certificate_expiring`
-   is an event type with nothing raising it, and it is the alert people actually
-   want from a TLS monitor.
+   which is the one change in this list that is not API work.
+   `monitor.certificate_expiring` is an event type with nothing raising it, and it
+   is the alert people actually want from a TLS monitor.
 3. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
    and double opt-in, and nothing sends the confirmation mail. The instance relay
-   now exists to send it through, which is why this is worth doing next rather
-   than alongside the UI.
+   now exists to send it through.
 
 The UI comes after those deliberately: the plan puts it in Month 3, and every
-surface it needs now exists — which was the point of finishing the API first.
+surface it needs now exists — which was the point of finishing the API first. The
+membership signal is the one number to look at before starting it: 6.2ms per poll
+at 5,000 monitors, and its cost scales with connected clients rather than with
+monitor count, which is the dimension the gate does not exercise.

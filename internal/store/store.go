@@ -59,7 +59,12 @@ type HeartbeatStore interface {
 	// a no-op rather than a duplicate row — the natural key
 	// (org_id, monitor_id, time, probe_id) is what makes it one
 	// (ADR-005 decision 16, data model §11.8).
-	WriteBatch(ctx context.Context, beats []model.Heartbeat) error
+	//
+	// It returns rows actually inserted, which a resend makes smaller than the
+	// batch it was given. That difference is the only evidence a caller has that
+	// redelivery is happening, and a signature that discarded it would leave
+	// "the probe is resending everything" invisible.
+	WriteBatch(ctx context.Context, beats []model.Heartbeat) (int64, error)
 }
 
 // The remaining interfaces — monitors, rollups, notifications, status pages,

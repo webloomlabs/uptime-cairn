@@ -65,6 +65,16 @@ func (t *SQLiteTarget) Setup(ctx context.Context, w *Workload, rollupHours int) 
 	if _, err := db.ExecContext(ctx, "ANALYZE"); err != nil {
 		return fmt.Errorf("analyze: %w", err)
 	}
+
+	// The deep-page cursor. This target seeks on (updated_at, id) because that
+	// is the index; the workload's midpoint monitor is exactly halfway through
+	// the ordering, which is what the scenario wants to measure.
+	mid := w.Monitors[len(w.Monitors)/2]
+	w.DeepCursor = &Cursor{UpdatedAt: mid.UpdatedAt, ID: mid.ID}
+
+	// The range the rollups were seeded over.
+	w.HistoryFrom = w.BaseTime
+	w.HistoryTo = w.BaseTime.Add(time.Duration(rollupHours) * time.Hour)
 	return nil
 }
 
@@ -258,7 +268,42 @@ func seedRollups(ctx context.Context, tx *sql.Tx, w *Workload, hours int) error 
 	return nil
 }
 
-func (t *SQLiteTarget) WriteHeartbeats(ctx context.Context, batch []Heartbeat) error {
+// MeasureWrites drives sustained batched writes as fast as the write path will
+// take them. That is a ceiling — "this is what storage can absorb" — and the
+// report says so, because the HTTP target's number means something else.
+//
+// Batching is the contract, not an optimisation: the data model (§5.1) requires
+// one transaction per scheduler tick, because SQLite in WAL mode is a single
+// writer with an fsync per commit and 250 individual commits a second will not
+// hold up on a Pi.
+func (t *SQLiteTarget) MeasureWrites(ctx context.Context, w *Workload, seconds int) (WriteResult, error) {
+	out := WriteResult{Method: "driven: batches pushed as fast as the write path accepts them"}
+	if seconds <= 0 {
+		return out, nil
+	}
+
+	r := rand.New(rand.NewSource(7))
+	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+
+	written := 0
+	at := w.BaseTime
+	start := time.Now()
+	for time.Now().Before(deadline) {
+		// One tick writes every monitor's result, which is what the scheduler
+		// does.
+		batch := w.HeartbeatBatch(at, 0, len(w.Monitors), r)
+		if err := t.writeHeartbeats(ctx, batch); err != nil {
+			return out, err
+		}
+		written += len(batch)
+		at = at.Add(20 * time.Second)
+	}
+
+	out.Rate = float64(written) / time.Since(start).Seconds()
+	return out, nil
+}
+
+func (t *SQLiteTarget) writeHeartbeats(ctx context.Context, batch []Heartbeat) error {
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

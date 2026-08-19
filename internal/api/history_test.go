@@ -40,7 +40,7 @@ func seedHistory(t *testing.T, st *sqlite.Store, span, every time.Duration, stat
 			Status: status, ResponseTime: rt,
 		})
 	}
-	if err := st.WriteBatch(t.Context(), beats); err != nil {
+	if _, err := st.WriteBatch(t.Context(), beats); err != nil {
 		t.Fatalf("write heartbeats: %v", err)
 	}
 	return m

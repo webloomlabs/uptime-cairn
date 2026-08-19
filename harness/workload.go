@@ -20,6 +20,21 @@ type Workload struct {
 	Tags     [][]byte
 	Monitors []Monitor
 	BaseTime time.Time
+
+	// DeepCursor positions roughly halfway through the collection, filled in by
+	// Setup because the two targets obtain it differently: one computes it from
+	// the index, the other has to page to it because the API's cursor is opaque
+	// by design. The scenario reads it and does not care which.
+	DeepCursor *Cursor
+
+	// HistoryFrom and HistoryTo bound the range the history scenario reads, and
+	// are set by the target rather than fixed here for the same reason: the
+	// SQLite target seeded rollups at a known synthetic time, and the HTTP
+	// target's history is whatever the engine produced during this run. A fixed
+	// window would have one of them reading an empty range and reporting a fast
+	// query over nothing.
+	HistoryFrom time.Time
+	HistoryTo   time.Time
 }
 
 // baseTime is fixed rather than time.Now() so two runs at different wall-clock

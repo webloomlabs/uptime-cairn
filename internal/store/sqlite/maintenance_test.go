@@ -379,7 +379,7 @@ func TestDeletingAWindowLeavesItsHeartbeatsAnnotated(t *testing.T) {
 		ProbeID: model.EmbeddedProbeID, Status: model.StatusMaintenance, Attempt: 1,
 		Suppressed: true, SuppressionReason: model.SuppressionMaintenance,
 	}
-	if err := s.WriteBatch(t.Context(), []model.Heartbeat{beat}); err != nil {
+	if _, err := s.WriteBatch(t.Context(), []model.Heartbeat{beat}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

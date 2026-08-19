@@ -11,6 +11,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
+	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 	"github.com/webloomlabs/uptime-cairn/internal/version"
 )
 
@@ -207,6 +208,9 @@ func (s *Server) getPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	writeEngineMetrics(&b)
+	writeProbeMetrics(&b)
+
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte(b.String())); err != nil {
@@ -288,4 +292,111 @@ func isLoopback(ip string) bool {
 func parseBool(raw string) (bool, bool) {
 	v, err := strconv.ParseBool(raw)
 	return v, err == nil
+}
+
+// writeEngineMetrics is the process watching itself.
+//
+// Every series here answers a question about quiet failure rather than about
+// volume, which is the rule the telemetry package states: an install that is
+// losing heartbeats, shedding alerts, or falling behind its schedule looks
+// exactly like a healthy one from the outside until somebody goes looking.
+//
+// cairn_heartbeats_written_total is the load-test gate's primary measurement. At
+// N monitors on interval I the engine's steady-state rate is N/I by
+// construction — there is nothing more to check — so the assertion is not "go
+// faster" but "achieve the rate the schedule implies", which is what falling
+// behind destroys.
+func writeEngineMetrics(b *strings.Builder) {
+	b.WriteString("\n# HELP cairn_heartbeats_written_total Heartbeats durably written, counted after the write returned.\n")
+	b.WriteString("# TYPE cairn_heartbeats_written_total counter\n")
+	fmt.Fprintf(b, "cairn_heartbeats_written_total %d\n", telemetry.Engine.HeartbeatsWritten.Load())
+
+	b.WriteString("\n# HELP cairn_results_ingested_total Results offered to the write path; exceeds rows written when a probe redelivers.\n")
+	b.WriteString("# TYPE cairn_results_ingested_total counter\n")
+	fmt.Fprintf(b, "cairn_results_ingested_total %d\n", telemetry.Engine.ResultsIngested.Load())
+
+	b.WriteString("\n# HELP cairn_results_rejected_total Results that could not be attributed to a live monitor.\n")
+	b.WriteString("# TYPE cairn_results_rejected_total counter\n")
+	fmt.Fprintf(b, "cairn_results_rejected_total %d\n", telemetry.Engine.ResultsRejected.Load())
+
+	b.WriteString("\n# HELP cairn_checks_run_inline_total Checks run by the API for POST /monitors/{id}/check.\n")
+	b.WriteString("# TYPE cairn_checks_run_inline_total counter\n")
+	fmt.Fprintf(b, "cairn_checks_run_inline_total %d\n", telemetry.Engine.ChecksRunInline.Load())
+
+	b.WriteString("\n# HELP cairn_alerts_published_total Events handed to the notification dispatcher.\n")
+	b.WriteString("# TYPE cairn_alerts_published_total counter\n")
+	fmt.Fprintf(b, "cairn_alerts_published_total %d\n", telemetry.Engine.AlertsPublished.Load())
+
+	b.WriteString("\n# HELP cairn_alerts_dropped_total Events shed because the notification queue was full.\n")
+	b.WriteString("# TYPE cairn_alerts_dropped_total counter\n")
+	fmt.Fprintf(b, "cairn_alerts_dropped_total %d\n", telemetry.Engine.AlertsDropped.Load())
+
+	b.WriteString("\n# HELP cairn_process_uptime_seconds Seconds since this process started.\n")
+	b.WriteString("# TYPE cairn_process_uptime_seconds gauge\n")
+	fmt.Fprintf(b, "cairn_process_uptime_seconds %d\n", int64(telemetry.Uptime(time.Now()).Seconds()))
+}
+
+// writeProbeMetrics republishes what each probe reported about itself.
+//
+// A probe has no inbound port to scrape — it dials out and never listens — so
+// these arrive on the result stream and are re-emitted here, labelled by probe
+// (docs/probe/protocol.md §8). In solo mode there is one probe in this process
+// and the path is identical, which is the point: what an operator reads is
+// produced by the same code a remote probe will run.
+//
+// cairn_probe_shed_results_total and cairn_probe_skipped_checks_total are the
+// two that matter most. A probe under overload sheds rather than queueing, and
+// shedding is invisible from the monitor's side by design — the whole taxonomy
+// exists so that probe overload never looks like target downtime, which means it
+// has to look like something *here* instead.
+func writeProbeMetrics(b *strings.Builder) {
+	reports := telemetry.Probes()
+	if len(reports) == 0 {
+		return
+	}
+
+	for _, series := range []struct {
+		name, help, kind string
+		value            func(telemetry.ProbeHealth) uint64
+	}{
+		{"cairn_probe_assigned_monitors", "Monitors currently assigned to this probe.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return uint64(h.Assigned) }},
+		{"cairn_probe_checks_in_flight", "Checks executing right now.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return uint64(h.InFlight) }},
+		{"cairn_probe_max_concurrent_checks", "Worker pool size.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return uint64(h.MaxConcurrent) }},
+		{"cairn_probe_due_queue_depth", "Checks waiting to start.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return uint64(h.DueQueueDepth) }},
+		{"cairn_probe_buffered_results", "Results held pending acknowledgement.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return h.BufferedResults }},
+		{"cairn_probe_buffered_bytes", "Approximate memory held by buffered results.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return h.BufferedBytes }},
+		{"cairn_probe_shed_results_total", "Results dropped from a full buffer.", "counter",
+			func(h telemetry.ProbeHealth) uint64 { return h.ShedResultsTotal }},
+		{"cairn_probe_skipped_checks_total", "Checks that never started: past the lateness budget or the pool was full.", "counter",
+			func(h telemetry.ProbeHealth) uint64 { return h.SkippedChecksTotal }},
+		{"cairn_probe_checks_started_total", "Checks begun.", "counter",
+			func(h telemetry.ProbeHealth) uint64 { return h.ChecksStartedTotal }},
+		{"cairn_probe_checks_completed_total", "Checks finished.", "counter",
+			func(h telemetry.ProbeHealth) uint64 { return h.ChecksCompletedTotal }},
+		{"cairn_probe_uptime_seconds", "Seconds since the probe session started.", "gauge",
+			func(h telemetry.ProbeHealth) uint64 { return h.UptimeSeconds }},
+	} {
+		fmt.Fprintf(b, "\n# HELP %s %s\n# TYPE %s %s\n", series.name, series.help, series.name, series.kind)
+		for _, h := range reports {
+			fmt.Fprintf(b, "%s{probe_id=%q,probe=%q} %d\n",
+				series.name, h.ProbeID, escapeLabel(h.Name), series.value(h))
+		}
+	}
+
+	// Signed, so it is a gauge of its own rather than folded into the loop
+	// above. A probe whose clock has drifted writes heartbeats stamped from the
+	// past or the future, and every ordering guarantee in the system is built on
+	// that timestamp.
+	b.WriteString("\n# HELP cairn_probe_clock_offset_seconds Probe clock offset from the control plane, signed.\n")
+	b.WriteString("# TYPE cairn_probe_clock_offset_seconds gauge\n")
+	for _, h := range reports {
+		fmt.Fprintf(b, "cairn_probe_clock_offset_seconds{probe_id=%q} %g\n",
+			h.ProbeID, float64(h.ClockOffsetMicros)/1e6)
+	}
 }

@@ -26,7 +26,11 @@ import (
 func main() {
 	var (
 		targetName   = flag.String("target", "sqlite", "target to measure: sqlite | http")
-		baseURL      = flag.String("base-url", "http://localhost:3000", "base URL for the http target")
+		baseURL      = flag.String("base-url", "http://localhost:3000", "base URL for the http target when not spawning one")
+		cairnBinary  = flag.String("cairn", "", "path to a cairn binary for the http target to start and stop itself")
+		engineDir    = flag.String("engine-dir", "", "data directory for the spawned engine (default: a temp dir per scale)")
+		partition    = flag.Bool("partition", true, "on the http target, fail every monitored endpoint at once and measure the response")
+		verbose      = flag.Bool("v", false, "report progress while seeding")
 		dbPath       = flag.String("db", "", "SQLite file to build (default: a temp file)")
 		migrations   = flag.String("migrations", "../migrations/sqlite", "directory of .sql migrations")
 		scalesFlag   = flag.String("scales", "500,5000", "comma-separated monitor counts, smallest first")
@@ -53,6 +57,10 @@ func main() {
 		res, err := runScale(ctx, runConfig{
 			targetName:   *targetName,
 			baseURL:      *baseURL,
+			cairnBinary:  *cairnBinary,
+			engineDir:    *engineDir,
+			partition:    *partition,
+			verbose:      *verbose,
 			dbPath:       *dbPath,
 			migrations:   *migrations,
 			scale:        scale,
@@ -89,6 +97,10 @@ func main() {
 type runConfig struct {
 	targetName   string
 	baseURL      string
+	cairnBinary  string
+	engineDir    string
+	partition    bool
+	verbose      bool
 	dbPath       string
 	migrations   string
 	scale        int
@@ -113,7 +125,16 @@ func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
 		sqliteTarget = NewSQLiteTarget(path, cfg.migrations)
 		target = sqliteTarget
 	case "http":
-		target = &HTTPTarget{BaseURL: cfg.baseURL}
+		dir := cfg.engineDir
+		if dir != "" {
+			dir = filepath.Join(dir, fmt.Sprintf("scale-%d", cfg.scale))
+		}
+		target = &HTTPTarget{
+			BaseURL: cfg.baseURL,
+			Binary:  cfg.cairnBinary,
+			DataDir: dir,
+			Verbose: cfg.verbose,
+		}
 	default:
 		return res, fmt.Errorf("unknown target %q: expected sqlite or http", cfg.targetName)
 	}
@@ -127,13 +148,31 @@ func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
 	if err := target.Setup(ctx, workload, cfg.rollupHours); err != nil {
 		return res, fmt.Errorf("setup at %d monitors: %w", cfg.scale, err)
 	}
-	fmt.Printf("seeded in %s\n", time.Since(start).Round(time.Millisecond))
+	seeding := time.Since(start)
+	res.SeedRate = float64(cfg.scale) / seeding.Seconds()
+	fmt.Printf("seeded in %s (%.0f monitors/sec)\n", seeding.Round(time.Millisecond), res.SeedRate)
 
-	rate, err := measureWriteRate(ctx, target, workload, cfg.writeSeconds)
+	writes, err := target.MeasureWrites(ctx, workload, cfg.writeSeconds)
 	if err != nil {
 		return res, fmt.Errorf("write test at %d monitors: %w", cfg.scale, err)
 	}
-	res.WriteRate = rate
+	res.Writes = writes
+
+	if cfg.partition {
+		disruptor, ok := target.(Disruptor)
+		switch {
+		case !ok:
+			// Said rather than skipped. A phase that vanishes silently is a
+			// phase somebody assumes ran.
+			fmt.Println("partition phase skipped: this target has no engine to react to a failing host")
+		default:
+			p, err := measurePartition(ctx, target, disruptor, workload)
+			if err != nil {
+				return res, fmt.Errorf("partition at %d monitors: %w", cfg.scale, err)
+			}
+			res.Partition = &p
+		}
+	}
 
 	r := rand.New(rand.NewSource(cfg.seed))
 	for _, sc := range cfg.scenarios {
@@ -163,32 +202,152 @@ func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
 	return res, nil
 }
 
-// measureWriteRate drives sustained batched heartbeat writes. Batching is the
-// contract, not a shortcut: the data model requires one transaction per scheduler
-// tick because SQLite fsyncs per commit.
-func measureWriteRate(ctx context.Context, target Target, w *Workload, seconds int) (float64, error) {
-	if seconds <= 0 {
-		return 0, nil
-	}
-	r := rand.New(rand.NewSource(7))
-	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+// measurePartition breaks everything at once and watches the engine notice.
+//
+// This is the scenario the whole harness was missing. The read scenarios measure
+// a system at rest; the write phase measures it in steady state. Neither touches
+// the case the delivery queues were actually sized for — several thousand
+// monitors transitioning inside one scheduler tick — and until now that size has
+// been an argument in a comment rather than a measurement.
+//
+// Three numbers come out. How long the fleet takes to be marked down, which is
+// the product promise. How much of the alert burst survived, which is the queue
+// depth argument settled. And whether the probe shed anything, because shedding
+// under a burst is correct behaviour that must still be visible: a probe quietly
+// dropping results looks exactly like a target that recovered.
+func measurePartition(ctx context.Context, target Target, d Disruptor, w *Workload) (PartitionResult, error) {
+	var out PartitionResult
+	total := int64(len(w.Monitors))
 
-	// One tick writes every monitor's result, which is what the scheduler does.
-	written := 0
-	at := w.BaseTime
-	start := time.Now()
-	for time.Now().Before(deadline) {
-		batch := w.HeartbeatBatch(at, 0, len(w.Monitors), r)
-		if err := target.WriteHeartbeats(ctx, batch); err != nil {
-			return 0, err
-		}
-		written += len(batch)
-		at = at.Add(20 * time.Second)
+	before, err := d.Counters(ctx)
+	if err != nil {
+		return out, err
 	}
-	elapsed := time.Since(start).Seconds()
-	rate := float64(written) / elapsed
-	fmt.Printf("wrote %d heartbeats in %.1fs = %.0f/sec\n", written, elapsed, rate)
-	return rate, nil
+	deliveredBefore := d.Deliveries()
+
+	// The baseline matters. A realistic workload is not entirely healthy — a few
+	// percent are down before anything is broken — and recovery means returning
+	// to that, not to zero. Waiting for zero would hang forever and then be
+	// reported as a failure to recover, which would be the harness's bug
+	// attributed to the engine.
+	baseline, err := target.Membership(ctx, ListQuery{Status: "down"})
+	if err != nil {
+		return out, err
+	}
+	out.BaselineDown = baseline.Count
+
+	fmt.Printf("partitioning: every monitored endpoint starts failing at once (%d were already down)\n",
+		out.BaselineDown)
+	if err := d.Partition(ctx, false); err != nil {
+		return out, err
+	}
+
+	// Polled through the membership endpoint, which is exactly what it is for:
+	// a cheap count for a filter, asked repeatedly. Using the monitor listing
+	// instead would page through 5,000 rows to count them.
+	down, elapsed, err := waitForDown(ctx, target, total, partitionDeadline(w))
+	if err != nil {
+		return out, err
+	}
+	out.DownCount = down
+	out.TimeToDetect = elapsed
+	out.Total = total
+
+	fmt.Printf("recovering\n")
+	if err := d.Partition(ctx, true); err != nil {
+		return out, err
+	}
+	stillDown, recoverElapsed, err := waitForRecovery(ctx, target, out.BaselineDown, partitionDeadline(w))
+	if err != nil {
+		return out, err
+	}
+	out.RecoveredTo = total - stillDown
+	out.TimeToRecover = recoverElapsed
+
+	// A moment for the delivery queues to drain before the counters are read.
+	// Alerting is fire-and-forget by design, so a count taken the instant the
+	// last monitor recovers is a count of a queue still in flight.
+	select {
+	case <-ctx.Done():
+		return out, ctx.Err()
+	case <-time.After(3 * time.Second):
+	}
+
+	after, err := d.Counters(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.AlertsPublished = after.AlertsPublished - before.AlertsPublished
+	out.AlertsDropped = after.AlertsDropped - before.AlertsDropped
+	out.WebhooksDropped = after.WebhookEventsDropped - before.WebhookEventsDropped
+	out.WebhooksDelivered = d.Deliveries() - deliveredBefore
+	out.ProbeShed = after.ProbeShedResults - before.ProbeShedResults
+	out.ProbeSkipped = after.ProbeSkippedChecks - before.ProbeSkippedChecks
+	out.Rejected = after.ResultsRejected - before.ResultsRejected
+
+	fmt.Printf("detected %d/%d down in %s, recovered %d in %s\n",
+		out.DownCount, out.Total, out.TimeToDetect.Round(time.Millisecond),
+		out.RecoveredTo, out.TimeToRecover.Round(time.Millisecond))
+	fmt.Printf("alert burst: %d published, %d dropped; webhooks %d delivered, %d dropped\n",
+		out.AlertsPublished, out.AlertsDropped, out.WebhooksDelivered, out.WebhooksDropped)
+	return out, nil
+}
+
+// partitionDeadline is how long the engine is given to notice. Three intervals
+// plus a margin: one for the check in flight when the partition landed, one for
+// the next scheduled round, and one for the ingest and state writes behind it.
+func partitionDeadline(w *Workload) time.Duration {
+	return time.Duration(monitorInterval)*time.Second*3 + 30*time.Second
+}
+
+func waitForDown(ctx context.Context, target Target, total int64, within time.Duration) (int64, time.Duration, error) {
+	start := time.Now()
+	deadline := start.Add(within)
+
+	var last int64
+	for time.Now().Before(deadline) {
+		res, err := target.Membership(ctx, ListQuery{Status: "down"})
+		if err != nil {
+			return last, time.Since(start), err
+		}
+		last = res.Count
+		if last >= total {
+			return last, time.Since(start), nil
+		}
+		select {
+		case <-ctx.Done():
+			return last, time.Since(start), ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	// Returned rather than errored: "it marked 4,900 of 5,000 down in 70
+	// seconds" is a finding the gate should report, not a crash.
+	return last, time.Since(start), nil
+}
+
+// waitForRecovery waits for the down count to fall back to the baseline — the
+// monitors that were failing before the partition and are meant to keep failing.
+func waitForRecovery(ctx context.Context, target Target, baseline int64, within time.Duration) (int64, time.Duration, error) {
+	start := time.Now()
+	deadline := start.Add(within)
+
+	last := int64(-1)
+	for time.Now().Before(deadline) {
+		res, err := target.Membership(ctx, ListQuery{Status: "down"})
+		if err != nil {
+			return last, time.Since(start), err
+		}
+		last = res.Count
+		if last <= baseline {
+			return last, time.Since(start), nil
+		}
+		select {
+		case <-ctx.Done():
+			return last, time.Since(start), ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return last, time.Since(start), nil
 }
 
 func report(scenarios []Scenario, results []ScaleResult, findings []Finding) {
@@ -231,8 +390,40 @@ func report(scenarios []Scenario, results []ScaleResult, findings []Finding) {
 
 	fmt.Println()
 	for _, res := range results {
-		fmt.Printf("%d monitors: %.0f heartbeats/sec sustained, database %.1f MiB\n",
-			res.Scale, res.WriteRate, float64(res.DBBytes)/(1024*1024))
+		line := fmt.Sprintf("%d monitors: %.1f heartbeats/sec", res.Scale, res.Writes.Rate)
+		if res.Writes.Expected > 0 {
+			line += fmt.Sprintf(" against %.1f/sec implied by the schedule", res.Writes.Expected)
+		}
+		if res.Writes.TargetRequests > 0 {
+			line += fmt.Sprintf(", %d requests seen by the checked endpoint", res.Writes.TargetRequests)
+		}
+		if res.Writes.Redelivered > 0 {
+			line += fmt.Sprintf(", %d results redelivered", res.Writes.Redelivered)
+		}
+		if res.DBBytes > 0 {
+			line += fmt.Sprintf(", database %.1f MiB", float64(res.DBBytes)/(1024*1024))
+		}
+		if res.SeedRate > 0 {
+			line += fmt.Sprintf("; seeded at %.0f monitors/sec", res.SeedRate)
+		}
+		// The method travels with the number. Two rates measured different ways
+		// printed in the same column without saying so is how a report becomes
+		// misleading without anybody writing anything false.
+		fmt.Println(line)
+		fmt.Printf("  %s\n", res.Writes.Method)
+	}
+
+	for _, res := range results {
+		p := res.Partition
+		if p == nil {
+			continue
+		}
+		fmt.Printf("\n%d monitors, total partition:\n", res.Scale)
+		fmt.Printf("  detected   %d/%d down in %s\n", p.DownCount, p.Total, p.TimeToDetect.Round(time.Millisecond))
+		fmt.Printf("  recovered  %d/%d up in %s\n", p.RecoveredTo, p.Total, p.TimeToRecover.Round(time.Millisecond))
+		fmt.Printf("  alerts     %d published, %d shed\n", p.AlertsPublished, p.AlertsDropped)
+		fmt.Printf("  webhooks   %d delivered, %d shed\n", p.WebhooksDelivered, p.WebhooksDropped)
+		fmt.Printf("  probe      %d results shed, %d checks skipped\n", p.ProbeShed, p.ProbeSkipped)
 	}
 
 	if len(findings) == 0 {
@@ -261,7 +452,8 @@ func writeJSON(path string, scenarios []Scenario, results []ScaleResult, finding
 		Scenarios []scenarioJSON `json:"scenarios"`
 		Findings  []Finding      `json:"findings"`
 		WriteRate map[string]any `json:"write_rate"`
-	}{Findings: findings, WriteRate: map[string]any{}}
+		Partition map[string]any `json:"partition,omitempty"`
+	}{Findings: findings, WriteRate: map[string]any{}, Partition: map[string]any{}}
 
 	for _, res := range results {
 		for _, sc := range scenarios {
@@ -274,7 +466,15 @@ func writeJSON(path string, scenarios []Scenario, results []ScaleResult, finding
 				})
 			}
 		}
-		out.WriteRate[strconv.Itoa(res.Scale)] = res.WriteRate
+		out.WriteRate[strconv.Itoa(res.Scale)] = map[string]any{
+			"rate":     res.Writes.Rate,
+			"expected": res.Writes.Expected,
+			"method":   res.Writes.Method,
+			"shed":     res.Writes.Shed,
+		}
+		if res.Partition != nil {
+			out.Partition[strconv.Itoa(res.Scale)] = res.Partition
+		}
 	}
 
 	body, err := json.MarshalIndent(out, "", "  ")

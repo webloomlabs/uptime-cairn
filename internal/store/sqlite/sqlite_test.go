@@ -175,10 +175,24 @@ func TestWriteBatchIsIdempotent(t *testing.T) {
 		Attempt:   1,
 	}}
 
-	for range 2 {
-		if err := s.WriteBatch(t.Context(), beats); err != nil {
-			t.Fatalf("write: %v", err)
-		}
+	// The returned count is the contract the metrics depend on: rows actually
+	// inserted, not results offered. Without this assertion the load-test
+	// harness reported twice the throughput the database contained, which is a
+	// measurement error that looks exactly like good news.
+	first, err := s.WriteBatch(t.Context(), beats)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if first != 1 {
+		t.Errorf("first write reported %d rows, want 1", first)
+	}
+
+	second, err := s.WriteBatch(t.Context(), beats)
+	if err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	if second != 0 {
+		t.Errorf("resending the same batch reported %d rows written, want 0", second)
 	}
 
 	got, _, err := s.ListHeartbeats(t.Context(), m.ID, nil, 10, false)
@@ -218,7 +232,7 @@ func TestListHeartbeatsFiltersAndOrders(t *testing.T) {
 			Important: i == 2,
 		})
 	}
-	if err := s.WriteBatch(t.Context(), beats); err != nil {
+	if _, err := s.WriteBatch(t.Context(), beats); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 

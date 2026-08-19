@@ -1379,6 +1379,110 @@ maintenance window the operator declared. A monitor with nothing measured is
 absent from the response-time series rather than reported as zero — zero is a
 measurement of zero, which is a different claim.
 
+## The load test, against the real engine
+
+```sh
+go build -o /tmp/cairn ./cmd/cairn
+cd harness && go build -o harness .
+./harness -target http -cairn /tmp/cairn -scales 500,5000
+```
+
+The harness starts the binary itself, creates the monitors through the real API
+pointed at an endpoint it serves, and then mostly watches. See
+[harness/README.md](../../harness/README.md) for what it asserts and why.
+
+Two results worth knowing before reading the numbers.
+
+**The write measurement means opposite things on the two targets.** The SQLite
+target *drives* batches as fast as storage will take them — a ceiling. The HTTP
+target *observes* the engine's own counter — a rate bounded by arithmetic, since
+N monitors on an I-second interval produce N/I results a second and cannot
+produce more. So the assertion differs: clear the floor on one, achieve the
+schedule on the other. At 5,000 monitors on the 20-second floor:
+
+```
+5000 monitors: 239.6 heartbeats/sec against 250.0/sec implied by the schedule,
+               7620 requests seen by the checked endpoint
+```
+
+That last figure is the one the engine cannot fake — it is counted by the harness
+on the other side of the network. A gap between it and the heartbeat count would
+mean results were produced and never stored, and no engine counter would say so.
+
+**A total partition is the burst the delivery queues were sized against**, and
+until now that size was an argument in a comment:
+
+```
+5000 monitors, total partition:
+  detected   5000/5000 down in 20.633s
+  recovered  4841/5000 up in 20.923s
+  alerts     9682 published, 0 shed
+  webhooks   9682 delivered, 0 shed
+  probe      0 results shed, 0 checks skipped
+```
+
+Every monitor marked down inside one interval, every one back afterwards, and
+nothing dropped on the way. The 159 that did not recover are the ones the
+workload keeps permanently failing, so that `status=down` filters something real
+rather than an empty set.
+
+### What it found
+
+- **Creating monitors was quadratic.** Every write woke the assignment publisher,
+  which reloaded and re-diffed the whole set — 2,116 full recomputations for
+  5,000 creations, and the run never finished. The publisher now settles for a
+  second first, which is invisible against a 20-second interval.
+- **Creation still degrades with size**: 1,144/sec at 500 monitors, 38/sec at
+  5,000. The reload holds the store's single connection while it scans every
+  assignable monitor. That is the open reader-pool item, now with a number.
+- **The harness's own first answer was wrong**, which is worth saying because the
+  fix is the interesting part. It reported 499 heartbeats/sec against 250
+  implied, and the engine was fine: it was draining the backlog built while
+  seeding saturated the writer. Rows counted by check time said 250/sec; rows
+  counted by write time said 500. Both were true. The warm-up now waits for the
+  observed rate to settle instead of sleeping a fixed interval.
+
+## Self-metrics
+
+`/metrics` now carries what the process knows about itself, which is what the
+load test reads and what an operator would alert on:
+
+```
+cairn_heartbeats_written_total 45626
+cairn_results_ingested_total 45626
+cairn_probe_shed_results_total{probe_id="…",probe="embedded"} 0
+cairn_probe_skipped_checks_total{probe_id="…",probe="embedded"} 0
+cairn_probe_due_queue_depth{probe_id="…",probe="embedded"} 12
+cairn_alerts_dropped_total 0
+```
+
+Two pairs are worth explaining.
+
+**Written against ingested.** They differ exactly when a probe redelivers: the
+natural key absorbs the repeat, so results are offered and no rows result. That
+is correct behaviour and still work being done twice. One counter for both would
+make "the probe is resending" and "the system is doing twice the work"
+indistinguishable — which is precisely the confusion that produced the 499/sec
+figure above.
+
+**The probe's numbers arrive on the result stream.** A probe has no inbound port;
+it dials out and never listens. So its self-report rides the result batches and
+the control plane republishes it here, labelled by probe. In solo mode the probe
+is in this process and the path is identical, which is the point: what an
+operator reads is produced by the same code a remote probe will run. The gauges
+lag by up to one health interval, thirty seconds.
+
+`cairn_probe_shed_results_total` and `cairn_probe_skipped_checks_total` matter
+most. A probe under overload sheds rather than queueing, and shedding is
+invisible from the monitor's side *by design* — the whole outcome taxonomy exists
+so that probe overload never looks like target downtime, which means it has to
+look like something here instead.
+
+Scraping is unauthenticated from loopback and needs an API key holding
+`metrics:read` from anywhere else. A Prometheus on the same host is the
+overwhelmingly common deployment, and a metrics endpoint that needs a credential
+is one somebody turns off.
+
 ## What the API answers
 
 | | Scope |
@@ -1417,6 +1521,7 @@ measurement of zero, which is a different claim.
 | `GET/POST /api/v1/push/{token}` | None — the token is the credential |
 | `GET /api/v1/public/status-pages/{slug}` and the rest of `/public/` | None — a status page whose audience needs a credential is not a status page |
 | `GET /metrics` | None from loopback; `metrics:read` from anywhere else |
+| — | Engine counters, plus each probe's self-report republished from the result stream |
 | `POST /api/v1/imports/kuma`, `GET /api/v1/imports/{id}` | `501` — the endpoint is in the contract and the importer is a separate deliverable |
 
 Errors are RFC 9457 problem documents, and clients branch on `type`:
@@ -1525,5 +1630,10 @@ an aeroplane is a test that gets deleted.
   that it is one static file, and that is a decision worth taking on purpose.
 - **Generated Go and TypeScript clients.** Codegen belongs in CI, and CI is not
   changed without being asked.
-- **The load-test harness against the real engine.** Its `http` target still
-  refuses to run, which is the honest state until someone points it here.
+- **The engine load test in CI.** The harness drives the real engine now and the
+  5,000-monitor gate passes, but the workflow still runs the SQLite target only.
+  Wiring the engine run in is a change to `.github/workflows/load-test.yml`, and
+  CI configuration is not edited without being asked (AGENTS.md rule 7).
+- **A concurrent-viewer dimension in the load test.** Membership polling costs
+  6.2ms at 5,000 monitors, and its cost scales with connected clients rather than
+  with monitor count — the one dimension the gate does not exercise.

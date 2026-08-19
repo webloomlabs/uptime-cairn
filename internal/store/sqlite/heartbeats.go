@@ -19,14 +19,19 @@ import (
 // was written but not acknowledged before the connection dropped is resent, and
 // the resend must be a no-op rather than a second row. The natural key
 // (org_id, monitor_id, time, probe_id) is the idempotency key (data model §11.8).
-func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) error {
+// It returns how many rows were actually inserted, which is not the same as how
+// many results it was given: a resent batch is deduplicated by the natural key
+// and inserts nothing. The difference is worth reporting rather than hiding,
+// because "the probe is redelivering" and "the system is writing twice as much"
+// look identical from a counter that cannot tell them apart.
+func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) (int64, error) {
 	if len(beats) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -37,24 +42,32 @@ func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) error {
 		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT DO NOTHING`)
 	if err != nil {
-		return fmt.Errorf("prepare heartbeat insert: %w", err)
+		return 0, fmt.Errorf("prepare heartbeat insert: %w", err)
 	}
 	defer func() { _ = stmt.Close() }()
 
+	var written int64
 	for _, b := range beats {
 		var responseTime any
 		if b.ResponseTime != nil {
 			responseTime = float64(b.ResponseTime.Microseconds()) / 1000.0
 		}
-		if _, err := stmt.ExecContext(ctx,
+		result, err := stmt.ExecContext(ctx,
 			micros(b.Time), b.MonitorID[:], b.OrgID[:], b.ProbeID[:], int64(b.Status),
 			responseTime, nullString(b.Code), nullString(b.Message), b.Attempt,
 			boolToInt(b.Important), boolToInt(b.Suppressed), nullReason(b.SuppressionReason),
-		); err != nil {
-			return fmt.Errorf("insert heartbeat: %w", err)
+		)
+		if err != nil {
+			return 0, fmt.Errorf("insert heartbeat: %w", err)
+		}
+		if affected, err := result.RowsAffected(); err == nil {
+			written += affected
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return written, nil
 }
 
 // nullReason stores the suppression reason as an integer, or null when there was

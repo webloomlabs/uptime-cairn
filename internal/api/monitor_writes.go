@@ -12,6 +12,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
+	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 )
 
 // The monitor write surface beyond create and delete: partial update, pause,
@@ -446,6 +447,7 @@ func (s *Server) runMonitorCheck(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	observation := checker.Check(ctx, config)
 
+	telemetry.Engine.ChecksRunInline.Add(1)
 	beat, err := s.push.RecordCheck(r.Context(), monitor, observation.Status,
 		observation.Code, observation.Message, observation.ResponseTime)
 	if err != nil {

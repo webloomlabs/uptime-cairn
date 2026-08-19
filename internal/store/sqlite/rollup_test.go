@@ -65,7 +65,7 @@ func writeBeats(t *testing.T, s *Store, m model.Monitor, from time.Time, every t
 		beats[i].ProbeID = model.EmbeddedProbeID
 		at = at.Add(every)
 	}
-	if err := s.WriteBatch(t.Context(), beats); err != nil {
+	if _, err := s.WriteBatch(t.Context(), beats); err != nil {
 		t.Fatalf("write heartbeats: %v", err)
 	}
 }
@@ -425,7 +425,7 @@ func TestRetentionActuallyReclaimsDisk(t *testing.T) {
 			Message: "a message long enough that twenty thousand of them are worth reclaiming",
 		})
 	}
-	if err := s.WriteBatch(t.Context(), batch); err != nil {
+	if _, err := s.WriteBatch(t.Context(), batch); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// Checkpoint so the pages are in the main file rather than the WAL.

@@ -14,6 +14,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
+	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
 
@@ -26,7 +27,7 @@ type Store interface {
 	LoadMonitor(ctx context.Context, id model.ID) (model.Monitor, error)
 	GetState(ctx context.Context, id model.ID) (model.MonitorState, error)
 	SaveState(ctx context.Context, state model.MonitorState) error
-	WriteBatch(ctx context.Context, beats []model.Heartbeat) error
+	WriteBatch(ctx context.Context, beats []model.Heartbeat) (int64, error)
 }
 
 // ConfigOpener decrypts the credential half of a monitor's configuration.
@@ -60,6 +61,33 @@ const (
 	resultFlushInterval   = time.Second
 	assignmentChunkSize   = 500
 )
+
+// assignmentSettle is how long a change signal waits before the assignment set
+// is recomputed, so that a burst of writes produces one delta instead of one
+// each.
+//
+// It exists because recomputing is not cheap: it reloads every assignable
+// monitor, decrypts each one's credentials, and diffs the result against the
+// previous set. One recompute per write makes creating N monitors O(N²), which
+// the load-test harness found by creating 5,000 through the API — 2,116 full
+// recomputations before it gave up. That is not only a seeding concern: the Kuma
+// importer and any script driving the API in a loop take the same path.
+//
+// One second is chosen against what it costs. The spec promises only that a new
+// monitor "begins checking on the next scheduler tick", and the finest interval
+// this product offers is twenty seconds — so a delta arriving a second later
+// changes nothing an operator can observe, while at 250ms the harness still
+// measured 412 recomputations for one bulk creation.
+//
+// A fixed window rather than waiting for quiet: waiting for quiet would let a
+// continuous stream of writes starve the probe of updates indefinitely, which is
+// a worse failure than a second of latency.
+//
+// This does not make the recompute cheap, it makes it rarer. The underlying cost
+// is that the reload holds the store's single connection while it scans every
+// assignable monitor, so writes queue behind it — which is the open "reader pool
+// alongside the single writer" item, now with a number against it.
+const assignmentSettle = time.Second
 
 // Server implements the probe-facing gRPC service.
 //
@@ -218,6 +246,22 @@ func (s *Server) WatchAssignments(req *probev1.WatchAssignmentsRequest, stream p
 			return nil
 
 		case <-changed:
+			// Pause before recomputing, and swallow anything that arrives during
+			// the pause: the reload below reads the store, so a signal from a
+			// write that has already committed is a signal for a change this
+			// recompute is about to pick up anyway.
+			settle := time.NewTimer(assignmentSettle)
+			select {
+			case <-ctx.Done():
+				settle.Stop()
+				return nil
+			case <-settle.C:
+			}
+			select {
+			case <-changed:
+			default:
+			}
+
 			next, nextRev, err := s.assignments(ctx)
 			if err != nil {
 				s.log.Error("reload assignments", "error", err)
@@ -427,14 +471,49 @@ func (s *Server) StreamResults(stream probev1.ProbeService_StreamResultsServer) 
 			continue
 		}
 
-		if health := batch.GetHealth(); health != nil && health.GetShedResultsTotal() > 0 {
-			s.log.Warn("probe is shedding results",
-				"shed_total", health.GetShedResultsTotal(),
-				"buffered", health.GetBufferedResults())
+		if health := batch.GetHealth(); health != nil {
+			// Republished rather than only logged. A probe has no inbound port
+			// to scrape, so this frame is the only way its numbers reach an
+			// operator — and "the probe is shedding" is precisely the quiet
+			// failure that has to be visible on a dashboard rather than found in
+			// a log after the fact (docs/probe/protocol.md §8).
+			s.recordHealth(health)
+
+			if health.GetShedResultsTotal() > 0 {
+				s.log.Warn("probe is shedding results",
+					"shed_total", health.GetShedResultsTotal(),
+					"buffered", health.GetBufferedResults())
+			}
 		}
 
 		if err := stream.Send(ack); err != nil {
 			return err
 		}
 	}
+}
+
+// recordHealth republishes a probe's self-report through the telemetry registry,
+// where /metrics picks it up.
+//
+// Solo mode has one probe and its id is the sentinel; Phase 4's fleet will label
+// each series by the probe that reported it, which is why the id travels rather
+// than being assumed.
+func (s *Server) recordHealth(h *probev1.ProbeHealth) {
+	telemetry.RecordProbeHealth(telemetry.ProbeHealth{
+		ProbeID:              s.probeID.String(),
+		Name:                 "embedded",
+		ReportedAt:           time.UnixMicro(h.GetTimeUnixMicros()).UTC(),
+		Assigned:             h.GetAssignedCount(),
+		InFlight:             h.GetInFlightChecks(),
+		MaxConcurrent:        h.GetMaxConcurrentChecks(),
+		DueQueueDepth:        h.GetDueQueueDepth(),
+		BufferedResults:      h.GetBufferedResults(),
+		BufferedBytes:        h.GetBufferedBytes(),
+		ShedResultsTotal:     h.GetShedResultsTotal(),
+		SkippedChecksTotal:   h.GetSkippedChecksTotal(),
+		ChecksStartedTotal:   h.GetChecksStartedTotal(),
+		ChecksCompletedTotal: h.GetChecksCompletedTotal(),
+		UptimeSeconds:        h.GetProcessUptimeSeconds(),
+		ClockOffsetMicros:    h.GetClockOffsetMicros(),
+	})
 }

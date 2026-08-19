@@ -11,6 +11,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
+	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 )
 
 // The delivery pipeline.
@@ -205,9 +206,12 @@ func (d *Dispatcher) Wait() {
 // of rows through the same single writer the backlog is already waiting on —
 // the log line names the count instead.
 func (d *Dispatcher) Publish(ev Event) {
+	telemetry.Engine.AlertsPublished.Add(1)
+
 	select {
 	case d.queue <- job{event: ev, attempt: 1}:
 	default:
+		telemetry.Engine.AlertsDropped.Add(1)
 		d.mu.Lock()
 		d.dropped++
 		total := d.dropped

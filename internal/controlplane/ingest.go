@@ -9,6 +9,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
+	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
 
@@ -101,9 +102,17 @@ func (s *Server) ingestResults(ctx context.Context, results []*probev1.Result) (
 		}
 	}
 
-	if err := s.store.WriteBatch(ctx, beats); err != nil {
+	written, err := s.store.WriteBatch(ctx, beats)
+	if err != nil {
 		return nil, nil, fmt.Errorf("write heartbeats: %w", err)
 	}
+	// Counted after the write returns, never before: a counter that moves on
+	// intent rather than on completion reports a healthy system while it is
+	// losing data. Rows and results are counted separately because they differ
+	// under redelivery, and the gap is the only visible sign of it.
+	telemetry.Engine.HeartbeatsWritten.Add(uint64(written))
+	telemetry.Engine.ResultsIngested.Add(uint64(len(beats)))
+	telemetry.Engine.ResultsRejected.Add(uint64(rejected))
 	for _, state := range states {
 		if err := s.store.SaveState(ctx, *state); err != nil {
 			return nil, nil, fmt.Errorf("save state %s: %w", state.MonitorID, err)

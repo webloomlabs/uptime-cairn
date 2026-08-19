@@ -75,12 +75,12 @@ func (f *fakeStore) SaveState(_ context.Context, s model.MonitorState) error {
 	return nil
 }
 
-func (f *fakeStore) WriteBatch(_ context.Context, beats []model.Heartbeat) error {
+func (f *fakeStore) WriteBatch(_ context.Context, beats []model.Heartbeat) (int64, error) {
 	if f.writeErr != nil {
-		return f.writeErr
+		return 0, f.writeErr
 	}
 	f.written = append(f.written, beats...)
-	return nil
+	return int64(len(beats)), nil
 }
 
 func newTestServer(retries int) (*Server, *fakeStore) {
