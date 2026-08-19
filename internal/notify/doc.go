@@ -1,9 +1,19 @@
 // Package notify delivers alerts.
 //
-// Thirteen native channels plus Apprise as a meta-provider for the long tail,
-// and webhook payload templating with a preview that renders through the same
-// code path as delivery — a preview that lies is worse than no preview
+// Twelve native channels plus Apprise as a meta-provider for the long tail, and
+// webhook payload templating with a preview that renders through the same code
+// path as delivery — a preview that lies is worse than no preview
 // (PHASE-1-PLAN.md §3.3, §3.4).
+//
+// The layout, because the file names alone do not say which layer is which:
+//
+//   - event.go     what happened, flattened so a retry describes the world as it
+//     was when the event fired rather than as it is now
+//   - template.go  the interpolator, and the variable catalogue the API publishes
+//   - config.go    the thirteen config schemas, and the secret/public split
+//   - provider.go  the shared transport, and the default rendering
+//   - the rest     one file per group of providers
+//   - dispatcher.go the queue, the retry policy, and the delivery log
 //
 // Two rules that are easy to lose under deadline:
 //

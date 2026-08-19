@@ -73,6 +73,28 @@ type MonitorWithState struct {
 	State   model.MonitorState
 }
 
+// ChannelWithCount is a notification channel plus how many monitors point at
+// it. The count comes from the same query rather than a second round trip,
+// because a channel list is exactly where an operator asks "is anything using
+// this?" before deleting one.
+type ChannelWithCount struct {
+	Channel      model.NotificationChannel
+	MonitorCount int
+}
+
+// ChannelFilter narrows a channel listing. Every field is optional; the zero
+// value lists everything.
+type ChannelFilter struct {
+	// Search matches the channel name, case-insensitively.
+	Search string
+
+	// Types restricts to these channel types. Empty means all.
+	Types []string
+
+	// Enabled restricts to enabled or disabled channels. Nil means both.
+	Enabled *bool
+}
+
 // Cursor is ADR-004's pagination key: (updated_at, id), applied uniformly with
 // no small-install exception where the full set is sent because it happens to
 // fit today.

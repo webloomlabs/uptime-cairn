@@ -137,3 +137,22 @@ type Availability interface {
 	// not matched on.
 	Availability() (available bool, reason string)
 }
+
+// Targeter is an optional interface a Checker may implement to name what a
+// monitor points at, in one line, from its config.
+//
+// It exists because monitors.target is a promoted column: "what else points at
+// this host?" has to be an indexed query rather than a JSON scan across 5,000
+// rows (data model §4.1). Promoting it needs the config parsed, and the checker
+// is the only thing that knows how — the alternative is a second table of field
+// names in the API layer, which would make adding a monitor type two edits in
+// two packages instead of one registration.
+//
+// It is also the line an alert leads with, so a checker that does not implement
+// this costs its users the most useful sentence in the notification.
+type Targeter interface {
+	// Target is a short, human-readable identifier: a URL, a host:port, a
+	// domain, a container name. Never a credential, because it is stored
+	// unencrypted, indexed, and rendered into alerts.
+	Target(config []byte) string
+}

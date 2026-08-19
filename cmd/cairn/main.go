@@ -43,6 +43,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		"root key for encryption at rest: 32 bytes, raw or base64 (default: generated into the data dir)")
 	fs.StringVar(&cfg.InstanceName, "instance-name", cfg.InstanceName,
 		"name shown in authenticator apps and on status pages")
+	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL,
+		"public URL of this install, used in alert links (default: none, and alerts carry no link)")
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {

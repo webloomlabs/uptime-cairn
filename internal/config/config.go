@@ -47,6 +47,12 @@ type Config struct {
 	// InstanceName is what an authenticator app shows beside the account, and
 	// what a status page will call this install.
 	InstanceName string
+
+	// BaseURL is where this install is reachable from outside — the value that
+	// turns an alert into something clickable. Empty by default and empty in the
+	// event envelope when unset, because guessing it from the listen address
+	// would put http://0.0.0.0:3000 in somebody's pager.
+	BaseURL string
 }
 
 // Default matches the published quick start in README.md — port 3000, /data as

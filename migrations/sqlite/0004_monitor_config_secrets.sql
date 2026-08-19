@@ -1,0 +1,26 @@
+-- 0004_monitor_config_secrets — the encrypted half of a monitor's configuration.
+--
+-- Derived from docs/data-model/README.md §12.1, which names "monitors.config
+-- secret fields — HTTP basic/bearer credentials, gRPC metadata, Docker client
+-- TLS key" among the values that must be encrypted rather than hashed, and from
+-- the frozen OpenAPI spec, where every one of those properties is marked
+-- writeOnly with the words "stored encrypted, redacted on read".
+--
+-- The split mirrors notification_channels: the non-secret configuration stays in
+-- `config` as queryable JSON, and the credentials move into an opaque envelope
+-- beside it. Encrypting the whole blob would have been less code and worse — the
+-- CHECK constraint asserting json_valid(config) would have to go, and with it
+-- every future query that reads a monitor's settings without holding the key.
+--
+-- The column is nullable and every existing row starts null. A monitor written
+-- before this migration keeps its credentials in `config` until something
+-- rewrites it, so the process re-seals them on start rather than leaving that to
+-- chance; see internal/app.
+--
+-- PRE-RELEASE: nothing has shipped, so this file may still change. From Phase 1's
+-- first tagged release it is immutable per data model §8.
+
+-- AES-256-GCM envelope, AAD-bound to (org_id, 'monitors', 'config', id), so a
+-- blob moved onto another monitor's row fails to open rather than being read
+-- against the wrong monitor (§12.2).
+ALTER TABLE monitors ADD COLUMN config_secrets BLOB;

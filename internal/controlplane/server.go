@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
@@ -25,6 +26,15 @@ type Store interface {
 	GetState(ctx context.Context, id model.ID) (model.MonitorState, error)
 	SaveState(ctx context.Context, state model.MonitorState) error
 	WriteBatch(ctx context.Context, beats []model.Heartbeat) error
+}
+
+// Alerter is where state changes go. Declared here by the consumer, and
+// deliberately fire-and-forget: an alerting backlog must never become
+// backpressure on heartbeat ingest, because the moment alerting is under strain
+// is the moment heartbeats matter most.
+type Alerter interface {
+	Publish(ev notify.Event)
+	Instance() notify.Instance
 }
 
 // Tuning the control plane hands the probe at registration. Every value has a
@@ -47,14 +57,45 @@ type Server struct {
 
 	store   Store
 	pub     *Publisher
+	alerts  Alerter
 	log     *slog.Logger
 	probeID model.ID
 	orgID   model.ID
 }
 
-// New returns a control-plane server bound to one store.
-func New(store Store, pub *Publisher, log *slog.Logger, probeID, orgID model.ID) *Server {
-	return &Server{store: store, pub: pub, log: log, probeID: probeID, orgID: orgID}
+// New returns a control-plane server bound to one store. alerts may be nil, in
+// which case transitions are recorded and nothing is sent — which is what a test
+// that is not exercising delivery wants.
+func New(store Store, pub *Publisher, alerts Alerter, log *slog.Logger, probeID, orgID model.ID) *Server {
+	return &Server{store: store, pub: pub, alerts: alerts, log: log, probeID: probeID, orgID: orgID}
+}
+
+// raise publishes the events a batch produced, after the batch is durable.
+func (s *Server) raise(pending []pendingAlert) {
+	if s.alerts == nil || len(pending) == 0 {
+		return
+	}
+	instance := s.alerts.Instance()
+	for _, p := range pending {
+		beat := p.beat
+		status := statusFor(p.alert.eventType)
+		s.alerts.Publish(notify.NewEvent(
+			p.alert.eventType, instance, p.monitor, p.alert.previous, &beat, status, beat.Time))
+	}
+}
+
+// statusFor is the monitor status the event describes. Taken from the event type
+// rather than from the state, which by the time this runs has already been
+// written and could have moved on within the same batch.
+func statusFor(eventType string) string {
+	switch eventType {
+	case model.EventMonitorUp:
+		return model.MonitorStatusUp
+	case model.EventMonitorDown:
+		return model.MonitorStatusDown
+	default:
+		return model.MonitorStatusPending
+	}
 }
 
 // Enrol is Phase 4. Solo mode performs no enrolment and holds no credentials:

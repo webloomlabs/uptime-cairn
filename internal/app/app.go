@@ -33,6 +33,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/config"
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
@@ -79,8 +80,24 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	// rare enough to be invisible.
 	go sweepSessions(ctx, store, log)
 
+	// Alerting. Started before the control plane because the control plane
+	// publishes into it: a transition that happens in the first second of a
+	// process's life is as real as any other.
+	//
+	// The dispatcher is fire-and-forget by design. Ingest must never block on a
+	// mail server, because the moment alerting is under strain is exactly the
+	// moment heartbeats matter most.
+	alerts := notify.NewDispatcher(store, notify.NewVault(keeper), notify.NewSender(),
+		notify.Instance{Name: cfg.InstanceName, BaseURL: cfg.BaseURL, Version: version.Version},
+		log.With("component", "notify"))
+	alerts.Start(ctx)
+	if !alerts.AppriseAvailable() {
+		log.Info("apprise is not installed: the meta-provider channel type is unavailable, " +
+			"the twelve native channel types are unaffected")
+	}
+
 	publisher := controlplane.NewPublisher()
-	cp := controlplane.New(store, publisher, log.With("component", "controlplane"),
+	cp := controlplane.New(store, publisher, alerts, log.With("component", "controlplane"),
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
 	// The rollup pipeline. Raw heartbeats are kept for seven days, so every
@@ -154,7 +171,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(store, publisher, cp, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
+		Handler:           api.New(store, publisher, cp, alerts, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -184,6 +201,14 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		log.Error("http shutdown", "error", err)
 	}
 	grpcServer.GracefulStop()
+
+	// Deliveries already in flight finish; scheduled retries are cancelled. A
+	// retry that has not fired yet has nothing durable behind it, and pretending
+	// otherwise would mean blocking shutdown on a mail server.
+	alerts.Wait()
+	if dropped := alerts.Dropped(); dropped > 0 {
+		log.Warn("notifications were dropped because the queue was full", "count", dropped)
+	}
 
 	// Buffered results that were never acknowledged are lost here: the probe
 	// holds them in memory and nothing persists them (ADR-005 decision 9). In

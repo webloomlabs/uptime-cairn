@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 )
 
@@ -35,9 +37,19 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ids := make([]model.ID, 0, len(monitors))
+	for _, m := range monitors {
+		ids = append(ids, m.Monitor.ID)
+	}
+	assignments, err := s.store.ChannelIDsForMonitors(r.Context(), ids)
+	if err != nil {
+		s.internal(w, r, "list channel assignments", err)
+		return
+	}
+
 	body := page[monitorJSON]{Data: []monitorJSON{}, Pagination: pagination{HasMore: hasMore}}
 	for _, m := range monitors {
-		body.Data = append(body.Data, toMonitorJSON(m))
+		body.Data = append(body.Data, withChannels(toMonitorJSON(m), assignments[m.Monitor.ID]))
 	}
 	if hasMore && len(monitors) > 0 {
 		last := monitors[len(monitors)-1]
@@ -59,6 +71,10 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	monitor, problems := s.buildMonitor(body)
+
+	channelIDs, channelProblems := s.resolveChannels(r.Context(), body.NotificationChannelIDs)
+	problems = append(problems, channelProblems...)
+
 	if len(problems) > 0 {
 		writeProblem(w, r, s.log, http.StatusUnprocessableEntity, "validation-failed",
 			"Validation failed", "The monitor was not created.", problems...)
@@ -84,6 +100,17 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Assignment is a separate write rather than part of the monitor
+	// transaction, and a failure here is reported rather than swallowed: a
+	// monitor that exists but alerts nowhere is precisely the outcome this
+	// feature exists to prevent, so the caller is told.
+	if len(channelIDs) > 0 {
+		if err := s.store.SetMonitorChannels(r.Context(), monitor.ID, monitor.OrgID, channelIDs); err != nil {
+			s.internal(w, r, "assign notification channels", err)
+			return
+		}
+	}
+
 	// Tell the control plane immediately. The monitor begins checking on the
 	// next scheduler tick, not synchronously with this call — which is what the
 	// spec promises and why the response carries no heartbeat.
@@ -97,7 +124,8 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", "/api/v1/monitors/"+monitor.ID.String())
-	writeJSON(w, s.log, http.StatusCreated, withPushToken(toMonitorJSON(created), pushToken, pushURL(r, pushToken)))
+	writeJSON(w, s.log, http.StatusCreated,
+		withPushToken(withChannels(toMonitorJSON(created), channelIDs), pushToken, pushURL(r, pushToken)))
 }
 
 func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +143,13 @@ func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, s.log, http.StatusOK, toMonitorJSON(m))
+	channelIDs, err := s.store.ChannelIDsForMonitor(r.Context(), id)
+	if err != nil {
+		s.internal(w, r, "get channel assignments", err)
+		return
+	}
+
+	writeJSON(w, s.log, http.StatusOK, withChannels(toMonitorJSON(m), channelIDs))
 }
 
 func (s *Server) deleteMonitor(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +273,12 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 			if err := checker.Validate(body.Config); err != nil {
 				bad("/config", "invalid", err.Error())
 			}
+			// Promoted out of config so "what else points at this host?" is an
+			// indexed query, and so an alert can lead with the line that
+			// actually tells the reader what broke.
+			if targeter, ok := checker.(check.Targeter); ok {
+				m.Target = targeter.Target(body.Config)
+			}
 		case m.Type == model.TypePush:
 			if err := validatePushConfig(body.Config); err != nil {
 				bad("/config", "invalid", err.Error())
@@ -312,6 +352,58 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 	}
 
 	return m, problems
+}
+
+// resolveChannels turns the request's channel ids into a validated set.
+//
+// The three cases are deliberately distinct. Absent attaches the default
+// channels, which is what makes "set up alerting once" work. An empty array
+// means no alerts, which a deliberately quiet monitor needs. Anything else is
+// checked for existence here so a bad id is a 422 naming the index rather than a
+// foreign-key error nobody can map back to a field.
+func (s *Server) resolveChannels(ctx context.Context, requested *[]string) ([]model.ID, []ValidationItem) {
+	if requested == nil {
+		defaults, err := s.store.DefaultChannelIDs(ctx, s.orgID)
+		if err != nil {
+			s.log.Error("load default notification channels", "error", err)
+			return nil, nil
+		}
+		return defaults, nil
+	}
+
+	var (
+		problems []ValidationItem
+		ids      []model.ID
+	)
+	for i, raw := range *requested {
+		id, ok := model.ParseID(raw)
+		if !ok {
+			problems = append(problems, ValidationItem{
+				Pointer: fmt.Sprintf("/notification_channel_ids/%d", i),
+				Code:    "invalid", Message: fmt.Sprintf("%q is not a valid identifier", raw)})
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(problems) > 0 {
+		return nil, problems
+	}
+
+	missing, err := s.store.MissingChannels(ctx, s.orgID, ids)
+	if err != nil {
+		s.log.Error("check notification channel ids", "error", err)
+		return nil, []ValidationItem{{Pointer: "/notification_channel_ids", Code: "unavailable",
+			Message: "the notification channels could not be checked"}}
+	}
+	for _, id := range missing {
+		problems = append(problems, ValidationItem{
+			Pointer: "/notification_channel_ids", Code: "not_found",
+			Message: fmt.Sprintf("no notification channel %s exists", id)})
+	}
+	if len(problems) > 0 {
+		return nil, problems
+	}
+	return ids, nil
 }
 
 // runnable asks the checker registry rather than naming types here, so adding a

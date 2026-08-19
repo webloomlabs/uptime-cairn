@@ -4,10 +4,12 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
@@ -18,6 +20,10 @@ type fakeStore struct {
 	monitor model.Monitor
 	state   model.MonitorState
 	written []model.Heartbeat
+
+	// writeErr makes the heartbeat write fail, which is how the "nothing is
+	// alerted about a transition that was never stored" rule is exercised.
+	writeErr error
 }
 
 func (f *fakeStore) ListAssignable(context.Context) ([]model.Monitor, error) {
@@ -45,6 +51,9 @@ func (f *fakeStore) SaveState(_ context.Context, s model.MonitorState) error {
 }
 
 func (f *fakeStore) WriteBatch(_ context.Context, beats []model.Heartbeat) error {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
 	f.written = append(f.written, beats...)
 	return nil
 }
@@ -56,7 +65,34 @@ func newTestServer(retries int) (*Server, *fakeStore) {
 		state:   model.MonitorState{MonitorID: id, OrgID: model.SentinelOrgID, Status: model.MonitorStatusPending},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(store, NewPublisher(), log, model.EmbeddedProbeID, model.SentinelOrgID), store
+	return New(store, NewPublisher(), &recordingAlerter{}, log, model.EmbeddedProbeID, model.SentinelOrgID), store
+}
+
+// recordingAlerter captures what ingest decided to tell the world, which is the
+// half of a transition that no heartbeat row records.
+type recordingAlerter struct {
+	mu     sync.Mutex
+	events []notify.Event
+}
+
+func (a *recordingAlerter) Publish(ev notify.Event) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, ev)
+}
+
+func (a *recordingAlerter) Instance() notify.Instance {
+	return notify.Instance{Name: "test", Version: "test"}
+}
+
+func (a *recordingAlerter) types() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]string, 0, len(a.events))
+	for _, e := range a.events {
+		out = append(out, e.Type)
+	}
+	return out
 }
 
 func result(id model.ID, outcome probev1.Outcome, at time.Time) *probev1.Result {

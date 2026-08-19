@@ -8,6 +8,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
@@ -67,6 +68,7 @@ type IdentityStore interface {
 type Store interface {
 	MonitorStore
 	IdentityStore
+	ChannelStore
 }
 
 // Page sizes. The server caps rather than rejects, per the spec: a client
@@ -82,10 +84,15 @@ type Server struct {
 	store    Store
 	notify   Notifier
 	push     PushIngest
+	alerts   Alerts
 	registry *check.Registry
 	keeper   *secrets.Keeper
 	log      *slog.Logger
 	limiter  *loginLimiter
+
+	// vault seals and opens notification-channel secrets. Built from the same
+	// keeper the TOTP path uses, so there is one key hierarchy rather than two.
+	vault *notify.Vault
 
 	// instanceName is the issuer shown in an authenticator app.
 	instanceName string
@@ -98,16 +105,18 @@ type Server struct {
 type Notifier interface{ Notify() }
 
 // New returns a server.
-func New(s Store, notify Notifier, push PushIngest, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
+func New(s Store, publisher Notifier, push PushIngest, alerts Alerts, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
 	if instanceName == "" {
 		instanceName = "Uptime Cairn"
 	}
 	return &Server{
 		store:        s,
-		notify:       notify,
+		notify:       publisher,
 		push:         push,
+		alerts:       alerts,
 		registry:     registry,
 		keeper:       keeper,
+		vault:        notify.NewVault(keeper),
 		log:          log,
 		limiter:      newLoginLimiter(),
 		instanceName: instanceName,
@@ -157,6 +166,18 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/heartbeats", s.require(auth.ScopeHeartbeatsRead, s.listHeartbeats))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/history", s.require(auth.ScopeHeartbeatsRead, s.getMonitorHistory))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/uptime", s.require(auth.ScopeHeartbeatsRead, s.getMonitorUptime))
+
+	// Notification channels. The two literal sub-paths are registered before the
+	// wildcard for readability only — Go's mux resolves by specificity, so
+	// /preview cannot be swallowed by /{channelId} whatever the order here.
+	authed.HandleFunc("GET /api/v1/notification-channels", s.require(auth.ScopeNotificationsRead, s.listNotificationChannels))
+	authed.HandleFunc("POST /api/v1/notification-channels", s.require(auth.ScopeNotificationsWrit, s.createNotificationChannel))
+	authed.HandleFunc("GET /api/v1/notification-channels/template-variables", s.require(auth.ScopeNotificationsRead, s.listTemplateVariables))
+	authed.HandleFunc("POST /api/v1/notification-channels/preview", s.require(auth.ScopeNotificationsRead, s.previewNotificationTemplate))
+	authed.HandleFunc("GET /api/v1/notification-channels/{channelId}", s.require(auth.ScopeNotificationsRead, s.getNotificationChannel))
+	authed.HandleFunc("PATCH /api/v1/notification-channels/{channelId}", s.require(auth.ScopeNotificationsWrit, s.updateNotificationChannel))
+	authed.HandleFunc("DELETE /api/v1/notification-channels/{channelId}", s.require(auth.ScopeNotificationsWrit, s.deleteNotificationChannel))
+	authed.HandleFunc("POST /api/v1/notification-channels/{channelId}/test", s.require(auth.ScopeNotificationsWrit, s.testNotificationChannel))
 
 	authed.HandleFunc("/api/v1/", s.notImplemented)
 

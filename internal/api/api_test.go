@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
@@ -63,10 +65,22 @@ func testServerWithStore(t *testing.T) (*httptest.Server, *sqlite.Store) {
 	// the heartbeat it produces goes through the same state machine every other
 	// result does.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cp := controlplane.New(store, controlplane.NewPublisher(), log,
+
+	// A real dispatcher too, for the same reason: a test-fire that does not go
+	// through the delivery path proves nothing about the delivery path.
+	ctx, cancel := context.WithCancel(context.Background())
+	alerts := notify.NewDispatcher(store, notify.NewVault(keeper), notify.NewSender(),
+		notify.Instance{Name: "Test Instance", Version: "test"}, log)
+	alerts.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		alerts.Wait()
+	})
+
+	cp := controlplane.New(store, controlplane.NewPublisher(), alerts, log,
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
-	api := New(store, noopNotifier{}, cp, registry, keeper, log, "Test Instance")
+	api := New(store, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance")
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)

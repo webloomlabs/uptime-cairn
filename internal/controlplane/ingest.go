@@ -35,6 +35,7 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 
 	var (
 		beats    []model.Heartbeat
+		pending  []pendingAlert
 		rejected uint32
 		states   = make(map[model.ID]*model.MonitorState)
 		monitors = make(map[model.ID]model.Monitor)
@@ -78,11 +79,17 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 			states[id] = state
 		}
 
-		beat, err := apply(monitor, state, r, s.probeID)
+		beat, raised, err := apply(monitor, state, r, s.probeID)
 		if err != nil {
 			return nil, err
 		}
 		beats = append(beats, beat)
+		if raised.fire {
+			// Collected rather than published here: an event must not be sent
+			// for a heartbeat that then fails to persist. Publishing happens
+			// after the write below returns.
+			pending = append(pending, pendingAlert{monitor: monitor, beat: beat, alert: raised})
+		}
 	}
 
 	if err := s.store.WriteBatch(ctx, beats); err != nil {
@@ -93,6 +100,11 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 			return nil, fmt.Errorf("save state %s: %w", state.MonitorID, err)
 		}
 	}
+
+	// Only now, with the heartbeats and the states durable. An alert about a
+	// transition that was not recorded would be an alert nobody can corroborate
+	// afterwards, and the delivery log would disagree with the history.
+	s.raise(pending)
 
 	// The high-water mark: every result at or below this id is durable. Results
 	// are ordered by result_id within a session, so the last one sent is the
@@ -106,10 +118,26 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 	}, nil
 }
 
+// alert is what one result should tell the world, decided by the same pass that
+// decides the state transition. Kept next to that decision rather than derived
+// afterwards: "did this change" and "should this notify" answer to the same two
+// variables, and computing them apart is how the two drift.
+type alert struct {
+	fire      bool
+	eventType string
+	previous  string
+}
+
+type pendingAlert struct {
+	monitor model.Monitor
+	beat    model.Heartbeat
+	alert   alert
+}
+
 // apply records one result against a monitor's state and returns the heartbeat
 // to store. It mutates state in place; the caller persists it once per batch
 // rather than once per result.
-func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, probeID model.ID) (model.Heartbeat, error) {
+func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, probeID model.ID) (model.Heartbeat, alert, error) {
 	at := time.UnixMicro(r.GetTimeUnixMicros()).UTC()
 
 	// The probe id comes from the session, not from the result: the connection
@@ -135,7 +163,7 @@ func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, 
 	case probev1.Outcome_OUTCOME_SKIPPED:
 		beat.Status = model.StatusSkipped
 	default:
-		return model.Heartbeat{}, fmt.Errorf("unhandled outcome %s", r.GetOutcome())
+		return model.Heartbeat{}, alert{}, fmt.Errorf("unhandled outcome %s", r.GetOutcome())
 	}
 
 	if ms := r.GetResponseTimeMs(); ms > 0 {
@@ -168,9 +196,27 @@ func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, 
 		// dies must not report every monitor assigned to it as failing.
 	}
 
+	raised := alert{previous: previous}
 	if state.Status != previous {
 		beat.Important = true
 		state.LastStatusChangeAt = &at
+
+		switch state.Status {
+		case model.MonitorStatusDown:
+			raised.fire, raised.eventType = true, model.EventMonitorDown
+		case model.MonitorStatusUp:
+			// A monitor that was pending and came up never went down, so there
+			// is nothing to recover from and nothing to say. Alerting on it
+			// would mean every new monitor announces itself.
+			if previous == model.MonitorStatusDown && monitor.NotifyOnRecovery {
+				raised.fire, raised.eventType = true, model.EventMonitorUp
+			}
+		case model.MonitorStatusPending:
+			raised.fire, raised.eventType = true, model.EventMonitorPending
+		}
+	} else if shouldResend(monitor, state) {
+		// Still down, and far enough past the last notification to say so again.
+		raised.fire, raised.eventType = true, model.EventMonitorDown
 	}
 
 	state.LastCheckAt = &at
@@ -182,5 +228,21 @@ func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, 
 		state.LastResponseTimeMs = &ms
 	}
 
-	return beat, nil
+	return beat, raised, nil
+}
+
+// shouldResend implements resend_after: re-notify after this many consecutive
+// failed checks while still down, zero disabling it entirely.
+//
+// Counted from the failure that produced the verdict rather than from the first
+// one, so resend_after is a period of continued downtime and not "retries plus
+// resend_after". Derived from consecutive_failures, which the schema already
+// records — a last_notified_at column would be a second source of truth for
+// something the first one already answers.
+func shouldResend(monitor model.Monitor, state *model.MonitorState) bool {
+	if monitor.ResendAfter <= 0 || state.Status != model.MonitorStatusDown {
+		return false
+	}
+	since := state.ConsecutiveFailures - (monitor.Retries + 1)
+	return since > 0 && since%monitor.ResendAfter == 0
 }

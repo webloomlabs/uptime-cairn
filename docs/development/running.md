@@ -460,6 +460,208 @@ long the work takes. Orphaned rows are invisible to every API query — they all
 filter through a live monitor — so a purge that lags costs disk and never
 correctness.
 
+## Alerting
+
+A monitoring tool that detects an outage and tells nobody is a logging tool. This
+is the part that tells somebody.
+
+Create a channel. Thirteen types exist — `email`, `webhook`, `slack`, `discord`,
+`telegram`, `matrix`, `gotify`, `ntfy`, `msteams`, `pagerduty`, `opsgenie`,
+`twilio`, and `apprise` as the meta-provider for everything else:
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/notification-channels \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Ops Slack",
+    "type": "slack",
+    "is_default": true,
+    "config": {"webhook_url": "https://hooks.slack.com/services/T/B/XXXX"}
+  }'
+```
+
+Read it back and the webhook URL is gone:
+
+```json
+{
+  "name": "Ops Slack",
+  "type": "slack",
+  "config": {"webhook_url": "__redacted__"},
+  "monitor_count": 0,
+  "last_used_at": null,
+  "last_error": null
+}
+```
+
+That is not the serialiser being careful. The secret fields are split out of
+`config` before the row is written and stored in a separate encrypted column, so
+the read path has nothing to redact — it is assembling a marker, not hiding a
+value. `grep` the database file and the token is not in it. The marker also
+round-trips: a form that `GET`s a channel, changes one field and `PATCH`es the
+whole object back sends `"__redacted__"` for the secret, and the server treats
+that as "leave it alone" rather than overwriting a bot token with asterisks.
+
+**Test it before you need it.** Every channel has this, because a channel that
+fails silently at 3am is worse than no channel at all:
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/notification-channels/$ID/test \
+  -H "Authorization: Bearer $KEY"
+```
+
+```json
+{
+  "delivered": false,
+  "status_code": 403,
+  "error": "403 Forbidden: {\"error\":\"invalid_token\"}",
+  "duration_ms": 41.2,
+  "rendered_payload": "{\"text\":\"[DOWN] Sample monitor\", ...}"
+}
+```
+
+`200`, not `502`: the request succeeded and the delivery did not, and those are
+different facts. The provider's own words are passed through rather than
+summarised — `invalid_token` is something an operator can act on and "delivery
+failed" is not. The same string lands on the channel's `last_error`, so a broken
+channel is visible in a list without anybody reading a log, and it is cleared the
+next time a delivery works.
+
+### Which monitors alert where
+
+A channel marked `is_default` attaches to monitors created afterwards, which is
+what makes setting alerting up once work. Existing monitors are left alone — a
+box ticked today must not silently start alerting on five thousand monitors.
+
+Per monitor, `notification_channel_ids` has three distinct states, and the
+distinction matters:
+
+| Field | Meaning |
+|---|---|
+| absent | attach the default channels |
+| `[]` | no alerts for this monitor, deliberately |
+| `["<id>", ...]` | exactly these |
+
+### What fires, and what deliberately does not
+
+| Transition | Event |
+|---|---|
+| up → down | `monitor.down` |
+| down → up | `monitor.up`, unless `notify_on_recovery` is false |
+| up → pending | `monitor.pending` — only to channels that ask for it by name |
+| pending → up | nothing: it never went down, so it did not recover |
+| anything → unknown or skipped | nothing |
+
+That last row is the whole reason those two outcomes exist. A probe whose egress
+dies reports `unknown`, and `unknown` pages nobody — otherwise one broken probe
+becomes five thousand pages about targets that are perfectly healthy.
+
+`monitor.pending` is excluded from the default subscription on purpose. Pending
+precedes every down transition, so including it would send two messages for one
+outage, which is how people learn to filter the whole channel.
+
+`resend_after` re-notifies after that many further consecutive failures while
+still down; `0` disables it, so an ongoing outage alerts once. It is counted from
+the failure that produced the verdict rather than from the first one, so it means
+a period of continued downtime rather than "retries plus `resend_after`". It is
+derived from `consecutive_failures`, which the schema already records — a
+`last_notified_at` column would be a second source of truth for a question the
+first one already answers.
+
+PagerDuty and Opsgenie model this properly: the failure opens an incident keyed
+by monitor and the recovery closes *that* incident rather than opening a second
+one. Turn `auto_resolve` off and the recovery is recorded as a **suppressed**
+delivery rather than a successful one — "we chose not to" and "it worked" are
+different answers to the only question anybody asks after an incident.
+
+### Webhook payload templating
+
+The generic webhook sends the event envelope by default. Give it a
+`body_template` and it sends whatever you write, with `{{variable}}`
+interpolation in the body, in the headers, and nowhere else:
+
+```json
+{
+  "name": "Ops",
+  "type": "webhook",
+  "config": {
+    "url": "https://example.com/hook",
+    "headers": {"X-Monitor": "{{monitor.name}}"},
+    "body_template": "{\"text\": \"{{monitor.name}} is {{status}}\", \"detail\": \"{{message}}\"}"
+  }
+}
+```
+
+Values are escaped for the declared `content_type`, so a monitor named
+`He said "hi"` produces a payload the receiver accepts rather than one it
+rejects — the failure that otherwise shows up during the outage rather than
+during setup. `{{x | raw}}` opts out and `{{x | json}}` opts in.
+
+The available variables are an endpoint, not a document:
+
+```sh
+curl -sS localhost:3000/api/v1/notification-channels/template-variables \
+  -H "Authorization: Bearer $KEY"
+```
+
+It is the same list the renderer resolves against, so the UI's autocomplete
+cannot drift from what actually works. Preview before saving:
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/notification-channels/preview \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"template": "line one\nand {{monitor.nmae}} here"}'
+```
+
+```json
+{
+  "ok": false,
+  "error": {
+    "message": "unknown variable \"monitor.nmae\" — GET /api/v1/notification-channels/template-variables lists the ones that exist",
+    "line": 2,
+    "column": 5
+  }
+}
+```
+
+`200` with `ok: false`: a broken template is your typo, shown inline with its
+position, not a server fault. The same check runs when the channel is saved, so a
+misspelling is a `422` on a form you are looking at rather than a missed alert
+during an outage. Pass `monitor_id` to render against a real monitor's current
+values instead of the sample.
+
+### When delivery fails
+
+Every attempt writes a row to `notification_deliveries`, successful or not, and
+the outcome is one of `succeeded`, `failed`, or `suppressed`. A failure is
+retried up to three times — but only when a retry could plausibly work. A `401`
+or a `403` is not retried, because sending the same wrong credential three times
+produces three identical failures and delays the moment you are told which it
+was; `408`, `429`, and every 5xx are.
+
+Publishing an event never blocks ingest. The queue is bounded and fire-and-forget:
+the moment alerting is under strain is the moment heartbeats matter most, and an
+alerting backlog must not become heartbeat backpressure. If the queue does fill,
+the count is logged — a silently dropped alert is the one failure this whole
+subsystem exists to prevent.
+
+### Two channel types with conditions attached
+
+**Email** needs its own SMTP settings. `use_instance_smtp` defaults to `true`,
+instance-wide settings have nowhere to live until `/settings` exists, and a
+channel that asks for them is refused at save time with the alternative spelled
+out — rather than accepted, listed as configured, and delivering nothing:
+
+```json
+{"pointer": "/config/use_instance_smtp", "code": "unsupported",
+ "message": "instance-wide SMTP settings are not implemented in this build; set use_instance_smtp to false and give this channel its own smtp_host, smtp_port and from_address"}
+```
+
+**Apprise** needs the binary. `pipx install apprise` and restart; without it the
+channel type is refused at creation rather than offered and failing on first use.
+Its URLs are written to a mode-0600 file rather than passed as arguments, because
+an Apprise URL embeds its own credentials and an argument vector is readable
+through `ps`.
+
 ## What the API answers
 
 | | Scope |
@@ -475,6 +677,8 @@ correctness.
 | `POST`, `DELETE` `/api/v1/monitors...` | `monitors:write` |
 | `GET /api/v1/monitors/{id}/heartbeats` | `heartbeats:read` |
 | `GET /api/v1/monitors/{id}/history`, `.../uptime` | `heartbeats:read` |
+| `GET /api/v1/notification-channels`, `.../{id}`, `.../preview`, `.../template-variables` | `notifications:read` |
+| `POST/PATCH/DELETE /api/v1/notification-channels...`, `.../{id}/test` | `notifications:write` |
 | `GET/POST /api/v1/push/{token}` | None — the token is the credential |
 | Anything else under `/api/v1/` | `501`, naming the spec — the endpoint exists in the contract, not in this build |
 
@@ -507,6 +711,16 @@ they are the ones that fail open — scope enforcement, CSRF, rate limiting, key
 revocation, privilege escalation, recovery-code single use, and ciphertext
 relocation.
 
+The alerting tests cover the two things that fail invisibly. One is the secret
+boundary: that a token is not in the serialised config, does not appear in any
+read response, and survives a form round-tripping its own `GET`. The other is the
+transition table — which changes raise an event and which deliberately do not,
+because getting it wrong in one direction is a missed outage and in the other is
+the alert fatigue that makes people filter the channel, which is a missed outage
+with extra steps. All thirteen providers are driven through one harness that
+redirects even the hard-coded hosts, so the assertions are about where the
+credential goes and whether the payload is well-formed.
+
 The history tests cover the two decisions a reader can get quietly wrong: which
 source answers a range, and when a percentile is real. Both fail invisibly — the
 response is well-formed either way, just less accurate than it looks.
@@ -537,8 +751,13 @@ an aeroplane is a test that gets deleted.
 - **`/monitors/{id}/certificate`.** The TLS and domain-expiry checkers observe
   everything it reports and store none of it; migration `0003` created the tables
   waiting for them.
-- **Notifications, status pages, the UI, the importer.** Phase 1 Months 2–4.
-  Migration `0003` creates their tables; nothing has an API or a worker behind
-  them yet.
+- **Maintenance windows and dependency suppression.** Both suppress alerts, both
+  have their tables and their columns — `monitor_state.suppressed_by` is there
+  waiting — and neither exists in ingest. A parent going down currently pages
+  once per child.
+- **Instance-wide SMTP settings, and everything else under `/settings`.** See the
+  email caveat above.
+- **Status pages, the UI, the importer.** Phase 1 Months 2–4. Migration `0003`
+  creates their tables; nothing has an API or a worker behind them yet.
 - **The load-test harness against the real engine.** Its `http` target still
   refuses to run, which is the honest state until someone points it here.
