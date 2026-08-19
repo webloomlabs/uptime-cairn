@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/store"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
 
@@ -19,6 +20,7 @@ import (
 // nothing forces this package to know which backend is underneath (ADR-002).
 type Store interface {
 	ListAssignable(ctx context.Context) ([]model.Monitor, error)
+	ListPushMonitors(ctx context.Context) ([]store.MonitorWithState, error)
 	LoadMonitor(ctx context.Context, id model.ID) (model.Monitor, error)
 	GetState(ctx context.Context, id model.ID) (model.MonitorState, error)
 	SaveState(ctx context.Context, state model.MonitorState) error
@@ -94,9 +96,17 @@ func (s *Server) Register(ctx context.Context, req *probev1.RegisterRequest) (*p
 
 	unavailable := 0
 	for _, c := range req.GetCapabilities() {
-		if !c.GetAvailable() {
+		switch {
+		case !c.GetAvailable():
 			unavailable++
 			s.log.Info("probe capability unavailable", "type", c.GetType(), "reason", c.GetReason())
+		case c.GetReason() != "":
+			// A reason alongside available is a degradation rather than an
+			// absence: ICMP on a host that refuses raw sockets still runs the
+			// monitors configured to fall back to TCP, so withholding the
+			// assignment would take that away. Surfacing it here is the only
+			// way the operator learns without reading heartbeats one at a time.
+			s.log.Info("probe capability degraded", "type", c.GetType(), "reason", c.GetReason())
 		}
 	}
 	s.log.Info("probe registered",

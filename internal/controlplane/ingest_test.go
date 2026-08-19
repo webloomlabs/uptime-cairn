@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/store"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
 
@@ -21,6 +22,13 @@ type fakeStore struct {
 
 func (f *fakeStore) ListAssignable(context.Context) ([]model.Monitor, error) {
 	return []model.Monitor{f.monitor}, nil
+}
+
+func (f *fakeStore) ListPushMonitors(context.Context) ([]store.MonitorWithState, error) {
+	if f.monitor.Type != model.TypePush {
+		return nil, nil
+	}
+	return []store.MonitorWithState{{Monitor: f.monitor, State: f.state}}, nil
 }
 
 func (f *fakeStore) LoadMonitor(context.Context, model.ID) (model.Monitor, error) {

@@ -45,6 +45,12 @@ type Monitor struct {
 	// indexed query rather than a JSON scan across 5,000 rows.
 	Target string
 
+	// PushTokenHash is set on push monitors only. The plaintext token is shown
+	// once at creation and never stored: push ingest is unauthenticated and hot,
+	// so the hash is what gets looked up, and a stolen database must not yield
+	// working tokens (data model §12.5).
+	PushTokenHash []byte
+
 	Enabled          bool
 	Interval         time.Duration
 	Timeout          time.Duration

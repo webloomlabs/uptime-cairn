@@ -5,9 +5,9 @@ ticked. The plan is the contract and does not change; this is the tracker.
 
 **Status: 2026-08-19.** The Month 1 checkpoint is met — *"a monitor can be
 created via `curl`, checked on schedule, and its history queried via the API"* —
-for HTTP monitors, and the API is now authenticated: first-run setup, sessions
-with CSRF, TOTP, and scoped API keys. See
-[running.md](../development/running.md) for what the binary does today.
+and it is met for every monitor type the spec defines, not just HTTP. The API is
+authenticated: first-run setup, sessions with CSRF, TOTP, and scoped API keys.
+See [running.md](../development/running.md) for what the binary does today.
 
 A box is ticked only when the thing works end to end and has a test or a
 demonstrated run behind it. Anything half-built says so on the line, because a
@@ -17,18 +17,18 @@ by which "90% done" lasts three months.
 | Area | Done | Total |
 |---|---|---|
 | Engine & storage | 10 | 15 |
-| Monitor types | 1 | 10 |
+| Monitor types | 9 | 10 |
 | Core monitoring features | 2 | 8 |
 | Alerting & webhooks | 0 | 10 |
 | Status pages | 0 | 5 |
-| REST API | 9 | 19 |
+| REST API | 10 | 20 |
 | Kuma migration | 0 | 5 |
 | UI | 0 | 8 |
 | Security | 6 | 8 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 3 | 8 |
-| **Total** | **32** | **113** |
+| **Total** | **41** | **114** |
 
 ---
 
@@ -53,15 +53,15 @@ by which "90% done" lasts three months.
 ## Monitor types
 
 - [x] HTTP/HTTPS — status codes, keyword (4 modes), response-time threshold, custom method/headers/body, basic and bearer auth, redirect and TLS-verify options
-- [ ] HTTP JSON-path assertions — currently rejected at validation rather than silently ignored
-- [ ] TCP port
-- [ ] ICMP ping, including restricted-container detection and TCP fallback
-- [ ] DNS record
-- [ ] SSL/TLS expiry
-- [ ] Domain expiry (RDAP/WHOIS), with a per-type minimum interval
-- [ ] Push / heartbeat dead-man's-switch — control-plane-side, never assigned to a probe
-- [ ] Docker container, with monitor-to-named-probe pinning
-- [ ] gRPC health
+- [x] HTTP JSON-path assertions — a deliberately small subset (root, field names, array indices); anything outside it is rejected at validation rather than ignored at check time
+- [x] TCP port
+- [x] ICMP ping, including restricted-container detection and TCP fallback — unprivileged datagram socket first, raw second, and unknown rather than down when neither opens
+- [x] DNS record — all ten record types, a named resolver, the response code recorded, and the TCP retry on truncation
+- [x] SSL/TLS expiry — the handshake is made unverified and the chain checked by hand, so an expired certificate is reported as expiry rather than as a generic TLS error
+- [x] Domain expiry (RDAP/WHOIS), with a per-type minimum interval — RFC 9224 bootstrap, WHOIS fallback, one registry lookup a day per domain
+- [x] Push / heartbeat dead-man's-switch — control-plane-side, never assigned to a probe
+- [ ] Docker container, with monitor-to-named-probe pinning — **the checker works; the pinning does not exist.** In a multi-probe install "is this container running" is only answerable by the probe on that host, and nothing yet makes the assignment land there. Correct in solo mode, which is the only mode this build has
+- [x] gRPC health
 
 ## Core monitoring features
 
@@ -103,6 +103,7 @@ by which "90% done" lasts three months.
 - [x] `GET /api/v1/monitors/{id}`
 - [x] `DELETE /api/v1/monitors/{id}`
 - [x] `GET /api/v1/monitors/{id}/heartbeats`, including `important_only`
+- [x] `GET|POST /api/v1/push/{pushToken}` — the unauthenticated dead-man's-switch ingest
 - [x] RFC 9457 problem responses with stable `type` URIs
 - [ ] `PATCH /api/v1/monitors/{id}`, pause, resume, check-now, bulk operations
 - [ ] `GET /api/v1/monitors/membership` — ADR-004's change signal and filtered count
@@ -144,7 +145,7 @@ by which "90% done" lasts three months.
 - [x] TOTP two-factor, with single-use recovery codes
 - [x] API-key authentication with scope enforcement and no privilege escalation
 - [x] Encryption at rest: AES-256-GCM envelopes, AAD-bound rows, wrapped data keys, root-key precedence — carrying the TOTP secret today
-- [ ] Monitor and notification credentials encrypted through the same layer (nothing stores one yet)
+- [ ] Monitor and notification credentials encrypted through the same layer — **now an actual gap, not a theoretical one.** HTTP bearer tokens and basic-auth passwords, Docker client keys, and gRPC metadata all reach `monitors.config` in plaintext
 - [ ] `SECURITY.md`, dependency and container scanning in CI
 
 ## Deployment & operations
@@ -185,14 +186,15 @@ by which "90% done" lasts three months.
 
 ## What to do next, and why in this order
 
-1. **The rest of the monitor types**, starting with TCP and ICMP. Each is one
-   file against the `Checker` interface, and ICMP carries the
-   restricted-container handling the plan calls out by name.
-2. **Migration `0003` and the rollup pipeline.** Notifications, status pages, and
+1. **Migration `0003` and the rollup pipeline.** Notifications, status pages, and
    `/history` all sit behind tables that do not exist yet, and rollups are what
    keep 5,000 monitors' history queryable at all.
-3. **Alerting**, once channels have somewhere to live. A monitoring tool that
+2. **Alerting**, once channels have somewhere to live. A monitoring tool that
    detects an outage and tells nobody is a logging tool.
+3. **Monitor credentials through the encryption layer.** Nine monitor types now
+   accept secrets in their config — bearer tokens, basic-auth passwords, Docker
+   client keys, gRPC metadata — and every one of them is stored in plaintext. The
+   layer that would fix it already exists and already carries the TOTP secret.
 4. **The load-test harness against the real engine.** The 5,000-monitor claim is
    the project's central promise, and every week it goes unmeasured against real
    code is a week the number is an assumption.

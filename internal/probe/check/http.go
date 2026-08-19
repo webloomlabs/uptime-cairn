@@ -55,7 +55,7 @@ func (h *HTTP) Type() string { return model.TypeHTTP }
 // Version implements Checker. Bump it when this checker starts honouring a
 // config field it previously ignored, so a control plane can withhold monitors
 // an older probe would silently under-check.
-func (h *HTTP) Version() uint32 { return 1 }
+func (h *HTTP) Version() uint32 { return 2 }
 
 // httpConfig mirrors HttpConfig in docs/api/openapi.yaml. Pointers where the
 // spec's default is true, so "unset" and "explicitly false" stay distinguishable.
@@ -136,12 +136,10 @@ func (h *HTTP) Validate(config []byte) error {
 			return fmt.Errorf("keyword mode %q: want contains, not_contains, regex, or not_regex", cfg.Keyword.Mode)
 		}
 	}
-	if len(cfg.JSONPath) > 0 && string(cfg.JSONPath) != "null" {
-		// Rejected rather than ignored. A JSON-path assertion this build cannot
-		// evaluate would otherwise pass silently, and a monitor that reports up
-		// without running the assertion the user asked for is worse than one that
-		// refuses to start.
-		return errors.New("json_path assertions are not implemented in this build; the monitor would report up without evaluating them")
+	if hasJSONPath(cfg) {
+		if _, err := parseJSONPathAssertion(cfg.JSONPath); err != nil {
+			return err
+		}
 	}
 	if cfg.ResponseTimeThresholdMs != nil && *cfg.ResponseTimeThresholdMs < 1 {
 		return errors.New("response_time_threshold_ms must be at least 1")
@@ -233,6 +231,24 @@ func (h *HTTP) Check(ctx context.Context, config []byte) Observation {
 			return obs
 		}
 	}
+	if hasJSONPath(cfg) {
+		assertion, err := parseJSONPathAssertion(cfg.JSONPath)
+		if err != nil {
+			// Validation ran at assignment time, so reaching this means the
+			// config changed underneath us. Unknown, not down: nothing was
+			// asserted about the target.
+			obs.Status = model.StatusUnknown
+			obs.Class = ClassConfig
+			obs.Message = err.Error()
+			return obs
+		}
+		if msg := assertion.assert(payload); msg != "" {
+			obs.Status = model.StatusDown
+			obs.Class = ClassAssertion
+			obs.Message = msg
+			return obs
+		}
+	}
 	if cfg.ResponseTimeThresholdMs != nil {
 		threshold := time.Duration(*cfg.ResponseTimeThresholdMs) * time.Millisecond
 		if elapsed > threshold {
@@ -243,6 +259,12 @@ func (h *HTTP) Check(ctx context.Context, config []byte) Observation {
 		}
 	}
 	return obs
+}
+
+// hasJSONPath distinguishes an absent json_path from an explicit null, both of
+// which the spec allows and neither of which is an assertion.
+func hasJSONPath(cfg httpConfig) bool {
+	return len(cfg.JSONPath) > 0 && string(cfg.JSONPath) != "null"
 }
 
 func (h *HTTP) clientFor(cfg httpConfig) *http.Client {

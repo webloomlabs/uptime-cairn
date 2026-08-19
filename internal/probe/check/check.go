@@ -121,3 +121,19 @@ func (r *Registry) Types() []string {
 	sort.Strings(types)
 	return types
 }
+
+// Availability is an optional interface a Checker may implement when whether it
+// can run is a property of the host rather than of the build.
+//
+// ICMP is the case that forces it to exist: the checker is compiled in, but raw
+// sockets are unavailable in most container runtimes, and "this build has no
+// ICMP" and "this host will not let me open the socket" are different facts that
+// need different answers from the operator. A checker that does not implement
+// this is available whenever it is registered.
+type Availability interface {
+	// Availability reports whether the checker can run here, and — whether or
+	// not it can — anything degraded the operator should know. The reason is
+	// carried to the control plane at registration, so it is read by a person,
+	// not matched on.
+	Availability() (available bool, reason string)
+}

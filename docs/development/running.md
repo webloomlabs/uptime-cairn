@@ -5,8 +5,8 @@ What exists today is the [Phase 1](../plans/PHASE-1-PLAN.md) Month 1 checkpoint:
 > a monitor can be created via `curl`, checked on schedule, and its history
 > queried via the API — no UI yet.
 
-HTTP/HTTPS monitors only. Everything below has been run; the numbers in the
-output are real.
+All nine monitor types the spec defines run. Everything below has been run; the
+numbers in the output are real.
 
 ## Start it
 
@@ -23,14 +23,19 @@ level=INFO msg="migration applied" version=2 name=identity
 level=WARN msg="generated a new encryption key — back it up separately from the database,
                 because without it every stored secret is unrecoverable" path=/tmp/cairn-data/cairn.key
 level=INFO msg="first-run setup is required: POST /api/v1/setup to create the administrator account"
-level=INFO msg="probe capability unavailable" type=icmp reason="not implemented in this build"
-level=INFO msg="probe registered" name=embedded capabilities=1 unavailable=7
+level=INFO msg="probe registered" name=embedded capabilities=8 unavailable=0
 ```
 
-Those `capability unavailable` lines are the protocol working as designed: the
-probe declares every type the product defines and says which ones it can
-actually run here, so "no probe can run this monitor" is a fact the control plane
-holds before a single check runs ([protocol.md §4](../probe/protocol.md)).
+Eight, not nine: `push` is absent from that list on purpose. It is evaluated by
+the control plane against the clock and is never assigned to a probe at all
+([ADR-005](../adr/005-probe-architecture.md) decision 6).
+
+The count is the protocol working as designed — the probe declares every type the
+product defines and says which ones it can actually run *here*, so "no probe can
+run this monitor" is a fact the control plane holds before a single check runs
+([protocol.md §4](../probe/protocol.md)). On a host that refuses raw sockets the
+ICMP line carries a reason saying so; see [Ping and restricted
+containers](#ping-and-restricted-containers).
 
 The encryption key protects secrets at rest — today the TOTP secret, and every
 monitor and notification credential as those land. It is generated so that
@@ -136,6 +141,124 @@ curl -s -H "Authorization: Bearer $KEY" \
 a verdict yet, and the first heartbeat lands on the next scheduler tick rather
 than synchronously with the call.
 
+## The other eight types
+
+Same call, different `type` and `config`. Each of these has been run against a
+live target; the messages are what the heartbeat actually carried.
+
+```sh
+# TCP — a completed handshake and nothing more. No probe byte is sent, because
+# half the services worth watching close the connection on unexpected input.
+'{"name":"TCP","type":"tcp","config":{"hostname":"one.one.one.one","port":443}}'
+#   up   response_time_ms=106.456
+
+# ICMP — unprivileged datagram socket first, raw second.
+'{"name":"Ping","type":"icmp","config":{"hostname":"1.1.1.1","packet_count":2}}'
+#   up   response_time_ms=12.701
+
+# DNS — a named resolver, and the response code recorded as the heartbeat code.
+'{"name":"DNS","type":"dns","config":{"hostname":"google.com","record_type":"A","resolver":"1.1.1.1"}}'
+#   up   code=NOERROR   142.251.222.206
+
+# TLS expiry — the code is the days remaining, on success and on failure alike.
+'{"name":"TLS","type":"tls_expiry","config":{"hostname":"github.com"}}'
+#   up   code=42   certificate valid for 42 days, until 2026-09-30T23:59:59Z
+
+# Domain expiry — RDAP with a WHOIS fallback, one registry lookup a day.
+'{"name":"Domain","type":"domain_expiry","config":{"domain":"google.com"}}'
+#   up   code=756  google.com registered until 2028-09-14T04:00:00Z, 756 days away (per RDAP)
+
+# gRPC — the standard grpc.health.v1.Health/Check protocol.
+'{"name":"gRPC","type":"grpc","config":{"address":"127.0.0.1:1","use_tls":false}}'
+#   down code=Unavailable   unavailable: connection error: ... connection refused
+
+# Docker — one GET against the daemon socket, no client library.
+'{"name":"Docker","type":"docker","config":{"container":"web","require_healthy":true}}'
+#   down code=no_such_container   no container named "web" on this daemon
+```
+
+HTTP gained `json_path` alongside them:
+
+```sh
+'{"name":"API","type":"http","config":{
+   "url":"https://api.github.com/",
+   "json_path":{"path":"$.current_user_url","operator":"contains","expected":"github.com"}}}'
+#   up   code=200
+```
+
+The path syntax is a deliberately small subset — a root, field names, and array
+indices (`$.a.b[0]`, `$["a b"]`). Filters, wildcards, and recursive descent are
+**rejected at validation**, not ignored at check time, because an assertion that
+silently does not run reports `up` for a monitor that is asserting nothing.
+
+### Ping and restricted containers
+
+Raw sockets are unavailable in most container runtimes. When neither the
+unprivileged nor the raw socket opens, the heartbeat is `unknown` — never
+`down`:
+
+```
+ICMP unavailable on this probe: raw and unprivileged ICMP sockets both refused
+(no CAP_NET_RAW, and this process's group is outside net.ipv4.ping_group_range).
+Grant CAP_NET_RAW, widen net.ipv4.ping_group_range, or set fallback_to_tcp on this monitor
+```
+
+The target may be perfectly healthy; this probe cannot ask. Paging an on-call
+rotation about a container permission is the specific failure the `unknown`
+outcome exists to prevent.
+
+With `fallback_to_tcp` the monitor checks the named port instead, and says so on
+every heartbeat with `code=tcp_fallback` — a monitor that quietly changed what it
+measures is worse than one that failed:
+
+```sh
+'{"name":"Ping","type":"icmp","config":{
+   "hostname":"db.internal","fallback_to_tcp":true,"fallback_tcp_port":5432}}'
+#   up   code=tcp_fallback   ICMP unavailable (...); checked TCP 5432 instead
+```
+
+## Push monitors
+
+A push monitor is the one type no probe ever runs: it measures silence, which
+only the side holding the clock and the last heartbeat can see. The control plane
+sweeps them itself.
+
+```sh
+curl -s -H "Authorization: Bearer $KEY" -X POST localhost:3000/api/v1/monitors \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Nightly backup","type":"push",
+       "config":{"expected_interval_seconds":3600,"grace_period_seconds":60}}'
+```
+
+The response carries `config.push_token` and `config.push_url` **once**. The
+server stores only a hash, so a later read of the monitor does not show them and
+there is no way to recover one — rotate by recreating the monitor.
+
+```sh
+curl -s http://localhost:3000/api/v1/push/<token>
+# → {"ok":true}
+```
+
+No credential, no flags, `GET`: the callers are cron jobs, and anything more
+elaborate does not get used. The token *is* the credential, so treat it as a
+secret. A job can report its own failure, with a message and its own timing:
+
+```sh
+curl -s "http://localhost:3000/api/v1/push/<token>?status=down&msg=backup+failed&ping=87.5"
+```
+
+Miss the window and the sweep records it, honouring `retries` exactly as every
+other type does:
+
+```
+down important=true  | no push received since creation, 23s ago
+up   important=true  | (after one curl)
+down important=true  | backup failed          response_time_ms=87.5
+```
+
+An unissued or malformed token gets `404` — the same answer for both, so the
+endpoint cannot be used to discover which tokens exist.
+
 ## Watch it check
 
 ```sh
@@ -195,6 +318,7 @@ negotiable in either direction.
 | `GET /api/v1/monitors`, `GET /api/v1/monitors/{id}` | `monitors:read` |
 | `POST`, `DELETE` `/api/v1/monitors...` | `monitors:write` |
 | `GET /api/v1/monitors/{id}/heartbeats` | `heartbeats:read` |
+| `GET/POST /api/v1/push/{token}` | None — the token is the credential |
 | Anything else under `/api/v1/` | `501`, naming the spec — the endpoint exists in the contract, not in this build |
 
 Errors are RFC 9457 problem documents, and clients branch on `type`:
@@ -218,21 +342,30 @@ go test ./...
 go test -race ./...
 ```
 
-The suite covers the parts where a bug would be silent rather than loud: the
-HTTP checker's assertion and failure classification, the control plane's
-transition table, the result buffer's shedding order, migration checksums and
-rollback, heartbeat write idempotency, and — since they are the ones that fail
-open — scope enforcement, CSRF, rate limiting, key revocation, privilege
-escalation, recovery-code single use, and ciphertext relocation.
+The suite covers the parts where a bug would be silent rather than loud: every
+checker's assertion and failure classification, the control plane's transition
+table, the push sweep's deadlines and retries, the result buffer's shedding
+order, migration checksums and rollback, heartbeat write idempotency, and — since
+they are the ones that fail open — scope enforcement, CSRF, rate limiting, key
+revocation, privilege escalation, recovery-code single use, and ciphertext
+relocation.
+
+The checker tests run against servers started in-process — a DNS resolver built
+on `dnsmessage`, a TLS listener presenting a certificate generated with the
+window under test, a real gRPC health service, a fake Docker daemon, an RDAP
+registry. Nothing in the suite needs the internet, because a test that fails on
+an aeroplane is a test that gets deleted.
 
 ## What is deliberately missing
 
-- **The other eight monitor types.** The registry takes one file each; the API
-  refuses them at creation today rather than accepting a monitor that would sit
-  pending forever, and the probe advertises them as unavailable.
-- **`json_path` assertions.** Rejected at validation rather than ignored: a
-  monitor reporting `up` without evaluating the assertion the user asked for is
-  worse than one that refuses to start.
+- **Monitor-to-named-probe pinning for Docker.** The checker works and is correct
+  in solo mode, which is the only mode this build has. In a multi-probe install
+  "is this container running" is only answerable by the probe on that host, and
+  nothing yet makes the assignment land there.
+- **Encryption of monitor credentials.** Bearer tokens, basic-auth passwords,
+  Docker client keys, and gRPC metadata all reach `monitors.config` in plaintext.
+  The layer that would fix it exists and already carries the TOTP secret; nothing
+  routes monitor configs through it yet.
 - **Notifications, rollups, status pages, the UI, the importer.** Phase 1
   Months 2–4.
 - **The load-test harness against the real engine.** Its `http` target still

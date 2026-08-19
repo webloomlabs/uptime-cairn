@@ -1,13 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 )
@@ -62,6 +65,20 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A push monitor's token is minted here and shown exactly once. Storing only
+	// the hash means it cannot be recovered later, which is why the response
+	// below is the single opportunity to copy it.
+	var pushToken string
+	if monitor.Type == model.TypePush {
+		token, err := auth.NewToken()
+		if err != nil {
+			s.internal(w, r, "generate push token", err)
+			return
+		}
+		pushToken = token
+		monitor.PushTokenHash = auth.HashToken(token)
+	}
+
 	if err := s.store.CreateMonitor(r.Context(), monitor); err != nil {
 		s.internal(w, r, "create monitor", err)
 		return
@@ -80,7 +97,7 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", "/api/v1/monitors/"+monitor.ID.String())
-	writeJSON(w, s.log, http.StatusCreated, toMonitorJSON(created))
+	writeJSON(w, s.log, http.StatusCreated, withPushToken(toMonitorJSON(created), pushToken, pushURL(r, pushToken)))
 }
 
 func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
@@ -197,14 +214,15 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 	switch {
 	case body.Type == nil || *body.Type == "":
 		bad("/type", "required", "type is required")
-	case *body.Type == model.TypeHTTP:
-		m.Type = model.TypeHTTP
+	case s.runnable(*body.Type):
+		m.Type = *body.Type
 	case knownType(*body.Type):
 		// The type is in the contract; this build cannot run it. Refusing at
 		// creation beats accepting a monitor that would sit pending forever
 		// because no probe will ever take it.
 		bad("/type", "not_implemented",
-			fmt.Sprintf("type %q is specified but not implemented in this build; only %q runs today", *body.Type, model.TypeHTTP))
+			fmt.Sprintf("type %q is specified but not implemented in this build; %s run today",
+				*body.Type, strings.Join(s.registry.Types(), ", ")))
 	default:
 		bad("/type", "invalid", fmt.Sprintf("type %q is not one the spec defines", *body.Type))
 	}
@@ -216,8 +234,13 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 		// The same validation the probe will run at assignment time, run here so
 		// a bad URL is a 422 the caller can read rather than a rejection they
 		// would have to go looking for in the logs.
-		if checker, ok := s.registry.Lookup(m.Type); ok {
+		switch checker, ok := s.registry.Lookup(m.Type); {
+		case ok:
 			if err := checker.Validate(body.Config); err != nil {
+				bad("/config", "invalid", err.Error())
+			}
+		case m.Type == model.TypePush:
+			if err := validatePushConfig(body.Config); err != nil {
 				bad("/config", "invalid", err.Error())
 			}
 		}
@@ -289,6 +312,46 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 	}
 
 	return m, problems
+}
+
+// runnable asks the checker registry rather than naming types here, so adding a
+// monitor type is a registration and nothing else — the API stops being a second
+// place that has to be told.
+//
+// push is the one exception, and it is an exception in the architecture rather
+// than in this function: it has no checker because no probe ever runs it. The
+// control plane evaluates it against the clock.
+func (s *Server) runnable(t string) bool {
+	if t == model.TypePush {
+		return true
+	}
+	_, ok := s.registry.Lookup(t)
+	return ok
+}
+
+// validatePushConfig stands in for the checker push does not have. Without it a
+// push monitor is the one type whose config reaches storage unvalidated.
+func validatePushConfig(config []byte) error {
+	var cfg struct {
+		ExpectedIntervalSeconds *int `json:"expected_interval_seconds"`
+		GracePeriodSeconds      *int `json:"grace_period_seconds"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(config))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	if cfg.ExpectedIntervalSeconds != nil {
+		if v := *cfg.ExpectedIntervalSeconds; v < 20 || v > 2592000 {
+			return fmt.Errorf("expected_interval_seconds %d is outside 20-2592000", v)
+		}
+	}
+	if cfg.GracePeriodSeconds != nil {
+		if v := *cfg.GracePeriodSeconds; v < 0 || v > 86400 {
+			return fmt.Errorf("grace_period_seconds %d is outside 0-86400", v)
+		}
+	}
+	return nil
 }
 
 func knownType(t string) bool {

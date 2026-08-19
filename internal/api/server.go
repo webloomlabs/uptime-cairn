@@ -21,6 +21,7 @@ type MonitorStore interface {
 	GetMonitor(ctx context.Context, id model.ID) (store.MonitorWithState, error)
 	ListMonitors(ctx context.Context, after *store.Cursor, limit int) ([]store.MonitorWithState, bool, error)
 	DeleteMonitor(ctx context.Context, id model.ID) error
+	MonitorByPushToken(ctx context.Context, hash []byte) (model.Monitor, error)
 	ListHeartbeats(ctx context.Context, id model.ID, before *time.Time, limit int, importantOnly bool) ([]model.Heartbeat, bool, error)
 }
 
@@ -72,6 +73,7 @@ const (
 type Server struct {
 	store    Store
 	notify   Notifier
+	push     PushIngest
 	registry *check.Registry
 	keeper   *secrets.Keeper
 	log      *slog.Logger
@@ -88,13 +90,14 @@ type Server struct {
 type Notifier interface{ Notify() }
 
 // New returns a server.
-func New(s Store, notify Notifier, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
+func New(s Store, notify Notifier, push PushIngest, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
 	if instanceName == "" {
 		instanceName = "Uptime Cairn"
 	}
 	return &Server{
 		store:        s,
 		notify:       notify,
+		push:         push,
 		registry:     registry,
 		keeper:       keeper,
 		log:          log,
@@ -122,6 +125,9 @@ func (s *Server) Handler() http.Handler {
 	public.HandleFunc("GET /api/v1/setup", s.setupStatus)
 	public.HandleFunc("POST /api/v1/setup", s.completeSetup)
 	public.HandleFunc("POST /api/v1/auth/login", s.login)
+	// The dead-man's-switch ingest. Unauthenticated by design — see push.go.
+	public.HandleFunc("GET /api/v1/push/{pushToken}", s.pushHeartbeat)
+	public.HandleFunc("POST /api/v1/push/{pushToken}", s.pushHeartbeat)
 
 	authed := http.NewServeMux()
 	authed.HandleFunc("POST /api/v1/auth/logout", s.logout)

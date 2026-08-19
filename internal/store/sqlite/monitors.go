@@ -23,7 +23,7 @@ var DecodeCursor = store.DecodeCursor
 
 const monitorColumns = `
 	m.id, m.org_id, m.name, m.description, m.type, m.config, m.target,
-	m.enabled, m.interval_seconds, m.timeout_seconds, m.retries,
+	m.push_token_hash, m.enabled, m.interval_seconds, m.timeout_seconds, m.retries,
 	m.retry_interval_seconds, m.resend_after, m.upside_down, m.notify_on_recovery,
 	m.group_id, m.parent_monitor_id, m.created_at, m.updated_at,
 	s.status, s.last_check_at, s.next_check_at, s.last_status_change_at,
@@ -42,13 +42,13 @@ func (s *Store) CreateMonitor(ctx context.Context, m model.Monitor) error {
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO monitors (
-			id, org_id, name, description, type, config, target, enabled,
-			interval_seconds, timeout_seconds, retries, retry_interval_seconds,
+			id, org_id, name, description, type, config, target, push_token_hash,
+			enabled, interval_seconds, timeout_seconds, retries, retry_interval_seconds,
 			resend_after, upside_down, notify_on_recovery, group_id,
 			parent_monitor_id, created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID[:], m.OrgID[:], m.Name, nullString(m.Description), m.Type, string(m.Config),
-		nullString(m.Target), boolToInt(m.Enabled),
+		nullString(m.Target), nullBytes(m.PushTokenHash), boolToInt(m.Enabled),
 		int64(m.Interval.Seconds()), int64(m.Timeout.Seconds()), m.Retries,
 		nullSeconds(m.RetryInterval), m.ResendAfter, boolToInt(m.UpsideDown),
 		boolToInt(m.NotifyOnRecovery), nullID(m.GroupID), nullID(m.ParentMonitorID),
@@ -158,6 +158,49 @@ func (s *Store) ListAssignable(ctx context.Context) ([]model.Monitor, error) {
 	return out, rows.Err()
 }
 
+// ListPushMonitors returns every enabled push monitor with its state. It is the
+// inverse of ListAssignable: these are the monitors no probe will ever run, so
+// the control plane's own sweep is the only thing that will ever move them.
+func (s *Store) ListPushMonitors(ctx context.Context) ([]MonitorWithState, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+monitorColumns+`
+		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
+		WHERE m.enabled = 1 AND m.type = 'push'
+		ORDER BY m.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list push monitors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []MonitorWithState
+	for rows.Next() {
+		m, err := scanMonitor(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// MonitorByPushToken resolves a push token hash to its monitor.
+//
+// Looked up by hash through the unique index, so the cost is one index probe
+// whatever the install size — this endpoint is unauthenticated and anyone can
+// call it with anything, which makes a linear scan a denial-of-service tool.
+func (s *Store) MonitorByPushToken(ctx context.Context, hash []byte) (model.Monitor, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT `+monitorColumns+`
+		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
+		WHERE m.push_token_hash = ? AND m.type = 'push'`, hash)
+
+	out, err := scanMonitor(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.Monitor{}, ErrNotFound
+	}
+	return out.Monitor, err
+}
+
 // DeleteMonitor removes the monitor; state and heartbeats follow by cascade.
 func (s *Store) DeleteMonitor(ctx context.Context, id model.ID) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM monitors WHERE id = ?`, id[:])
@@ -236,7 +279,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 	var (
 		out                                 MonitorWithState
 		id, orgID, config                   []byte
-		groupID, parentID                   []byte
+		groupID, parentID, pushTokenHash    []byte
 		description, target, message        sql.NullString
 		retryInterval                       sql.NullInt64
 		lastCheck, nextCheck, lastChange    sql.NullInt64
@@ -248,7 +291,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 
 	if err := row.Scan(
 		&id, &orgID, &out.Monitor.Name, &description, &out.Monitor.Type, &config, &target,
-		&enabled, &intervalSeconds, &timeoutSeconds, &out.Monitor.Retries,
+		&pushTokenHash, &enabled, &intervalSeconds, &timeoutSeconds, &out.Monitor.Retries,
 		&retryInterval, &out.Monitor.ResendAfter, &upsideDown, &notifyRecovery,
 		&groupID, &parentID, &createdAt, &updatedAt,
 		&out.State.Status, &lastCheck, &nextCheck, &lastChange,
@@ -262,6 +305,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 	out.Monitor.Description = description.String
 	out.Monitor.Config = append([]byte(nil), config...)
 	out.Monitor.Target = target.String
+	out.Monitor.PushTokenHash = append([]byte(nil), pushTokenHash...)
 	out.Monitor.Enabled = enabled == 1
 	out.Monitor.Interval = time.Duration(intervalSeconds) * time.Second
 	out.Monitor.Timeout = time.Duration(timeoutSeconds) * time.Second

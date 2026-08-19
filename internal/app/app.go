@@ -82,6 +82,12 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	cp := controlplane.New(store, publisher, log.With("component", "controlplane"),
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
+	// Push monitors are evaluated here rather than by a probe: a dead-man's
+	// switch measures silence, and only the side holding the clock and the last
+	// heartbeat can see it. The interval is the resolution of the answer, not
+	// its cadence — a monitor is only touched once its own deadline has passed.
+	go sweepPush(ctx, cp, log)
+
 	// The probe talks to the control plane over gRPC even though both are in
 	// this process, across an in-memory listener with real serialisation
 	// (ADR-005 decision 14). The cost is microseconds per result. The return is
@@ -111,8 +117,18 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Every monitor type this build can run. push is absent by design: it is
+	// evaluated by the control plane against the clock and is never assigned to
+	// a probe at all (ADR-005 decision 6).
 	registry := check.NewRegistry()
 	registry.Register(check.NewHTTP())
+	registry.Register(check.NewTCP())
+	registry.Register(check.NewICMP())
+	registry.Register(check.NewDNS())
+	registry.Register(check.NewTLSExpiry())
+	registry.Register(check.NewDomainExpiry())
+	registry.Register(check.NewDocker())
+	registry.Register(check.NewGRPC())
 
 	session := probe.NewSession(probev1.NewProbeServiceClient(conn), probe.Config{
 		Name:          "embedded",
@@ -129,7 +145,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(store, publisher, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
+		Handler:           api.New(store, publisher, cp, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -228,6 +244,32 @@ func openKeeper(ctx context.Context, store *sqlite.Store, cfg config.Config, log
 func setupRequired(ctx context.Context, store *sqlite.Store) (bool, error) {
 	n, err := store.CountUsers(ctx)
 	return n == 0, err
+}
+
+// pushSweepInterval bounds how late a push outage is noticed. Five seconds is
+// well inside the 20-second floor every other monitor type runs at, and the
+// query behind it is one indexed read over a table holding only push monitors.
+const pushSweepInterval = 5 * time.Second
+
+func sweepPush(ctx context.Context, cp *controlplane.Server, log *slog.Logger) {
+	ticker := time.NewTicker(pushSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			moved, err := cp.SweepPush(ctx, now.UTC())
+			if err != nil {
+				log.Warn("sweep push monitors", "error", err)
+				continue
+			}
+			if moved > 0 {
+				log.Info("push monitors went overdue", "count", moved)
+			}
+		}
+	}
 }
 
 func sweepSessions(ctx context.Context, store *sqlite.Store, log *slog.Logger) {

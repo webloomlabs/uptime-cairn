@@ -186,10 +186,19 @@ func (s *Session) capabilities() []*probev1.Capability {
 	out := make([]*probev1.Capability, 0, len(all))
 	for _, t := range all {
 		if checker, ok := s.registry.Lookup(t); ok {
+			// A registered checker is available unless it says otherwise. ICMP
+			// is the case that needs asking: the code is compiled in, but
+			// whether the host will hand out an ICMP socket is a property of
+			// the container, not of the build.
+			available, reason := true, ""
+			if reporter, ok := checker.(check.Availability); ok {
+				available, reason = reporter.Availability()
+			}
 			out = append(out, &probev1.Capability{
 				Type:      t,
 				Version:   checker.Version(),
-				Available: true,
+				Available: available,
+				Reason:    reason,
 			})
 			continue
 		}

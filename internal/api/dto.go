@@ -36,6 +36,30 @@ type monitorJSON struct {
 	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
+// withPushToken folds the one-time push credentials into the config object the
+// spec puts them in. They live under `config` because PushConfig declares them
+// there as readOnly, and they are omitted everywhere else — a token that appears
+// on every read is a token that ends up in a log.
+func withPushToken(out monitorJSON, token, url string) monitorJSON {
+	if token == "" {
+		return out
+	}
+	var config map[string]any
+	if len(out.Config) > 0 {
+		_ = json.Unmarshal(out.Config, &config)
+	}
+	if config == nil {
+		config = map[string]any{}
+	}
+	config["push_token"] = token
+	config["push_url"] = url
+
+	if encoded, err := json.Marshal(config); err == nil {
+		out.Config = encoded
+	}
+	return out
+}
+
 // monitorWrite is the request body. Pointers everywhere a default exists, so the
 // server can tell "unset, use the default" from "explicitly set to the zero
 // value" — the difference between an unspecified interval and a nonsensical one.

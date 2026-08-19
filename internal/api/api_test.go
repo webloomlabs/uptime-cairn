@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
@@ -47,8 +49,14 @@ func testServer(t *testing.T) *httptest.Server {
 	registry := check.NewRegistry()
 	registry.Register(check.NewHTTP())
 
-	api := New(store, noopNotifier{}, registry, keeper,
-		slog.New(slog.NewTextHandler(io.Discard, nil)), "Test Instance")
+	// A real control plane, not a stand-in: push ingest is only interesting if
+	// the heartbeat it produces goes through the same state machine every other
+	// result does.
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cp := controlplane.New(store, controlplane.NewPublisher(), log,
+		model.EmbeddedProbeID, model.SentinelOrgID)
+
+	api := New(store, noopNotifier{}, cp, registry, keeper, log, "Test Instance")
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)
