@@ -659,8 +659,17 @@ type ChannelStore interface {
 }
 
 // Alerts is the delivery side the API drives directly.
+//
+// Publish and Instance are the same two the control plane declares, and they are
+// here for the same reason: an incident opened by hand has to reach the channels
+// and the outbound webhooks a monitor going down reaches. A second delivery path
+// for API-raised events would be a second thing to configure and a gap
+// discovered during an outage.
 type Alerts interface {
 	Test(ctx context.Context, channel model.NotificationChannel, eventType string) (notify.Receipt, error)
 	SampleEvent(eventType string) notify.Event
 	AppriseAvailable() bool
+
+	Publish(ev notify.Event)
+	Instance() notify.Instance
 }

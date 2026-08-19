@@ -589,3 +589,43 @@ func nullMinutes(d time.Duration) any {
 	}
 	return int64(d.Minutes())
 }
+
+// WindowsForStatusPage returns the upcoming windows a page displays.
+//
+// Only windows that have not been cancelled and that opted in via
+// show_on_status_pages: "we are taking the database down at 02:00" is sometimes
+// exactly what a customer needs to see and sometimes an internal detail, and the
+// operator decides which per window rather than per page.
+func (s *Store) WindowsForStatusPage(ctx context.Context, pageID model.ID) ([]model.MaintenanceWindow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+windowColumns+`
+		FROM maintenance_windows w
+		WHERE w.id IN (SELECT window_id FROM maintenance_status_pages WHERE status_page_id = ?)
+		  AND w.cancelled_at IS NULL AND w.show_on_status_pages = 1
+		ORDER BY COALESCE(w.next_occurrence_at, w.starts_at)`, pageID[:])
+	if err != nil {
+		return nil, fmt.Errorf("status page windows: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var windows []model.MaintenanceWindow
+	for rows.Next() {
+		w, err := scanWindow(rows)
+		if err != nil {
+			return nil, err
+		}
+		windows = append(windows, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	pointers := make([]*model.MaintenanceWindow, len(windows))
+	for i := range windows {
+		pointers[i] = &windows[i]
+	}
+	if err := s.loadTargets(ctx, pointers); err != nil {
+		return nil, err
+	}
+	return windows, nil
+}

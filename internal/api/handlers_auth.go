@@ -55,8 +55,14 @@ type userJSON struct {
 	Timezone    *string    `json:"timezone"`
 	Locale      *string    `json:"locale"`
 	LastLoginAt *time.Time `json:"last_login_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+
+	// TeamIDs is always empty in Phase 1 and always present, because the spec
+	// marks it required. A client can render the field from the first release
+	// rather than learning it exists in Phase 3.
+	TeamIDs []string `json:"team_ids"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 func toUserJSON(u model.User) userJSON {
@@ -67,6 +73,7 @@ func toUserJSON(u model.User) userJSON {
 		Active:      u.Active,
 		TOTPEnabled: u.TOTPEnabled(),
 		LastLoginAt: u.LastLoginAt,
+		TeamIDs:     []string{},
 		CreatedAt:   u.CreatedAt,
 		UpdatedAt:   u.UpdatedAt,
 	}

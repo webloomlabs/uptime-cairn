@@ -30,6 +30,10 @@ import (
 // missing row — which would leak the backend past the interface ADR-002 put here.
 var ErrNotFound = store.ErrNotFound
 
+// ErrConflict is the same arrangement for the other error every backend has to
+// report identically: a well-formed write the current state will not have.
+var ErrConflict = store.ErrConflict
+
 // Store is the SQLite implementation of the interfaces in internal/store.
 type Store struct {
 	db *sql.DB

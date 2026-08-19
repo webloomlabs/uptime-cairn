@@ -3,12 +3,35 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** Monitors can be organised. Groups nest one level and roll
+**Status: 2026-08-19.** The REST API is finished. Every Phase 1 operation in the
+frozen spec answers for real except the two Kuma import endpoints, which stay at
+`501` on purpose — the endpoint without the importer behind it would accept a file
+and report success for an import that never happened.
+
+Monitors can now be edited, paused, resumed, checked on demand, and changed a
+thousand at a time. A config patch merges against the *decrypted* configuration
+and resolves a redaction marker back to the credential it stands for, so a form
+that round-trips its own `GET` cannot destroy the password it was never shown —
+verified live by watching the probe's next check send the original password under
+the new username. Incidents, status pages, outbound webhooks, and instance
+settings exist, and the public status page is a projection of its own rather than
+a filtered monitor read, because a field cannot leak through a shape that has no
+place to put it.
+
+Two things the earlier work left open are now closed. `/settings` gives
+instance-wide SMTP somewhere to live, so an email channel's `use_instance_smtp`
+stops being refused at save time. And outbound webhooks put the event stream in
+front of programs as well as people: signed over the exact bytes sent, with an
+event id stable across retries and manual redelivery so a receiver can
+deduplicate.
+
+Monitors can be organised. Groups nest one level and roll
 their worst status up from their children; tags carry a derived slug so two that
-look alike cannot both exist; the monitor list filters by either. That last part
-is what makes the maintenance windows built before them worth having — a window
-targeting a tag keeps covering monitors created after it, which was verified
-live by adding one mid-window.
+look alike cannot both exist; the monitor list filters by either — and now also by
+status, type, enabled, and a search that matches the target as well as the name.
+That taxonomy is what makes the maintenance windows built before it worth having —
+a window targeting a tag keeps covering monitors created after it, which was
+verified live by adding one mid-window.
 
 It pages appropriately. A maintenance window silences
 what it covers and annotates the history so the period can be excluded from an
@@ -48,19 +71,24 @@ by which "90% done" lasts three months.
 
 | Area | Done | Total |
 |---|---|---|
-| Engine & storage | 14 | 15 |
+| Engine & storage | 16 | 17 |
 | Monitor types | 9 | 10 |
 | Core monitoring features | 7 | 8 |
 | Alerting & webhooks | 10 | 10 |
-| Status pages | 0 | 5 |
-| REST API | 14 | 23 |
+| Status pages | 3 | 5 |
+| REST API | 22 | 23 |
 | Kuma migration | 0 | 5 |
 | UI | 0 | 8 |
-| Security | 7 | 8 |
+| Security | 8 | 9 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 3 | 8 |
-| **Total** | **65** | **117** |
+| **Total** | **79** | **120** |
+
+The Engine & storage row read 14/15 until now and was simply stale — two items had
+been ticked without the table being updated. A tracker that quietly disagrees with
+itself is the thing this file exists to prevent, so it is corrected rather than
+carried forward.
 
 ---
 
@@ -105,7 +133,7 @@ by which "90% done" lasts three months.
 - [x] Tags — the slug is derived from the name rather than supplied, so two tags that render identically in a list cannot both exist; a name colliding on slug is a `409` naming the slug
 - [x] Dependency-aware suppression — transitive up the chain, and a parent under maintenance suppresses its children as surely as a parent that is down: taking the router down for a firmware upgrade is the most known problem there is. The child's own heartbeat still records the real outage, so its uptime figure is unaffected; only the page is withheld
 - [x] Maintenance windows: single, daily, weekly, monthly, and cron, evaluated in the window's own IANA zone with the zone database embedded in the binary — "02:00 every Sunday" survives a daylight-saving transition still meaning 02:00. Targets resolve by query through monitors, groups, and tags, so a window covering a tag keeps covering monitors added later. **Groups and tags have tables and no API**, so only monitor targets can be created today; referencing a group or tag is a validation error naming the field rather than a foreign-key failure
-- [ ] Certificate and domain expiry surfaced as upcoming-expiry data
+- [ ] Certificate and domain expiry surfaced as upcoming-expiry data — `/monitors/{id}/certificate`, `include=certificate`, and the overview's expiring-soon counts are built and read the tables migration `0003` created. **Nothing writes those tables:** the TLS and HTTP checkers see the certificate and report only an expiry verdict, and carrying the observation to the control plane is a new field on the probe protocol's result frame. So the endpoint answers `404` for every monitor, which is the honest answer to "what certificate was observed" when none has been
 - [x] Uptime history browsing over arbitrary past ranges via rollups
 
 ## Alerting & webhooks
@@ -123,11 +151,11 @@ by which "90% done" lasts three months.
 
 ## Status pages
 
-- [ ] Multiple pages per install, monitor and group selection
-- [ ] Custom domains, with reverse-proxy and ACME documentation
-- [ ] Uptime bars, incident and maintenance display
-- [ ] Subscribe-to-updates via the API
-- [ ] Unauthenticated read path that holds up under load
+- [x] Multiple pages per install, monitor and group selection — ordered sections, a monitor in at most one section per page, and a slug collision answered `409` naming what is taken
+- [ ] Custom domains, with reverse-proxy and ACME documentation — **the column and its cross-organisation uniqueness are enforced; the reverse-proxy and ACME recipes are not written**, and a hostname without them routes nowhere
+- [x] Uptime bars, incident and maintenance display — read from the 1d rollup tier, and a day with no observations carries a null ratio rather than being drawn as downtime, which is the single most common way a status page lies
+- [x] Subscribe-to-updates via the API — double opt-in, the address encrypted at rest because a notification replays it, and a repeat request answered identically to a first so the endpoint is not a membership oracle. **Nothing delivers to a subscriber yet:** confirmation and notification mail need the instance relay wired to a sender, which is the next thing this unblocks
+- [ ] Unauthenticated read path that holds up under load — it exists and is correct, and "under load" is a claim the load-test harness has to make
 
 ## REST API
 
@@ -139,21 +167,21 @@ by which "90% done" lasts three months.
 - [x] `GET /api/v1/monitors/{id}/heartbeats`, including `important_only`
 - [x] `GET|POST /api/v1/push/{pushToken}` — the unauthenticated dead-man's-switch ingest
 - [x] RFC 9457 problem responses with stable `type` URIs
-- [ ] `PATCH /api/v1/monitors/{id}`, pause, resume, check-now, bulk operations
-- [ ] `GET /api/v1/monitors/membership` — ADR-004's change signal and filtered count
-- [ ] Monitor list filters — `tag_id` and `group_id` are done, including the spec's rule that repeated values OR within a parameter and AND across them, and a group filter reaching its children. `status`, `type`, `enabled`, and `search` are not; the filter now has a struct to live in, so each is a clause rather than a signature change
-- [ ] `include=last_heartbeat|uptime|tags|group`
+- [x] `PATCH /api/v1/monitors/{id}`, pause, resume, check-now, bulk operations — the config patch merges against the decrypted configuration and resolves a redaction marker back to the stored credential, so a form that round-trips its own `GET` cannot destroy the password it was never shown. Check-now runs the checker in the API and hands the result to the control plane's ingest, because the control plane must not import `probe/check` (ADR-001) and because a manual check that took a different path would be testing the path. Rate-limited per monitor, not per caller: the thing being protected is somebody else's server. Bulk reports each identifier separately, because an endpoint that fails a thousand-monitor batch over one deleted id is useless at the size it exists for
+- [x] `GET /api/v1/monitors/membership` — ADR-004's change signal and filtered count, sharing one filter reader with the listing so the two cannot disagree about what a filter means. `state_version` now moves on a configuration edit as well as a check result, or a rename would leave every open list view showing the old name until something failed
+- [x] Monitor list filters — `status`, `type`, `enabled`, and `search` join `tag_id` and `group_id`, with the spec's rule that repeated values OR within a parameter and AND across them. `search` matches the target as well as the name, because the question that brings somebody to the search box is usually "what else points at this host?". An unrecognised value is a `400` rather than an empty page: silently returning nothing for a typo is how somebody concludes their monitors have been deleted
+- [x] `include=last_heartbeat|uptime|tags|group` — one query per embed for the whole page, never one per row, which is the difference the 5,000-monitor gate measures. Opt-in, so a response without `include=` is byte-for-byte what it was before the embeds existed. `uptime` reads the precomputed cache and reports null for a monitor it has not computed, because zero is a claim of total downtime made by a table that had not run
 - [x] `/history` and `/uptime` — auto resolution, coarsened rather than refused when a request would return too many buckets, and read from raw rather than the tiers whenever raw covers the range
 - [x] First-run setup, login, logout, session description
 - [x] TOTP enrolment, confirmation, and removal
 - [x] Notification channels — CRUD, test-fire, template preview, and the published variable catalogue
 - [x] Maintenance windows — CRUD, with a schedule that will never fire refused at write time rather than discovered by its silence
 - [x] Groups and tags — CRUD, monitor counts, group status rollup, and assignment from the monitor write path
-- [ ] Status pages, incidents, settings — the rest of the specified surface, currently answering `501`
-- [ ] Scoped API keys: permissions, expiry, last-used, revocation
-- [ ] Outbound webhooks for every state change
-- [ ] Prometheus `/metrics` and OpenTelemetry export
-- [ ] Generated Go and TypeScript clients published from the spec
+- [x] Status pages, incidents, settings — plus `/system/info`, `/overview`, `/users`, and the unauthenticated `/public/` read path. Incidents advance through the timeline rather than through `PATCH`, so every state change carries the sentence explaining it. The public page is a separate projection rather than a filtered monitor read, because a field cannot leak through a shape with no place to put it — and that is the one endpoint where a leak reaches strangers
+- [x] Scoped API keys: permissions, expiry, last-used, revocation
+- [x] Outbound webhooks for every state change — signed with an HMAC over the exact bytes sent, with a stable event id across retries and manual redelivery so a receiver can deduplicate, and self-disabling after a sustained run of failures. A separate dispatcher from notification channels, because one delivers an envelope to a program and the other renders a sentence for a person
+- [x] Prometheus `/metrics` — hand-written text exposition, no client library and no new dependency, unauthenticated from loopback and `metrics:read` from anywhere else. `cairn_monitor_status` keeps the full status vocabulary rather than collapsing to up/down, so a Prometheus alert does not fire during a maintenance window the operator declared. **OpenTelemetry export is not built:** it means the SDK's dependency tree on a binary whose pitch is that it is one static file, which is a decision to take deliberately rather than in passing
+- [ ] Generated Go and TypeScript clients published from the spec — codegen belongs in CI, and CI is not changed without being asked
 
 ## Kuma migration
 
@@ -183,6 +211,7 @@ by which "90% done" lasts three months.
 - [x] API-key authentication with scope enforcement and no privilege escalation
 - [x] Encryption at rest: AES-256-GCM envelopes, AAD-bound rows, wrapped data keys, root-key precedence — carrying the TOTP secret today
 - [x] Monitor and notification credentials encrypted through the same layer — HTTP basic and bearer auth, Docker client TLS material, gRPC metadata, and every channel's secrets are split out of `config` at the storage boundary and sealed with AAD binding them to their row, so a read path cannot serialise what is not there. Which fields are secret is declared by the checker that owns the config schema, and a test asserts that declaration against the `writeOnly` properties of the frozen spec. Migration `0004` adds the column; monitors written before it are re-sealed on start, verified live against a database that predated it
+- [x] Every credential the new surface introduced goes through the same envelope: a webhook's signing secret and its headers, the instance SMTP password, and a status page subscriber's address are all sealed with AAD binding them to their row. The subscriber's address is encrypted rather than hashed because a notification replays it; a status page's password is hashed rather than encrypted because it is only ever verified against — "hash what you verify, encrypt what you replay", applied one more time
 - [ ] `SECURITY.md`, dependency and container scanning in CI
 
 ## Deployment & operations
@@ -225,18 +254,23 @@ by which "90% done" lasts three months.
 
 1. **The load-test harness against the real engine.** The 5,000-monitor claim is
    the project's central promise, and every week it goes unmeasured against real
-   code is a week the number is an assumption. It now has a third thing to
-   measure: a partition that marks several thousand monitors down within one
-   scheduler tick is precisely the burst the delivery queue is sized against, and
-   that size is currently an argument rather than a measurement. The list view is
-   also the endpoint the CI gate covers, and it has just gained joins.
-2. **`/monitors/{id}/certificate` and the observation writers behind it.** The
-   TLS and domain checkers see everything that endpoint reports and store none of
-   it; migration `0003` created the tables in the same pass, and
-   `monitor.certificate_expiring` is an event type with nothing raising it.
-3. **The rest of the monitor list filters.** `status`, `type`, `enabled`, and
-   `search` are four clauses in a struct that now exists, and they are what the
-   dashboard's list view will ask for on its first day.
+   code is a week the number is an assumption. It now has more to measure than it
+   did: the list endpoint has gained joins, four filter clauses, and optional
+   embeds, and it is the endpoint the CI gate covers. A partition that marks
+   several thousand monitors down inside one scheduler tick is also the burst two
+   delivery queues are now sized against, and both sizes are arguments rather
+   than measurements.
+2. **Certificate and domain observations.** `/monitors/{id}/certificate`,
+   `include=certificate`, and the overview's expiring-soon counts are built and
+   read tables nothing writes. Closing that needs the observation carried from the
+   checker to the control plane — a field on the probe protocol's result frame,
+   which is the one change in this list that is not API work. `monitor.certificate_expiring`
+   is an event type with nothing raising it, and it is the alert people actually
+   want from a TLS monitor.
+3. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
+   and double opt-in, and nothing sends the confirmation mail. The instance relay
+   now exists to send it through, which is why this is worth doing next rather
+   than alongside the UI.
 
-The UI comes after those deliberately: the plan puts it in Month 3, and an API
-that is not finished is a UI that gets rewritten.
+The UI comes after those deliberately: the plan puts it in Month 3, and every
+surface it needs now exists — which was the point of finishing the API first.

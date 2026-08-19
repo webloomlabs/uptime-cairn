@@ -34,10 +34,16 @@ type pushBody struct {
 
 const maxPushMessage = 1024
 
-// PushIngest is the control-plane call the push endpoint makes. Declared here so
-// the API does not import the control plane's concrete server.
+// PushIngest is the control-plane calls the API makes with a result of its own.
+// Declared here so the API does not import the control plane's concrete server.
 type PushIngest interface {
 	PushHeartbeat(ctx context.Context, monitor model.Monitor, up bool, message string, responseTime *time.Duration) error
+
+	// RecordCheck ingests a check the API ran itself and returns the heartbeat.
+	// The API runs the checker because the control plane must not import
+	// probe/check (ADR-001); what crosses this interface is an observation, and
+	// from there a manual check is treated exactly like a scheduled one.
+	RecordCheck(ctx context.Context, monitor model.Monitor, status model.Status, code, message string, responseTime *time.Duration) (model.Heartbeat, error)
 }
 
 func (s *Server) pushHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -141,13 +147,19 @@ func (s *Server) pushNotFound(w http.ResponseWriter, r *http.Request) {
 		"Not found", "No push monitor holds that token.")
 }
 
-// pushURL assembles the URL the caller should hit. There is no configured public
-// base URL in this build, so it is derived from the request that created the
-// monitor — which is right whenever the creator and the pusher reach the install
-// the same way, and visibly wrong rather than silently wrong when they do not.
-func pushURL(r *http.Request, token string) string {
+// pushURL assembles the URL the caller should hit.
+//
+// The configured base URL wins, because it is the operator saying how this
+// install is reached from outside. Without one it is derived from the request
+// that created the monitor — right whenever the creator and the pusher reach the
+// install the same way, and visibly wrong rather than silently wrong when they
+// do not.
+func (s *Server) pushURL(r *http.Request, token string) string {
 	if token == "" {
 		return ""
+	}
+	if s.baseURL != "" {
+		return s.baseURL + "/api/v1/push/" + token
 	}
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {

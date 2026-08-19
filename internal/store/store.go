@@ -92,10 +92,9 @@ type ChannelWithCount struct {
 // MonitorFilter narrows a monitor listing. Every field is optional; the zero
 // value lists everything.
 //
-// Only the two taxonomy filters are here so far. status, type, enabled, and
-// search are specified and not implemented, and they belong in this struct when
-// they are — the shape is the point, so that adding one is a clause rather than
-// a signature change.
+// The spec's rule, and the reason the fields are shaped this way: repeated
+// values OR within a parameter and AND across them. status=up&status=down is
+// "either", status=down&type=http is "both".
 type MonitorFilter struct {
 	// GroupIDs match monitors in any of these groups, or in a child of one.
 	// A parent group filtering to nothing while its children hold the monitors
@@ -104,10 +103,47 @@ type MonitorFilter struct {
 
 	// TagIDs match monitors carrying any of these tags.
 	TagIDs []model.ID
+
+	// Statuses match the monitor's current state. Read from monitor_state, which
+	// is why the listing joins it rather than fetching state per row.
+	Statuses []string
+
+	// Types match monitors.type.
+	Types []string
+
+	// Enabled restricts to enabled or disabled monitors. Nil means both.
+	//
+	// Deliberately distinct from a status filter on "paused": a monitor can be
+	// disabled and still hold the last status it had, and an operator asking
+	// "what have I turned off" is not asking "what is paused right now".
+	Enabled *bool
+
+	// Search matches the monitor name or its target, case-insensitively.
+	//
+	// Target as well as name because the question that brings somebody to the
+	// search box is usually "what else points at this host?", and the answer
+	// lives in a field they never named.
+	Search string
 }
 
 // Empty reports whether the filter narrows anything.
-func (f MonitorFilter) Empty() bool { return len(f.GroupIDs)+len(f.TagIDs) == 0 }
+func (f MonitorFilter) Empty() bool {
+	return len(f.GroupIDs)+len(f.TagIDs)+len(f.Statuses)+len(f.Types) == 0 &&
+		f.Enabled == nil && f.Search == ""
+}
+
+// Membership is ADR-004's reconciliation signal for one filtered view: a cheap
+// pair a client polls to learn that a view it is not subscribed to has moved.
+//
+// Both halves are needed. Version covers content — it moves when any matching
+// monitor changes status or configuration. Count covers membership — it moves
+// when a monitor enters or leaves the filter. A monitor leaving a status=down
+// view as another enters it keeps the count identical while the view is now
+// wrong, which is precisely the case a count alone misses.
+type Membership struct {
+	Version int64
+	Count   int
+}
 
 // ChannelFilter narrows a channel listing. Every field is optional; the zero
 // value lists everything.
@@ -220,3 +256,62 @@ type HistoryBucket struct {
 // unknown and skipped never count: they are gaps in observation, not
 // observations of failure.
 func (b HistoryBucket) Observed() int { return b.Up + b.Down }
+
+// IncidentFilter narrows an incident listing. Every field is optional.
+type IncidentFilter struct {
+	// States and Impacts OR within themselves and AND with everything else, the
+	// same rule the monitor list follows.
+	States  []string
+	Impacts []string
+
+	// MonitorID and StatusPageID ask "what happened to this thing" and "what did
+	// this page show" — the two questions an incident list is opened to answer.
+	MonitorID    *model.ID
+	StatusPageID *model.ID
+
+	// From and To bound started_at, half-open: start inclusive, end exclusive.
+	From *time.Time
+	To   *time.Time
+
+	// Search matches the incident title.
+	Search string
+}
+
+// StatusPageFilter narrows a status page listing.
+type StatusPageFilter struct {
+	Search string
+
+	// Published restricts to published or draft pages. Nil means both — an
+	// operator's list has to show the page they are still building.
+	Published *bool
+}
+
+// PublicMonitor is everything a status page visitor is allowed to know about a
+// monitor: no configuration, no target, no credentials, no interval.
+//
+// A projection rather than a filter over MonitorWithState, because the public
+// read path is the one place in this system where a leak reaches strangers — and
+// a field cannot leak through a shape that has no place to put it.
+type PublicMonitor struct {
+	ID             model.ID
+	Name           string
+	Description    string
+	Status         string
+	ResponseTimeMs *float64
+
+	// UptimeRatio is nil when nothing has been observed. A gap is not downtime,
+	// and the null has to survive all the way to the page (data model §5.3).
+	UptimeRatio *float64
+
+	// Bar is one entry per day over the page's window, oldest first.
+	Bar []DailyUptime
+}
+
+// DailyUptime is one stone in a status page's uptime bar.
+type DailyUptime struct {
+	Date time.Time
+
+	// Ratio is nil for a day with no observations, which renders as a gap rather
+	// than as an outage.
+	Ratio *float64
+}

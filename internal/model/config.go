@@ -317,3 +317,50 @@ func holdsMarker(value any) bool {
 		return false
 	}
 }
+
+// PreserveRedacted substitutes stored values back into an incoming config
+// wherever it carries the redaction marker.
+//
+// This is what makes a form that round-trips its own GET work. A read renders
+// "__redacted__" in place of every credential; a client that edits the timeout
+// and submits the whole object back is saying "leave the password alone", and
+// without this the marker would either be stored as the literal password or the
+// credential would be silently dropped. Both failures surface hours later as an
+// authentication error attributed to the target.
+//
+// A path the stored config does not hold is removed rather than left as a
+// marker: the caller echoed a marker for something that was never set, and
+// writing the marker itself is the one outcome that must not happen.
+func PreserveRedacted(stored, incoming json.RawMessage, paths []string) (json.RawMessage, error) {
+	if len(incoming) == 0 || len(paths) == 0 {
+		return incoming, nil
+	}
+
+	target, err := decodeObject(incoming)
+	if err != nil {
+		return nil, err
+	}
+	source, err := decodeObject(stored)
+	if err != nil {
+		return nil, err
+	}
+
+	changed := false
+	for _, path := range paths {
+		segments := strings.Split(path, ".")
+		value, ok := readPath(target, segments)
+		if !ok || !holdsMarker(value) {
+			continue
+		}
+		changed = true
+		if kept, ok := readPath(source, segments); ok {
+			putPath(target, segments, kept)
+		} else {
+			takePath(target, segments)
+		}
+	}
+	if !changed {
+		return incoming, nil
+	}
+	return json.Marshal(target)
+}

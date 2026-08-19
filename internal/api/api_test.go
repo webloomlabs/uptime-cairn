@@ -40,6 +40,16 @@ func testServer(t *testing.T) *httptest.Server {
 func testServerWithStore(t *testing.T, extra ...check.Checker) (*httptest.Server, *sqlite.Store) {
 	t.Helper()
 
+	server, store, _ := testAPI(t, extra...)
+	return server, store
+}
+
+// testAPI also hands back the server itself, for the two tests that have to
+// reach past HTTP — opening a sealed credential to prove an edit preserved it
+// cannot be done through the API, because the API is the thing that hides it.
+func testAPI(t *testing.T, extra ...check.Checker) (*httptest.Server, *sqlite.Store, *Server) {
+	t.Helper()
+
 	store, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "cairn.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -90,7 +100,21 @@ func testServerWithStore(t *testing.T, extra ...check.Checker) (*httptest.Server
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)
-	return server, store
+	return server, store, api
+}
+
+// openMonitorConfig reassembles a stored monitor's configuration the way the
+// control plane does at assignment time. A test asserting that a credential
+// survived an edit has to look at the plaintext, and this is the only honest way
+// to get it.
+func openMonitorConfig(t *testing.T, api *Server, m model.Monitor) []byte {
+	t.Helper()
+
+	config, err := api.openConfig(m)
+	if err != nil {
+		t.Fatalf("open monitor config: %v", err)
+	}
+	return config
 }
 
 type client struct {

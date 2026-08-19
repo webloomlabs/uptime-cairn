@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"time"
 
@@ -36,6 +37,65 @@ type monitorJSON struct {
 	NextCheckAt            *time.Time      `json:"next_check_at"`
 	CreatedAt              time.Time       `json:"created_at"`
 	UpdatedAt              time.Time       `json:"updated_at"`
+
+	// The include= embeds. Every one is omitempty, so a client that did not ask
+	// for them sees a response identical to the one it saw before they existed —
+	// which is what makes adding an embed a non-breaking change.
+	//
+	// They are opt-in because they cost per-row work: last_heartbeat and uptime
+	// are the two the dashboard's list view wants and an export does not, and at
+	// 5,000 monitors that difference is the difference between a page that loads
+	// and one that times out.
+	LastHeartbeat *heartbeatJSON   `json:"last_heartbeat,omitempty"`
+	Uptime        *uptimeEmbed     `json:"uptime,omitempty"`
+	Group         *groupJSON       `json:"group,omitempty"`
+	Tags          []tagJSON        `json:"tags,omitempty"`
+	Certificate   *certificateJSON `json:"certificate,omitempty"`
+}
+
+// uptimeEmbed is the two windows a list view renders under a monitor's name.
+// Both are pointers: null means "not computed yet", which is a different claim
+// from zero, and zero would render as total downtime for a monitor created
+// minutes ago.
+type uptimeEmbed struct {
+	Ratio24h *float64 `json:"24h"`
+	Ratio30d *float64 `json:"30d"`
+}
+
+// certificateJSON is CertificateInfo in docs/api/openapi.yaml.
+type certificateJSON struct {
+	Subject           string     `json:"subject,omitempty"`
+	Issuer            string     `json:"issuer,omitempty"`
+	SerialNumber      string     `json:"serial_number,omitempty"`
+	ValidFrom         *time.Time `json:"valid_from,omitempty"`
+	ValidTo           time.Time  `json:"valid_to"`
+	DaysRemaining     int        `json:"days_remaining"`
+	FingerprintSHA256 string     `json:"fingerprint_sha256,omitempty"`
+	SANs              []string   `json:"subject_alternative_names,omitempty"`
+	ChainValid        *bool      `json:"chain_valid,omitempty"`
+	ChainError        *string    `json:"chain_error"`
+	ObservedAt        time.Time  `json:"observed_at"`
+}
+
+func toCertificateJSON(c model.Certificate, now time.Time) certificateJSON {
+	out := certificateJSON{
+		Subject:       c.Subject,
+		Issuer:        c.Issuer,
+		SerialNumber:  c.SerialNumber,
+		ValidFrom:     c.ValidFrom,
+		ValidTo:       c.ValidTo,
+		DaysRemaining: c.DaysRemaining(now),
+		SANs:          c.SANs,
+		ChainValid:    c.ChainValid,
+		ObservedAt:    c.ObservedAt,
+	}
+	if len(c.FingerprintSHA256) > 0 {
+		out.FingerprintSHA256 = hex.EncodeToString(c.FingerprintSHA256)
+	}
+	if c.ChainError != "" {
+		out.ChainError = &c.ChainError
+	}
+	return out
 }
 
 // withPushToken folds the one-time push credentials into the config object the
@@ -621,4 +681,600 @@ type templateVariableJSON struct {
 	Type        string `json:"type"`
 	Description string `json:"description"`
 	Example     any    `json:"example"`
+}
+
+// monitorUpdate is MonitorUpdate: a partial edit where every field is optional
+// and `type` is absent because it is immutable.
+//
+// json.RawMessage rather than *string for the three nullable identifiers,
+// because encoding/json collapses an explicit null into the same nil a missing
+// field produces at any pointer depth — and here the two mean different things.
+// Absent leaves the association alone; null clears it.
+type monitorUpdate struct {
+	Name                 *string         `json:"name"`
+	Description          *string         `json:"description"`
+	Enabled              *bool           `json:"enabled"`
+	IntervalSeconds      *int            `json:"interval_seconds"`
+	TimeoutSeconds       *int            `json:"timeout_seconds"`
+	Retries              *int            `json:"retries"`
+	RetryIntervalSeconds json.RawMessage `json:"retry_interval_seconds"`
+	ResendAfter          *int            `json:"resend_after"`
+	UpsideDown           *bool           `json:"upside_down"`
+	NotifyOnRecovery     *bool           `json:"notify_on_recovery"`
+
+	GroupID         json.RawMessage `json:"group_id"`
+	ParentMonitorID json.RawMessage `json:"parent_monitor_id"`
+
+	TagIDs                 *[]string `json:"tag_ids"`
+	NotificationChannelIDs *[]string `json:"notification_channel_ids"`
+
+	// Config is merged shallowly against what is stored, so a caller can change
+	// one setting without restating the rest — and, crucially, without having to
+	// resend a password it can no longer read.
+	Config json.RawMessage `json:"config"`
+}
+
+// monitorBulkRequest is MonitorBulkRequest.
+type monitorBulkRequest struct {
+	MonitorIDs             []string        `json:"monitor_ids"`
+	Operation              string          `json:"operation"`
+	TagIDs                 []string        `json:"tag_ids"`
+	GroupID                json.RawMessage `json:"group_id"`
+	NotificationChannelIDs []string        `json:"notification_channel_ids"`
+}
+
+// bulkResult reports each identifier's outcome separately. Partial success is
+// the normal case for a thousand-monitor operation, and failing the batch
+// because one id was deleted five minutes ago would be useless.
+type bulkResult struct {
+	Succeeded []string      `json:"succeeded"`
+	Failed    []bulkFailure `json:"failed"`
+}
+
+type bulkFailure struct {
+	ID      string `json:"id"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// membershipSignal is MembershipSignal — ADR-004's reconciliation half.
+type membershipSignal struct {
+	Version     int64     `json:"version"`
+	Count       int       `json:"count"`
+	GeneratedAt time.Time `json:"generated_at"`
+}
+
+// incidentJSON is Incident.
+type incidentJSON struct {
+	ID             string               `json:"id"`
+	Title          string               `json:"title"`
+	State          string               `json:"state"`
+	Impact         string               `json:"impact"`
+	StartedAt      time.Time            `json:"started_at"`
+	ResolvedAt     *time.Time           `json:"resolved_at"`
+	MonitorIDs     []string             `json:"monitor_ids"`
+	StatusPageIDs  []string             `json:"status_page_ids"`
+	AutoOpened     bool                 `json:"auto_opened"`
+	AcknowledgedAt *time.Time           `json:"acknowledged_at"`
+	AcknowledgedBy *string              `json:"acknowledged_by"`
+	AssignedTo     *string              `json:"assigned_to"`
+	Updates        []incidentUpdateJSON `json:"updates,omitempty"`
+	Metrics        *incidentMetricsJSON `json:"metrics"`
+	CreatedAt      time.Time            `json:"created_at"`
+	UpdatedAt      time.Time            `json:"updated_at"`
+}
+
+type incidentMetricsJSON struct {
+	TimeToDetect      *int64 `json:"time_to_detect_seconds"`
+	TimeToAcknowledge *int64 `json:"time_to_acknowledge_seconds"`
+	TimeToResolve     *int64 `json:"time_to_resolve_seconds"`
+}
+
+type incidentUpdateJSON struct {
+	ID                  string    `json:"id"`
+	State               *string   `json:"state,omitempty"`
+	Body                string    `json:"body"`
+	AuthorID            *string   `json:"author_id"`
+	NotifiedSubscribers bool      `json:"notified_subscribers"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// incidentWrite is IncidentWrite: the opening call, which may carry the first
+// timeline entry inline.
+type incidentWrite struct {
+	Title             *string    `json:"title"`
+	State             *string    `json:"state"`
+	Impact            *string    `json:"impact"`
+	StartedAt         *time.Time `json:"started_at"`
+	MonitorIDs        []string   `json:"monitor_ids"`
+	StatusPageIDs     []string   `json:"status_page_ids"`
+	Body              *string    `json:"body"`
+	NotifySubscribers *bool      `json:"notify_subscribers"`
+}
+
+// incidentPatch is IncidentUpdateRequest: metadata only. State is absent by
+// design — advancing an incident goes through the timeline, so that every state
+// change carries the note explaining it.
+type incidentPatch struct {
+	Title         *string         `json:"title"`
+	Impact        *string         `json:"impact"`
+	StartedAt     *time.Time      `json:"started_at"`
+	MonitorIDs    *[]string       `json:"monitor_ids"`
+	StatusPageIDs *[]string       `json:"status_page_ids"`
+	AssignedTo    json.RawMessage `json:"assigned_to"`
+}
+
+// timelineWrite is IncidentTimelineEntryWrite.
+type timelineWrite struct {
+	State             *string `json:"state"`
+	Body              *string `json:"body"`
+	NotifySubscribers *bool   `json:"notify_subscribers"`
+}
+
+func toIncidentJSON(in model.Incident, withTimeline bool) incidentJSON {
+	metrics := in.Metrics()
+	out := incidentJSON{
+		ID:             in.ID.String(),
+		Title:          in.Title,
+		State:          in.State,
+		Impact:         in.Impact,
+		StartedAt:      in.StartedAt,
+		ResolvedAt:     in.ResolvedAt,
+		MonitorIDs:     idStrings(in.MonitorIDs),
+		StatusPageIDs:  idStrings(in.StatusPageIDs),
+		AutoOpened:     in.AutoOpened,
+		AcknowledgedAt: in.AcknowledgedAt,
+		AcknowledgedBy: idString(in.AcknowledgedBy),
+		AssignedTo:     idString(in.AssignedTo),
+		Metrics: &incidentMetricsJSON{
+			TimeToDetect:      metrics.TimeToDetect,
+			TimeToAcknowledge: metrics.TimeToAcknowledge,
+			TimeToResolve:     metrics.TimeToResolve,
+		},
+		CreatedAt: in.CreatedAt,
+		UpdatedAt: in.UpdatedAt,
+	}
+	if withTimeline {
+		out.Updates = make([]incidentUpdateJSON, 0, len(in.Updates))
+		for _, u := range in.Updates {
+			out.Updates = append(out.Updates, toIncidentUpdateJSON(u))
+		}
+	}
+	return out
+}
+
+func toIncidentUpdateJSON(u model.IncidentUpdate) incidentUpdateJSON {
+	out := incidentUpdateJSON{
+		ID:                  u.ID.String(),
+		Body:                u.Body,
+		AuthorID:            idString(u.AuthorID),
+		NotifiedSubscribers: u.NotifiedSubscribers,
+		CreatedAt:           u.CreatedAt,
+	}
+	if u.State != "" {
+		state := u.State
+		out.State = &state
+	}
+	return out
+}
+
+func idString(id *model.ID) *string {
+	if id == nil {
+		return nil
+	}
+	s := id.String()
+	return &s
+}
+
+// statusPageJSON is StatusPage. The password is absent: it is writeOnly in the
+// spec and hashed in the column, so there is nothing here that could return it.
+type statusPageJSON struct {
+	ID                    string                  `json:"id"`
+	Slug                  string                  `json:"slug"`
+	Title                 string                  `json:"title"`
+	Description           *string                 `json:"description"`
+	Published             bool                    `json:"published"`
+	CustomDomain          *string                 `json:"custom_domain"`
+	Visibility            string                  `json:"visibility"`
+	Theme                 string                  `json:"theme"`
+	LogoURL               *string                 `json:"logo_url"`
+	FaviconURL            *string                 `json:"favicon_url"`
+	PrimaryColor          *string                 `json:"primary_color"`
+	FooterText            *string                 `json:"footer_text"`
+	CustomCSS             *string                 `json:"custom_css"`
+	Timezone              *string                 `json:"timezone"`
+	ShowUptimePercentage  bool                    `json:"show_uptime_percentage"`
+	ShowResponseTimeChart bool                    `json:"show_response_time_chart"`
+	UptimeBarDays         int                     `json:"uptime_bar_days"`
+	ShowPoweredBy         bool                    `json:"show_powered_by"`
+	SubscriptionsEnabled  bool                    `json:"subscriptions_enabled"`
+	GoogleAnalyticsID     *string                 `json:"google_analytics_id"`
+	Sections              []statusPageSectionJSON `json:"sections"`
+	CreatedAt             time.Time               `json:"created_at"`
+	UpdatedAt             time.Time               `json:"updated_at"`
+}
+
+type statusPageSectionJSON struct {
+	Name        string   `json:"name"`
+	Description *string  `json:"description"`
+	MonitorIDs  []string `json:"monitor_ids"`
+}
+
+// statusPageWrite is StatusPageWrite. Sections are replaced wholesale, matching
+// the store: the request's ordering is the ordering.
+type statusPageWrite struct {
+	Slug                  *string                  `json:"slug"`
+	Title                 *string                  `json:"title"`
+	Description           *string                  `json:"description"`
+	Published             *bool                    `json:"published"`
+	CustomDomain          json.RawMessage          `json:"custom_domain"`
+	Visibility            *string                  `json:"visibility"`
+	Password              json.RawMessage          `json:"password"`
+	Theme                 *string                  `json:"theme"`
+	LogoURL               *string                  `json:"logo_url"`
+	FaviconURL            *string                  `json:"favicon_url"`
+	PrimaryColor          *string                  `json:"primary_color"`
+	FooterText            *string                  `json:"footer_text"`
+	CustomCSS             *string                  `json:"custom_css"`
+	Timezone              *string                  `json:"timezone"`
+	ShowUptimePercentage  *bool                    `json:"show_uptime_percentage"`
+	ShowResponseTimeChart *bool                    `json:"show_response_time_chart"`
+	UptimeBarDays         *int                     `json:"uptime_bar_days"`
+	ShowPoweredBy         *bool                    `json:"show_powered_by"`
+	SubscriptionsEnabled  *bool                    `json:"subscriptions_enabled"`
+	GoogleAnalyticsID     *string                  `json:"google_analytics_id"`
+	Sections              *[]statusPageSectionJSON `json:"sections"`
+}
+
+func toStatusPageJSON(p model.StatusPage) statusPageJSON {
+	out := statusPageJSON{
+		ID:                    p.ID.String(),
+		Slug:                  p.Slug,
+		Title:                 p.Title,
+		Description:           optional(p.Description),
+		Published:             p.Published,
+		CustomDomain:          optional(p.CustomDomain),
+		Visibility:            p.Visibility,
+		Theme:                 p.Theme,
+		LogoURL:               optional(p.LogoURL),
+		FaviconURL:            optional(p.FaviconURL),
+		PrimaryColor:          optional(p.PrimaryColor),
+		FooterText:            optional(p.FooterText),
+		CustomCSS:             optional(p.CustomCSS),
+		Timezone:              optional(p.Timezone),
+		ShowUptimePercentage:  p.ShowUptimePercentage,
+		ShowResponseTimeChart: p.ShowResponseTimeChart,
+		UptimeBarDays:         p.UptimeBarDays,
+		ShowPoweredBy:         p.ShowPoweredBy,
+		SubscriptionsEnabled:  p.SubscriptionsEnabled,
+		GoogleAnalyticsID:     optional(p.GoogleAnalyticsID),
+		Sections:              make([]statusPageSectionJSON, 0, len(p.Sections)),
+		CreatedAt:             p.CreatedAt,
+		UpdatedAt:             p.UpdatedAt,
+	}
+	if out.Theme == "" {
+		out.Theme = "auto"
+	}
+	for _, section := range p.Sections {
+		out.Sections = append(out.Sections, statusPageSectionJSON{
+			Name:        section.Name,
+			Description: optional(section.Description),
+			MonitorIDs:  idStrings(section.MonitorIDs),
+		})
+	}
+	return out
+}
+
+// optional renders an empty string as JSON null. The spec types these fields as
+// nullable, and "" and null are the same absence here — a status page with an
+// empty-string footer is a status page with no footer.
+func optional(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// publicStatusPage is PublicStatusPage: the visitor-facing projection, built
+// from PublicMonitor rather than from a monitor read, so nothing about
+// configuration can reach it.
+type publicStatusPage struct {
+	Slug                 string                    `json:"slug"`
+	Title                string                    `json:"title"`
+	Description          *string                   `json:"description"`
+	Theme                string                    `json:"theme"`
+	LogoURL              *string                   `json:"logo_url"`
+	FaviconURL           *string                   `json:"favicon_url"`
+	PrimaryColor         *string                   `json:"primary_color"`
+	FooterText           *string                   `json:"footer_text"`
+	CustomCSS            *string                   `json:"custom_css"`
+	ShowPoweredBy        bool                      `json:"show_powered_by"`
+	SubscriptionsEnabled bool                      `json:"subscriptions_enabled"`
+	OverallStatus        string                    `json:"overall_status"`
+	Sections             []publicSection           `json:"sections"`
+	ActiveIncidents      []publicIncident          `json:"active_incidents"`
+	RecentIncidents      []publicIncident          `json:"recent_incidents"`
+	ScheduledMaintenance []publicMaintenanceWindow `json:"scheduled_maintenance"`
+	GeneratedAt          time.Time                 `json:"generated_at"`
+}
+
+type publicSection struct {
+	Name        string                `json:"name"`
+	Description *string               `json:"description"`
+	Monitors    []publicMonitorRecord `json:"monitors"`
+}
+
+type publicMonitorRecord struct {
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	Description      *string          `json:"description"`
+	Status           string           `json:"status"`
+	UptimePercentage *float64         `json:"uptime_percentage"`
+	UptimeBar        []publicBarEntry `json:"uptime_bar,omitempty"`
+	ResponseTimeMs   *float64         `json:"response_time_ms"`
+}
+
+type publicBarEntry struct {
+	Date string `json:"date"`
+
+	// UptimeRatio is null for a day with no data. Rendering that as downtime is
+	// the single most common way a status page lies.
+	UptimeRatio *float64 `json:"uptime_ratio"`
+	Status      *string  `json:"status"`
+}
+
+type publicIncident struct {
+	ID                 string                 `json:"id"`
+	Title              string                 `json:"title"`
+	State              string                 `json:"state"`
+	Impact             string                 `json:"impact"`
+	StartedAt          time.Time              `json:"started_at"`
+	ResolvedAt         *time.Time             `json:"resolved_at"`
+	AffectedMonitorIDs []string               `json:"affected_monitor_ids"`
+	Updates            []publicIncidentUpdate `json:"updates"`
+}
+
+type publicIncidentUpdate struct {
+	State     *string   `json:"state,omitempty"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type publicMaintenanceWindow struct {
+	Title              string     `json:"title"`
+	Description        *string    `json:"description"`
+	StartsAt           time.Time  `json:"starts_at"`
+	EndsAt             *time.Time `json:"ends_at"`
+	AffectedMonitorIDs []string   `json:"affected_monitor_ids"`
+}
+
+// subscriberJSON is Subscriber. The target is masked even here: a page's
+// subscriber list is an export of somebody else's customers.
+type subscriberJSON struct {
+	ID          string     `json:"id"`
+	Channel     string     `json:"channel"`
+	Target      string     `json:"target"`
+	Confirmed   bool       `json:"confirmed"`
+	ConfirmedAt *time.Time `json:"confirmed_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type subscribeRequest struct {
+	Channel *string `json:"channel"`
+	Target  *string `json:"target"`
+}
+
+type pageAuthRequest struct {
+	Password *string `json:"password"`
+}
+
+// webhookJSON is Webhook. Headers are absent rather than redacted: they are
+// stored encrypted and the spec marks them write-only, so the read shape has
+// nowhere to put them.
+type webhookJSON struct {
+	ID                  string     `json:"id"`
+	Name                string     `json:"name"`
+	URL                 string     `json:"url"`
+	Events              []string   `json:"events"`
+	Enabled             bool       `json:"enabled"`
+	VerifyTLS           bool       `json:"verify_tls"`
+	SecretPrefix        string     `json:"secret_prefix,omitempty"`
+	LastDeliveryAt      *time.Time `json:"last_delivery_at"`
+	LastDeliveryOutcome *string    `json:"last_delivery_outcome"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	DisabledAt          *time.Time `json:"disabled_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+
+	// Secret appears exactly once, in the creation response. It is encrypted at
+	// rest and never returned again, which is why this is the only opportunity
+	// to copy it.
+	Secret string `json:"secret,omitempty"`
+}
+
+type webhookWrite struct {
+	Name      *string           `json:"name"`
+	URL       *string           `json:"url"`
+	Events    *[]string         `json:"events"`
+	Enabled   *bool             `json:"enabled"`
+	Headers   map[string]string `json:"headers"`
+	VerifyTLS *bool             `json:"verify_tls"`
+}
+
+func toWebhookJSON(h model.Webhook) webhookJSON {
+	out := webhookJSON{
+		ID:                  h.ID.String(),
+		Name:                h.Name,
+		URL:                 h.URL,
+		Events:              h.Events,
+		Enabled:             h.Enabled,
+		VerifyTLS:           h.VerifyTLS,
+		SecretPrefix:        h.SecretPrefix,
+		LastDeliveryAt:      h.LastDeliveryAt,
+		ConsecutiveFailures: h.ConsecutiveFailures,
+		DisabledAt:          h.DisabledAt,
+		CreatedAt:           h.CreatedAt,
+		UpdatedAt:           h.UpdatedAt,
+	}
+	if out.Events == nil {
+		out.Events = []string{}
+	}
+	if h.LastDeliveryOutcome != "" {
+		outcome := h.LastDeliveryOutcome
+		out.LastDeliveryOutcome = &outcome
+	}
+	return out
+}
+
+// webhookDeliveryJSON is WebhookDelivery.
+type webhookDeliveryJSON struct {
+	ID             string     `json:"id"`
+	Event          string     `json:"event"`
+	Outcome        string     `json:"outcome"`
+	Attempt        int        `json:"attempt"`
+	RequestBody    *string    `json:"request_body"`
+	ResponseStatus *int       `json:"response_status"`
+	ResponseBody   *string    `json:"response_body"`
+	Error          *string    `json:"error"`
+	DurationMs     *float64   `json:"duration_ms"`
+	CreatedAt      time.Time  `json:"created_at"`
+	NextRetryAt    *time.Time `json:"next_retry_at"`
+}
+
+func toWebhookDeliveryJSON(d model.WebhookDelivery) webhookDeliveryJSON {
+	return webhookDeliveryJSON{
+		ID:             d.ID.String(),
+		Event:          d.EventType,
+		Outcome:        d.Outcome,
+		Attempt:        d.Attempt,
+		RequestBody:    optional(d.RequestBody),
+		ResponseStatus: d.ResponseStatus,
+		ResponseBody:   optional(d.ResponseBody),
+		Error:          optional(d.Error),
+		DurationMs:     d.DurationMs,
+		CreatedAt:      d.CreatedAt,
+		NextRetryAt:    d.NextRetryAt,
+	}
+}
+
+// settingsJSON is Settings. The SMTP password is absent from the read shape
+// entirely rather than redacted, because it is writeOnly in the spec and the
+// struct that carries it out of the database tags it json:"-".
+type settingsJSON struct {
+	General    model.GeneralSettings    `json:"general"`
+	Appearance model.AppearanceSettings `json:"appearance"`
+	Retention  model.RetentionSettings  `json:"retention"`
+	SMTP       smtpSettingsJSON         `json:"smtp"`
+	Monitoring model.MonitoringSettings `json:"monitoring"`
+	Security   model.SecuritySettings   `json:"security"`
+	Telemetry  model.TelemetrySettings  `json:"telemetry"`
+}
+
+// smtpSettingsJSON is the SMTP section as it is read. password_configured is not
+// in the spec's schema and is not sent; the field exists so the marshalled shape
+// is explicit about carrying no secret.
+type smtpSettingsJSON struct {
+	Host        *string `json:"host"`
+	Port        *int    `json:"port"`
+	Username    *string `json:"username"`
+	Encryption  string  `json:"encryption"`
+	FromAddress *string `json:"from_address"`
+	FromName    *string `json:"from_name"`
+}
+
+// settingsWrite is the PATCH body: every section optional, and every section's
+// fields optional within it.
+type settingsWrite struct {
+	General    *model.GeneralSettings    `json:"general"`
+	Appearance *model.AppearanceSettings `json:"appearance"`
+	Retention  *model.RetentionSettings  `json:"retention"`
+	SMTP       *smtpWrite                `json:"smtp"`
+	Monitoring *model.MonitoringSettings `json:"monitoring"`
+	Security   *model.SecuritySettings   `json:"security"`
+	Telemetry  *telemetryWrite           `json:"telemetry"`
+}
+
+type smtpWrite struct {
+	Host        *string         `json:"host"`
+	Port        *int            `json:"port"`
+	Username    *string         `json:"username"`
+	Password    json.RawMessage `json:"password"`
+	Encryption  *string         `json:"encryption"`
+	FromAddress *string         `json:"from_address"`
+	FromName    *string         `json:"from_name"`
+}
+
+// telemetryWrite excludes last_sent_at, which is readOnly: the exporter stamps
+// it, and a client that could set it could claim to have reported when it had
+// not.
+type telemetryWrite struct {
+	Enabled *bool `json:"enabled"`
+}
+
+func toSettingsJSON(set model.Settings) settingsJSON {
+	out := settingsJSON{
+		General:    set.General,
+		Appearance: set.Appearance,
+		Retention:  set.Retention,
+		Monitoring: set.Monitoring,
+		Security:   set.Security,
+		Telemetry:  set.Telemetry,
+		SMTP: smtpSettingsJSON{
+			Host:        optional(set.SMTP.Host),
+			Username:    optional(set.SMTP.Username),
+			Encryption:  set.SMTP.Encryption,
+			FromAddress: optional(set.SMTP.FromAddress),
+			FromName:    optional(set.SMTP.FromName),
+		},
+	}
+	if set.SMTP.Port > 0 {
+		port := set.SMTP.Port
+		out.SMTP.Port = &port
+	}
+	return out
+}
+
+// currentUserUpdate is CurrentUserUpdate. current_password is required for a
+// change of email or password, and it is verified rather than merely present.
+type currentUserUpdate struct {
+	Email           *string `json:"email"`
+	Name            *string `json:"name"`
+	Timezone        *string `json:"timezone"`
+	Locale          *string `json:"locale"`
+	CurrentPassword *string `json:"current_password"`
+	NewPassword     *string `json:"new_password"`
+}
+
+// systemInfoJSON is SystemInfo — the progressive-disclosure feed. A dashboard
+// hides surfaces the instance does not have rather than showing dead controls,
+// and this is where it learns which those are.
+type systemInfoJSON struct {
+	Version                  string          `json:"version"`
+	Commit                   string          `json:"commit,omitempty"`
+	BuiltAt                  *time.Time      `json:"built_at,omitempty"`
+	Mode                     string          `json:"mode"`
+	StorageEngine            string          `json:"storage_engine"`
+	APIVersion               string          `json:"api_version"`
+	MonitorTypes             []string        `json:"monitor_types"`
+	NotificationChannelTypes []string        `json:"notification_channel_types"`
+	Capabilities             map[string]bool `json:"capabilities"`
+}
+
+// overviewJSON is Overview.
+type overviewJSON struct {
+	Monitors                 overviewCounts `json:"monitors"`
+	ActiveIncidents          int            `json:"active_incidents"`
+	ActiveMaintenanceWindows int            `json:"active_maintenance_windows"`
+	CertificatesExpiringSoon int            `json:"certificates_expiring_soon"`
+	DomainsExpiringSoon      int            `json:"domains_expiring_soon"`
+	GeneratedAt              time.Time      `json:"generated_at"`
+}
+
+type overviewCounts struct {
+	Total       int `json:"total"`
+	Up          int `json:"up"`
+	Down        int `json:"down"`
+	Pending     int `json:"pending"`
+	Paused      int `json:"paused"`
+	Maintenance int `json:"maintenance"`
 }

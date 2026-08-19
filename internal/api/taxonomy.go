@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -474,12 +475,17 @@ func (s *Server) resolveTags(ctx context.Context, requested *[]string) ([]model.
 	return ids, nil
 }
 
-// monitorFilter reads the taxonomy filters off a monitor listing.
+// monitorFilter reads every filter a monitor listing accepts.
+//
+// Shared with the membership signal, deliberately: the two have to agree about
+// what a filter means or a client polling for changes would be polling a
+// different set from the one it is showing.
 func (s *Server) monitorFilter(w http.ResponseWriter, r *http.Request) (store.MonitorFilter, bool) {
 	var filter store.MonitorFilter
+	query := r.URL.Query()
 
 	for _, name := range []string{"group_id", "tag_id"} {
-		for _, raw := range r.URL.Query()[name] {
+		for _, raw := range query[name] {
 			id, ok := model.ParseID(raw)
 			if !ok {
 				writeProblem(w, r, s.log, http.StatusBadRequest, "invalid-filter", "Invalid filter",
@@ -493,7 +499,48 @@ func (s *Server) monitorFilter(w http.ResponseWriter, r *http.Request) (store.Mo
 			}
 		}
 	}
+
+	// An unrecognised status or type is a 400 rather than a filter that matches
+	// nothing. Silently returning an empty page for a typo is how somebody
+	// concludes their monitors have been deleted.
+	for _, raw := range query["status"] {
+		if !validMonitorStatus(raw) {
+			writeProblem(w, r, s.log, http.StatusBadRequest, "invalid-filter", "Invalid filter",
+				fmt.Sprintf("status %q is not one of up, down, pending, paused, maintenance", raw))
+			return store.MonitorFilter{}, false
+		}
+		filter.Statuses = append(filter.Statuses, raw)
+	}
+	for _, raw := range query["type"] {
+		if !knownType(raw) {
+			writeProblem(w, r, s.log, http.StatusBadRequest, "invalid-filter", "Invalid filter",
+				fmt.Sprintf("type %q is not one the spec defines", raw))
+			return store.MonitorFilter{}, false
+		}
+		filter.Types = append(filter.Types, raw)
+	}
+
+	if raw := query.Get("enabled"); raw != "" {
+		enabled, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeProblem(w, r, s.log, http.StatusBadRequest, "invalid-filter", "Invalid filter",
+				fmt.Sprintf("enabled %q must be true or false", raw))
+			return store.MonitorFilter{}, false
+		}
+		filter.Enabled = &enabled
+	}
+	filter.Search = query.Get("search")
+
 	return filter, true
+}
+
+func validMonitorStatus(status string) bool {
+	switch status {
+	case model.MonitorStatusUp, model.MonitorStatusDown, model.MonitorStatusPending,
+		model.MonitorStatusPaused, model.MonitorStatusMaintenance:
+		return true
+	}
+	return false
 }
 
 func (s *Server) cursor(w http.ResponseWriter, r *http.Request) (*store.Cursor, bool) {

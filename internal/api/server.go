@@ -25,6 +25,23 @@ type MonitorStore interface {
 	MonitorByPushToken(ctx context.Context, hash []byte) (model.Monitor, error)
 	ListHeartbeats(ctx context.Context, id model.ID, before *time.Time, limit int, importantOnly bool) ([]model.Heartbeat, bool, error)
 
+	UpdateMonitor(ctx context.Context, m model.Monitor) error
+	SetMonitorEnabled(ctx context.Context, id model.ID, enabled bool, at time.Time) error
+
+	// Membership is ADR-004's reconciliation signal: a version and a count for a
+	// filter, cheap enough to poll every few seconds per open view.
+	Membership(ctx context.Context, filter store.MonitorFilter) (store.Membership, error)
+
+	// The include= embeds. Each takes the whole page's ids, because the
+	// alternative is a query per row on the endpoint the load gate covers.
+	LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.ID]model.Heartbeat, error)
+	UptimeRatios(ctx context.Context, ids []model.ID, window string) (map[model.ID]float64, error)
+
+	StatusCounts(ctx context.Context) (map[string]int, error)
+	GetCertificate(ctx context.Context, id model.ID) (model.Certificate, error)
+	ExpiringSoon(ctx context.Context, before time.Time) (certificates, domains int, err error)
+	DailyUptime(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.DailyUptime, error)
+
 	// History and uptime read the rollup tiers, or raw heartbeats where those
 	// still cover the range. RawCovers is what decides between them.
 	RawCovers(ctx context.Context, id model.ID, from time.Time, tier string) (bool, error)
@@ -54,6 +71,12 @@ type IdentityStore interface {
 	InstanceName(ctx context.Context, orgID model.ID) (string, error)
 	SetInstanceName(ctx context.Context, orgID model.ID, name string) error
 
+	ListUsers(ctx context.Context, orgID model.ID) ([]model.User, error)
+	UpdateUserProfile(ctx context.Context, u model.User) error
+
+	GetSettings(ctx context.Context, orgID model.ID) (model.Settings, error)
+	SaveSettings(ctx context.Context, set model.Settings) error
+
 	CreateAPIKey(ctx context.Context, k model.APIKey) error
 	APIKeyByHash(ctx context.Context, hash []byte) (model.APIKey, error)
 	GetAPIKey(ctx context.Context, id model.ID) (model.APIKey, error)
@@ -71,6 +94,9 @@ type Store interface {
 	ChannelStore
 	MaintenanceStore
 	TaxonomyStore
+	IncidentStore
+	StatusPageStore
+	WebhookStore
 }
 
 // Page sizes. The server caps rather than rejects, per the spec: a client
@@ -92,6 +118,8 @@ type Server struct {
 	keeper   *secrets.Keeper
 	log      *slog.Logger
 	limiter  *loginLimiter
+	checks   *checkLimiter
+	retuner  Retuner
 
 	// vault seals and opens notification-channel secrets, and configs does the
 	// same for the credential half of a monitor's configuration. Both are built
@@ -100,9 +128,33 @@ type Server struct {
 	vault   *notify.Vault
 	configs *secrets.Vault
 
+	// webhooks seals a webhook's signing secret and headers; settingsVault seals
+	// the instance SMTP password; subscribers seals a status page subscriber's
+	// address. Three vaults rather than one because the AAD binds an envelope to
+	// its table and column, which is what makes a blob moved from one row to
+	// another fail to open (data model §12.2).
+	webhooks      *secrets.Vault
+	settingsVault *secrets.Vault
+	subscribers   *secrets.Vault
+
+	// outbound is the webhook delivery engine. Nil in a build or a test that is
+	// not running one, which the redeliver endpoint reports rather than panics
+	// on.
+	outbound Redeliverer
+
 	// instanceName is the issuer shown in an authenticator app.
 	instanceName string
-	orgID        model.ID
+
+	// defaults are the monitoring defaults a newly created monitor inherits,
+	// cached from settings so the create path does not read them per request.
+	defaults model.MonitoringSettings
+
+	// baseURL is the public URL of this install, from settings. Empty means
+	// "derive it from the request", which is right whenever the creator and the
+	// caller reach the install the same way and visibly wrong rather than
+	// silently wrong when they do not.
+	baseURL string
+	orgID   model.ID
 }
 
 // Notifier is the control plane's assignment publisher. The API calls it after
@@ -116,20 +168,43 @@ func New(s Store, publisher Notifier, sweeps Notifier, push PushIngest, alerts A
 		instanceName = "Uptime Cairn"
 	}
 	return &Server{
-		store:        s,
-		notify:       publisher,
-		sweeps:       sweeps,
-		push:         push,
-		alerts:       alerts,
-		registry:     registry,
-		keeper:       keeper,
-		vault:        notify.NewVault(keeper),
-		configs:      secrets.NewVault(keeper, "monitors", "config"),
-		log:          log,
-		limiter:      newLoginLimiter(),
-		instanceName: instanceName,
-		orgID:        model.SentinelOrgID,
+		store:         s,
+		notify:        publisher,
+		sweeps:        sweeps,
+		push:          push,
+		alerts:        alerts,
+		registry:      registry,
+		keeper:        keeper,
+		vault:         notify.NewVault(keeper),
+		configs:       secrets.NewVault(keeper, "monitors", "config"),
+		webhooks:      secrets.NewVault(keeper, "webhooks", "secret_encrypted"),
+		settingsVault: secrets.NewVault(keeper, "settings", "smtp"),
+		subscribers:   secrets.NewVault(keeper, "subscribers", "target"),
+		log:           log,
+		limiter:       newLoginLimiter(),
+		checks:        newCheckLimiter(),
+		instanceName:  instanceName,
+		orgID:         model.SentinelOrgID,
 	}
+}
+
+// WithOutbound attaches the webhook delivery engine.
+//
+// A setter rather than another positional argument to New, which already takes
+// nine: past a certain count a constructor's arguments stop being read and start
+// being counted, and the two things below are optional in a way the other nine
+// are not — a test exercising the monitor list has no reason to build a
+// dispatcher.
+func (s *Server) WithOutbound(d Redeliverer) *Server {
+	s.outbound = d
+	return s
+}
+
+// WithRetuner attaches the rollup runner, so a retention change through
+// /settings takes effect on the next sweep rather than on the next restart.
+func (s *Server) WithRetuner(r Retuner) *Server {
+	s.retuner = r
+	return s
 }
 
 // Handler builds the routing table. Scopes come from each operation's
@@ -142,17 +217,30 @@ func (s *Server) Handler() http.Handler {
 	// stops working at the worst moment.
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.health)
+	mux.HandleFunc("GET /metrics", s.metricsAuth(s.getPrometheusMetrics))
 
 	// Unauthenticated by design, and each one says why in its handler: setup is
 	// available only until an administrator exists, and login is how a caller
 	// obtains a credential in the first place.
 	public := http.NewServeMux()
+	// Both spellings: /setup/status is the path the frozen spec names, and the
+	// bare /setup answered the same question in earlier builds. Keeping the old
+	// one costs a line and avoids breaking anything already written against it.
+	public.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
 	public.HandleFunc("GET /api/v1/setup", s.setupStatus)
 	public.HandleFunc("POST /api/v1/setup", s.completeSetup)
 	public.HandleFunc("POST /api/v1/auth/login", s.login)
 	// The dead-man's-switch ingest. Unauthenticated by design — see push.go.
 	public.HandleFunc("GET /api/v1/push/{pushToken}", s.pushHeartbeat)
 	public.HandleFunc("POST /api/v1/push/{pushToken}", s.pushHeartbeat)
+
+	// The status page read path. Unauthenticated because a status page whose
+	// audience needs a credential is not a status page.
+	public.HandleFunc("GET /api/v1/public/status-pages/{slug}", s.getPublicStatusPage)
+	public.HandleFunc("POST /api/v1/public/status-pages/{slug}/authenticate", s.authenticatePublicStatusPage)
+	public.HandleFunc("POST /api/v1/public/status-pages/{slug}/subscribers", s.subscribeToStatusPage)
+	public.HandleFunc("POST /api/v1/public/subscriptions/{token}", s.confirmSubscription)
+	public.HandleFunc("DELETE /api/v1/public/subscriptions/{token}", s.unsubscribe)
 
 	authed := http.NewServeMux()
 	authed.HandleFunc("POST /api/v1/auth/logout", s.logout)
@@ -171,6 +259,16 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("POST /api/v1/monitors", s.require(auth.ScopeMonitorsWrite, s.createMonitor))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsRead, s.getMonitor))
 	authed.HandleFunc("DELETE /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsWrite, s.deleteMonitor))
+	authed.HandleFunc("PATCH /api/v1/monitors/{monitorId}", s.require(auth.ScopeMonitorsWrite, s.updateMonitor))
+	// Registered before the wildcard for readability only — Go's mux resolves by
+	// specificity, so /membership and /bulk cannot be swallowed by /{monitorId}
+	// whatever the order here.
+	authed.HandleFunc("GET /api/v1/monitors/membership", s.require(auth.ScopeMonitorsRead, s.getMonitorMembership))
+	authed.HandleFunc("POST /api/v1/monitors/bulk", s.require(auth.ScopeMonitorsWrite, s.bulkUpdateMonitors))
+	authed.HandleFunc("POST /api/v1/monitors/{monitorId}/pause", s.require(auth.ScopeMonitorsWrite, s.pauseMonitor))
+	authed.HandleFunc("POST /api/v1/monitors/{monitorId}/resume", s.require(auth.ScopeMonitorsWrite, s.resumeMonitor))
+	authed.HandleFunc("POST /api/v1/monitors/{monitorId}/check", s.require(auth.ScopeMonitorsWrite, s.runMonitorCheck))
+	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/certificate", s.require(auth.ScopeMonitorsRead, s.getMonitorCertificate))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/heartbeats", s.require(auth.ScopeHeartbeatsRead, s.listHeartbeats))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/history", s.require(auth.ScopeHeartbeatsRead, s.getMonitorHistory))
 	authed.HandleFunc("GET /api/v1/monitors/{monitorId}/uptime", s.require(auth.ScopeHeartbeatsRead, s.getMonitorUptime))
@@ -205,6 +303,45 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("PATCH /api/v1/tags/{tagId}", s.require(auth.ScopeTagsWrite, s.updateTag))
 	authed.HandleFunc("DELETE /api/v1/tags/{tagId}", s.require(auth.ScopeTagsWrite, s.deleteTag))
 
+	authed.HandleFunc("GET /api/v1/system/info", s.getSystemInfo)
+	authed.HandleFunc("GET /api/v1/overview", s.require(auth.ScopeMonitorsRead, s.getOverview))
+
+	authed.HandleFunc("GET /api/v1/users", s.require(auth.ScopeUsersRead, s.listUsers))
+	authed.HandleFunc("GET /api/v1/users/me", s.getCurrentUser)
+	authed.HandleFunc("PATCH /api/v1/users/me", s.updateCurrentUser)
+	authed.HandleFunc("GET /api/v1/users/{userId}", s.require(auth.ScopeUsersRead, s.getUser))
+
+	authed.HandleFunc("GET /api/v1/settings", s.require(auth.ScopeSettingsRead, s.getSettings))
+	authed.HandleFunc("PATCH /api/v1/settings", s.require(auth.ScopeSettingsWrite, s.updateSettings))
+
+	authed.HandleFunc("GET /api/v1/incidents", s.require(auth.ScopeIncidentsRead, s.listIncidents))
+	authed.HandleFunc("POST /api/v1/incidents", s.require(auth.ScopeIncidentsWrite, s.createIncident))
+	authed.HandleFunc("GET /api/v1/incidents/{incidentId}", s.require(auth.ScopeIncidentsRead, s.getIncident))
+	authed.HandleFunc("PATCH /api/v1/incidents/{incidentId}", s.require(auth.ScopeIncidentsWrite, s.updateIncident))
+	authed.HandleFunc("DELETE /api/v1/incidents/{incidentId}", s.require(auth.ScopeIncidentsWrite, s.deleteIncident))
+	authed.HandleFunc("GET /api/v1/incidents/{incidentId}/updates", s.require(auth.ScopeIncidentsRead, s.listIncidentUpdates))
+	authed.HandleFunc("POST /api/v1/incidents/{incidentId}/updates", s.require(auth.ScopeIncidentsWrite, s.createIncidentUpdate))
+
+	authed.HandleFunc("GET /api/v1/status-pages", s.require(auth.ScopeStatusPagesRead, s.listStatusPages))
+	authed.HandleFunc("POST /api/v1/status-pages", s.require(auth.ScopeStatusPagesWrite, s.createStatusPage))
+	authed.HandleFunc("GET /api/v1/status-pages/{statusPageId}", s.require(auth.ScopeStatusPagesRead, s.getStatusPage))
+	authed.HandleFunc("PATCH /api/v1/status-pages/{statusPageId}", s.require(auth.ScopeStatusPagesWrite, s.updateStatusPage))
+	authed.HandleFunc("DELETE /api/v1/status-pages/{statusPageId}", s.require(auth.ScopeStatusPagesWrite, s.deleteStatusPage))
+	authed.HandleFunc("GET /api/v1/status-pages/{statusPageId}/subscribers", s.require(auth.ScopeStatusPagesRead, s.listStatusPageSubscribers))
+	authed.HandleFunc("DELETE /api/v1/status-pages/{statusPageId}/subscribers/{subscriberId}", s.require(auth.ScopeStatusPagesWrite, s.deleteStatusPageSubscriber))
+
+	authed.HandleFunc("GET /api/v1/webhooks", s.require(auth.ScopeWebhooksRead, s.listWebhooks))
+	authed.HandleFunc("POST /api/v1/webhooks", s.require(auth.ScopeWebhooksWrite, s.createWebhook))
+	authed.HandleFunc("GET /api/v1/webhooks/{webhookId}", s.require(auth.ScopeWebhooksRead, s.getWebhook))
+	authed.HandleFunc("PATCH /api/v1/webhooks/{webhookId}", s.require(auth.ScopeWebhooksWrite, s.updateWebhook))
+	authed.HandleFunc("DELETE /api/v1/webhooks/{webhookId}", s.require(auth.ScopeWebhooksWrite, s.deleteWebhook))
+	authed.HandleFunc("GET /api/v1/webhooks/{webhookId}/deliveries", s.require(auth.ScopeWebhooksRead, s.listWebhookDeliveries))
+	authed.HandleFunc("POST /api/v1/webhooks/{webhookId}/deliveries/{deliveryId}/redeliver", s.require(auth.ScopeWebhooksWrite, s.redeliverWebhook))
+
+	// The Kuma import endpoints stay unimplemented, and deliberately so: the
+	// endpoint without the importer behind it would accept a file and report
+	// success for an import that never happened. The importer is its own
+	// deliverable (docs/plans/PHASE-1-TODO.md, "Kuma migration").
 	authed.HandleFunc("/api/v1/", s.notImplemented)
 
 	// One dispatcher: public routes first, everything else behind

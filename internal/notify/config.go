@@ -379,16 +379,20 @@ func validateCombinations(channelType string, config map[string]any) []Problem {
 
 	switch channelType {
 	case "email":
-		// use_instance_smtp defaults to true, and instance SMTP settings do not
-		// exist in this build. Saying so at save time beats a channel that looks
-		// configured and delivers nothing.
+		// use_instance_smtp defaults to true, and a channel that asks for the
+		// instance relay when none is configured is refused at save time rather
+		// than accepted and silently undeliverable. The failure mode this avoids
+		// is a channel that looks configured and delivers nothing, discovered
+		// during the outage it was supposed to report.
 		useInstance := true
 		if v, ok := config["use_instance_smtp"].(bool); ok {
 			useInstance = v
 		}
 		if useInstance {
-			problems = append(problems, Problem{Pointer: "/config/use_instance_smtp", Code: "unsupported",
-				Message: "instance-wide SMTP settings are not implemented in this build; set use_instance_smtp to false and give this channel its own smtp_host, smtp_port and from_address"})
+			if !InstanceSMTPConfigured() {
+				problems = append(problems, Problem{Pointer: "/config/use_instance_smtp", Code: "unconfigured",
+					Message: "this instance has no SMTP relay configured; set one under /api/v1/settings, or set use_instance_smtp to false and give this channel its own smtp_host, smtp_port and from_address"})
+			}
 			break
 		}
 		if _, ok := config["smtp_host"].(string); !ok {

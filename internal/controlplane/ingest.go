@@ -20,8 +20,17 @@ import (
 // needs knowledge of a check other than the one it just ran
 // (ADR-005 decision 1).
 func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev1.ResultAck, error) {
+	ack, _, err := s.ingestResults(ctx, results)
+	return ack, err
+}
+
+// ingestResults is ingest with the heartbeats it wrote handed back, which the
+// check-now endpoint needs: it has to answer with the result of the check it
+// just ran, and the heartbeat is not a thing the caller can look up afterwards
+// without racing the next scheduled check.
+func (s *Server) ingestResults(ctx context.Context, results []*probev1.Result) (*probev1.ResultAck, []model.Heartbeat, error) {
 	if len(results) == 0 {
-		return &probev1.ResultAck{}, nil
+		return &probev1.ResultAck{}, nil, nil
 	}
 
 	// Results are sent in time order, but a batch that was resent after a
@@ -63,7 +72,7 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 				rejected++
 				continue
 			} else if err != nil {
-				return nil, fmt.Errorf("load monitor %s: %w", id, err)
+				return nil, nil, fmt.Errorf("load monitor %s: %w", id, err)
 			}
 			monitors[id] = loaded
 			monitor = loaded
@@ -73,7 +82,7 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 		if !ok {
 			loaded, err := s.store.GetState(ctx, id)
 			if err != nil {
-				return nil, fmt.Errorf("load state %s: %w", id, err)
+				return nil, nil, fmt.Errorf("load state %s: %w", id, err)
 			}
 			state = &loaded
 			states[id] = state
@@ -81,7 +90,7 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 
 		beat, raised, err := apply(monitor, state, r, s.probeID, s.suppression(ctx, monitor, state, states))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		beats = append(beats, beat)
 		if raised.fire {
@@ -93,11 +102,11 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 	}
 
 	if err := s.store.WriteBatch(ctx, beats); err != nil {
-		return nil, fmt.Errorf("write heartbeats: %w", err)
+		return nil, nil, fmt.Errorf("write heartbeats: %w", err)
 	}
 	for _, state := range states {
 		if err := s.store.SaveState(ctx, *state); err != nil {
-			return nil, fmt.Errorf("save state %s: %w", state.MonitorID, err)
+			return nil, nil, fmt.Errorf("save state %s: %w", state.MonitorID, err)
 		}
 	}
 
@@ -115,7 +124,7 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 		AcknowledgedThroughResultId: last,
 		Accepted:                    uint32(len(beats)),
 		Rejected:                    rejected,
-	}, nil
+	}, beats, nil
 }
 
 // alert is what one result should tell the world, decided by the same pass that

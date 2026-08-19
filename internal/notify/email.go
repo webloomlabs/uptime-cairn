@@ -11,6 +11,7 @@ import (
 	"net/smtp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,10 +22,11 @@ import (
 // attachments, and the hard part of SMTP is not composing that — it is the
 // connection modes, which net/smtp already handles.
 //
-// One deliberate omission: instance-wide SMTP settings. The spec's
-// use_instance_smtp defaults to true and this build has no settings endpoint to
-// hold them, so a channel that asks for them is refused at save time with the
-// alternative spelled out, rather than accepted and silently undeliverable.
+// Instance-wide SMTP is supported: a channel with use_instance_smtp true
+// inherits the relay configured under /api/v1/settings, and one that names its
+// own host keeps it. A channel asking for the instance relay when none is
+// configured is refused at save time with the alternative spelled out, rather
+// than accepted and silently undeliverable.
 
 // smtpTimeout bounds the whole conversation. A mail server that accepts the
 // connection and then stalls is a common failure, and without this the delivery
@@ -174,4 +176,98 @@ func composeMail(c conf, ev Event, to, cc []string) string {
 	headers.WriteString(encoded + "\r\n")
 
 	return headers.String()
+}
+
+// Instance-wide SMTP.
+//
+// Held in the package rather than threaded through every call because the two
+// places that need it are far apart: config validation, which is a package
+// function called from the API's write path, and delivery, which happens on a
+// worker several layers down. Passing it through both would mean a parameter on
+// Validate and a field on Sender for one channel type out of thirteen.
+//
+// The password is the plaintext, held only in memory. It arrives from the
+// settings endpoint, which opened the sealed envelope, and is never written back
+// anywhere from here.
+var instanceSMTP struct {
+	mu       sync.RWMutex
+	settings InstanceSMTP
+}
+
+// InstanceSMTP is the relay an email channel uses when use_instance_smtp is true.
+type InstanceSMTP struct {
+	Host        string
+	Port        int
+	Username    string
+	Password    string
+	Encryption  string
+	FromAddress string
+	FromName    string
+}
+
+// Configured reports whether the relay is usable. Host and sender both, because
+// a relay with no sender address fails on its first message.
+func (s InstanceSMTP) Configured() bool { return s.Host != "" && s.FromAddress != "" }
+
+// SetInstanceSMTP installs the instance relay. Called at startup from the stored
+// settings and again whenever they change, so an operator who configures mail
+// does not have to restart before the next alert uses it.
+func SetInstanceSMTP(settings InstanceSMTP) {
+	instanceSMTP.mu.Lock()
+	defer instanceSMTP.mu.Unlock()
+	instanceSMTP.settings = settings
+}
+
+// InstanceSMTPConfigured reports whether a relay is available, which is what
+// decides whether an email channel asking for one is accepted.
+func InstanceSMTPConfigured() bool {
+	instanceSMTP.mu.RLock()
+	defer instanceSMTP.mu.RUnlock()
+	return instanceSMTP.settings.Configured()
+}
+
+// withInstanceSMTP overlays the instance relay onto a channel's config.
+//
+// The channel's own values win where it set them, so a channel that names a
+// from_address keeps it while inheriting the host and credentials. That is the
+// useful case: one relay, several senders.
+func withInstanceSMTP(config map[string]any) map[string]any {
+	useInstance := true
+	if v, ok := config["use_instance_smtp"].(bool); ok {
+		useInstance = v
+	}
+	if !useInstance {
+		return config
+	}
+
+	instanceSMTP.mu.RLock()
+	settings := instanceSMTP.settings
+	instanceSMTP.mu.RUnlock()
+
+	if !settings.Configured() {
+		return config
+	}
+
+	merged := make(map[string]any, len(config)+7)
+	for key, value := range config {
+		merged[key] = value
+	}
+	for key, value := range map[string]any{
+		"smtp_host":       settings.Host,
+		"smtp_port":       settings.Port,
+		"smtp_username":   settings.Username,
+		"smtp_password":   settings.Password,
+		"smtp_encryption": settings.Encryption,
+		"from_address":    settings.FromAddress,
+		"from_name":       settings.FromName,
+	} {
+		if value == "" || value == 0 {
+			continue
+		}
+		if existing, set := merged[key]; set && existing != "" && existing != nil {
+			continue
+		}
+		merged[key] = value
+	}
+	return merged
 }

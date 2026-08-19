@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 )
 
@@ -206,8 +207,13 @@ func Bucket(t time.Time, interval time.Duration) time.Time {
 // refresh the uptime cache, advance any pending purge, and hand freed pages back
 // to the filesystem.
 type Runner struct {
-	store     Store
-	log       *slog.Logger
+	store Store
+	log   *slog.Logger
+
+	// mu guards retention alone. It is read on every pass and written from the
+	// settings endpoint, which is a different goroutine — and a torn read of a
+	// six-field struct would enforce a retention policy nobody configured.
+	mu        sync.RWMutex
 	retention Retention
 
 	// warnedNoVacuum keeps the "this database cannot reclaim space" warning to
@@ -221,6 +227,26 @@ type Runner struct {
 // NewRunner returns a runner over one store.
 func NewRunner(store Store, retention Retention, log *slog.Logger) *Runner {
 	return &Runner{store: store, retention: retention, log: log}
+}
+
+// SetRetention replaces the policy for subsequent passes.
+//
+// Live rather than read once at startup, because retention is the setting most
+// likely to be got wrong on the first try — an operator who has just watched a
+// Raspberry Pi fill its disk should not have to restart the process to fix it.
+func (r *Runner) SetRetention(policy Retention) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retention = policy
+}
+
+// Retention returns the policy in force. Every pass reads it once and works from
+// that copy, so a change mid-pass takes effect on the next one rather than
+// halfway through a delete loop.
+func (r *Runner) Retention() Retention {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.retention
 }
 
 // Batch sizes. Bounded because SQLite has one writer: an unbounded DELETE over a
@@ -343,7 +369,11 @@ func (r *Runner) window(ctx context.Context, tier Tier, now time.Time) (from, to
 func (r *Runner) Retain(ctx context.Context, now time.Time) error {
 	var freed int64
 
-	if days := r.retention.RawDays; days > 0 {
+	// Read once, so a pass enforces one coherent policy rather than picking up a
+	// change halfway down the tiers and deleting to two different horizons.
+	retention := r.Retention()
+
+	if days := retention.RawDays; days > 0 {
 		n, err := r.deleteAll(ctx, "heartbeats", func(ctx context.Context, cutoff time.Time) (int64, error) {
 			return r.store.DeleteHeartbeatsBefore(ctx, cutoff, deleteBatch)
 		}, now.AddDate(0, 0, -days))
@@ -354,7 +384,7 @@ func (r *Runner) Retain(ctx context.Context, now time.Time) error {
 	}
 
 	for _, tier := range Tiers {
-		days := r.retention.forTier(tier)
+		days := retention.forTier(tier)
 		if days == 0 {
 			// Indefinite. The 1d tier is the long history the reporting engine
 			// sells, so this is the normal case for it.
@@ -373,8 +403,8 @@ func (r *Runner) Retain(ctx context.Context, now time.Time) error {
 		table string
 		days  int
 	}{
-		{"webhook_deliveries", r.retention.WebhookDeliveryDays},
-		{"notification_deliveries", r.retention.NotificationDeliveryDays},
+		{"webhook_deliveries", retention.WebhookDeliveryDays},
+		{"notification_deliveries", retention.NotificationDeliveryDays},
 		// audit_log is deliberately absent. Deleting an audit log defeats its
 		// purpose (§9.1), so retention never touches it.
 	}

@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -124,6 +125,7 @@ func (s *Store) ListMonitors(ctx context.Context, after *Cursor, limit int, filt
 			args = append(args, id[:])
 		}
 	}
+	query, args = narrow(query, args, filter)
 
 	if after != nil {
 		// Keyset, not OFFSET: (updated_at, id) strictly before the cursor. OFFSET
@@ -493,4 +495,342 @@ func (s *Store) LoadMonitor(ctx context.Context, id model.ID) (model.Monitor, er
 		return model.Monitor{}, err
 	}
 	return m.Monitor, nil
+}
+
+// narrow applies the three scalar filters and the search, shared by the listing
+// and by the membership signal so the two can never disagree about what a filter
+// means — which they would the first time one of them gained a clause.
+func narrow(query string, args []any, filter MonitorFilter) (string, []any) {
+	if len(filter.Statuses) > 0 {
+		query += ` AND s.status IN (` + placeholders(len(filter.Statuses)) + `)`
+		for _, v := range filter.Statuses {
+			args = append(args, v)
+		}
+	}
+	if len(filter.Types) > 0 {
+		query += ` AND m.type IN (` + placeholders(len(filter.Types)) + `)`
+		for _, v := range filter.Types {
+			args = append(args, v)
+		}
+	}
+	if filter.Enabled != nil {
+		query += ` AND m.enabled = ?`
+		args = append(args, boolToInt(*filter.Enabled))
+	}
+	if filter.Search != "" {
+		// Name or target. LIKE with an escaped pattern rather than FTS: at 5,000
+		// monitors this is a scan of a small table, and an FTS index is a second
+		// thing to keep in step with every write for a query nobody runs in a
+		// loop.
+		query += ` AND (m.name LIKE ? ESCAPE '\' OR m.target LIKE ? ESCAPE '\')`
+		pattern := "%" + escapeLike(filter.Search) + "%"
+		args = append(args, pattern, pattern)
+	}
+	return query, args
+}
+
+// Membership answers "has this filtered view changed?" without returning the
+// view. One index-only pass over monitors joined to their state.
+//
+// The version is the sum of state_version across the matching set, which moves
+// whenever any member's state is written — and, because a monitor entering or
+// leaving carries its own version with it, whenever membership changes too. It
+// is deliberately opaque: a client tests it for inequality and nothing else, so
+// summing is as good as any hash and costs no extra read.
+//
+// updated_at is folded in as well, so that a configuration edit which never
+// touches monitor_state still moves the signal. Without it, renaming a monitor
+// would leave every open list view showing the old name until something failed.
+func (s *Store) Membership(ctx context.Context, filter MonitorFilter) (store.Membership, error) {
+	query := `
+		SELECT COUNT(*), COALESCE(SUM(s.state_version), 0), COALESCE(MAX(m.updated_at), 0)
+		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
+		WHERE m.org_id = ?`
+	args := []any{model.SentinelOrgID[:]}
+
+	if len(filter.GroupIDs) > 0 {
+		list := placeholders(len(filter.GroupIDs))
+		query += ` AND (m.group_id IN (` + list + `)
+		            OR m.group_id IN (SELECT c.id FROM groups c WHERE c.parent_group_id IN (` + list + `)))`
+		for range 2 {
+			for _, id := range filter.GroupIDs {
+				args = append(args, id[:])
+			}
+		}
+	}
+	if len(filter.TagIDs) > 0 {
+		query += ` AND EXISTS (SELECT 1 FROM monitor_tags mt
+		            WHERE mt.monitor_id = m.id AND mt.tag_id IN (` + placeholders(len(filter.TagIDs)) + `))`
+		for _, id := range filter.TagIDs {
+			args = append(args, id[:])
+		}
+	}
+	query, args = narrow(query, args, filter)
+
+	var out store.Membership
+	var versions, updated int64
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&out.Count, &versions, &updated); err != nil {
+		return store.Membership{}, fmt.Errorf("monitor membership: %w", err)
+	}
+	out.Version = versions + updated
+	return out, nil
+}
+
+// UpdateMonitor rewrites the mutable half of a monitor. type is not among the
+// columns: changing what a monitor checks would make its history a record of two
+// different things, so the spec makes it immutable and this statement is where
+// that is true rather than merely stated.
+func (s *Store) UpdateMonitor(ctx context.Context, m model.Monitor) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE monitors
+		SET name = ?, description = ?, config = ?, config_secrets = ?, target = ?,
+		    enabled = ?, interval_seconds = ?, timeout_seconds = ?, retries = ?,
+		    retry_interval_seconds = ?, resend_after = ?, upside_down = ?,
+		    notify_on_recovery = ?, group_id = ?, parent_monitor_id = ?, updated_at = ?
+		WHERE id = ?`,
+		m.Name, nullString(m.Description), string(m.Config), nullBytes(m.ConfigSecrets),
+		nullString(m.Target), boolToInt(m.Enabled), int64(m.Interval.Seconds()),
+		int64(m.Timeout.Seconds()), m.Retries, nullSeconds(m.RetryInterval),
+		m.ResendAfter, boolToInt(m.UpsideDown), boolToInt(m.NotifyOnRecovery),
+		nullID(m.GroupID), nullID(m.ParentMonitorID), millis(m.UpdatedAt), m.ID[:])
+	if err != nil {
+		return fmt.Errorf("update monitor: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+
+	// The membership signal moves on a configuration edit too, not only on a
+	// check result. Without this a rename would leave every open list view
+	// showing the old name until the monitor next failed — and two edits inside
+	// one millisecond would be indistinguishable, which is precisely when a
+	// change signal has to work.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE monitor_state SET state_version = state_version + 1 WHERE monitor_id = ?`, m.ID[:]); err != nil {
+		return fmt.Errorf("bump state version: %w", err)
+	}
+	return tx.Commit()
+}
+
+// SetMonitorEnabled pauses or resumes, in one transaction with the state change
+// that has to accompany it.
+//
+// Pausing writes status 'paused' and clears next_check_at, so the scheduler
+// stops picking the monitor up. Resuming writes 'pending' rather than the status
+// the monitor had before: it has not been checked since, and reporting a stale
+// verdict as current is how a monitor that broke while paused stays green.
+//
+// A monitor under maintenance keeps that status, for the same reason SaveState
+// defends it — the sweep owns the value, and a resume must not drag a monitor
+// out of a window the operator declared.
+func (s *Store) SetMonitorEnabled(ctx context.Context, id model.ID, enabled bool, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx,
+		`UPDATE monitors SET enabled = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(enabled), millis(at), id[:])
+	if err != nil {
+		return fmt.Errorf("set monitor enabled: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+
+	status := model.MonitorStatusPending
+	if !enabled {
+		status = model.MonitorStatusPaused
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE monitor_state
+		SET status = CASE WHEN suppressed_by = 'maintenance' THEN 'maintenance' ELSE ? END,
+		    next_check_at = NULL,
+		    consecutive_failures = 0,
+		    last_status_change_at = ?,
+		    state_version = state_version + 1
+		WHERE monitor_id = ?`, status, millis(at), id[:]); err != nil {
+		return fmt.Errorf("set monitor state: %w", err)
+	}
+	return tx.Commit()
+}
+
+// LastHeartbeats returns the most recent heartbeat per monitor, for the list
+// view's include=last_heartbeat.
+//
+// One query with a correlated MAX(time) rather than a query per row: the whole
+// point of the include parameter is that the dashboard's list view asks for it
+// on every page, and a fan-out of 25 range scans is what the 5,000-monitor gate
+// exists to catch.
+func (s *Store) LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.ID]model.Heartbeat, error) {
+	if len(ids) == 0 {
+		return map[model.ID]model.Heartbeat{}, nil
+	}
+
+	args := make([]any, 0, len(ids)*2)
+	for _, id := range ids {
+		args = append(args, id[:])
+	}
+	for _, id := range ids {
+		args = append(args, id[:])
+	}
+
+	list := placeholders(len(ids))
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.time, h.monitor_id, h.org_id, h.probe_id, h.status, h.response_time_ms,
+		       h.code, h.message, h.attempt, h.important, h.suppressed, h.suppression_reason
+		FROM heartbeats h
+		JOIN (SELECT monitor_id, MAX(time) AS time FROM heartbeats
+		      WHERE monitor_id IN (`+list+`) GROUP BY monitor_id) latest
+		  ON latest.monitor_id = h.monitor_id AND latest.time = h.time
+		WHERE h.monitor_id IN (`+list+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("last heartbeats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[model.ID]model.Heartbeat, len(ids))
+	for rows.Next() {
+		beat, err := scanHeartbeat(rows)
+		if err != nil {
+			return nil, err
+		}
+		// Several probes may have reported at the same microsecond. Whichever
+		// arrives first wins; they describe the same instant, so the choice
+		// cannot be wrong in a way anybody can see.
+		if _, seen := out[beat.MonitorID]; !seen {
+			out[beat.MonitorID] = beat
+		}
+	}
+	return out, rows.Err()
+}
+
+// UptimeRatios reads the precomputed uptime cache for a window.
+//
+// The cache is a performance structure and never a source of truth: a monitor
+// missing from it has not been computed yet, which the caller renders as null
+// rather than as zero. Zero would be a claim of total downtime, made by a table
+// that simply had not run.
+func (s *Store) UptimeRatios(ctx context.Context, ids []model.ID, window string) (map[model.ID]float64, error) {
+	if len(ids) == 0 {
+		return map[model.ID]float64{}, nil
+	}
+
+	args := []any{window}
+	for _, id := range ids {
+		args = append(args, id[:])
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT monitor_id, uptime_ratio FROM monitor_uptime_cache
+		WHERE window = ? AND uptime_ratio IS NOT NULL AND monitor_id IN (`+placeholders(len(ids))+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("uptime cache: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[model.ID]float64, len(ids))
+	for rows.Next() {
+		var (
+			id    []byte
+			ratio float64
+		)
+		if err := rows.Scan(&id, &ratio); err != nil {
+			return nil, err
+		}
+		var key model.ID
+		copy(key[:], id)
+		out[key] = ratio
+	}
+	return out, rows.Err()
+}
+
+// StatusCounts is the overview's monitor tally, one grouped scan of the state
+// index rather than six counting queries.
+func (s *Store) StatusCounts(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT status, COUNT(*) FROM monitor_state WHERE org_id = ? GROUP BY status`,
+		model.SentinelOrgID[:])
+	if err != nil {
+		return nil, fmt.Errorf("status counts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]int, 5)
+	for rows.Next() {
+		var (
+			status string
+			count  int
+		)
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		out[status] = count
+	}
+	return out, rows.Err()
+}
+
+// GetCertificate returns the certificate last observed on a monitor.
+func (s *Store) GetCertificate(ctx context.Context, id model.ID) (model.Certificate, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT monitor_id, org_id, subject, issuer, serial_number, valid_from, valid_to,
+		       fingerprint_sha256, sans, chain_valid, chain_error, observed_at
+		FROM monitor_certificates WHERE monitor_id = ?`, id[:])
+
+	var (
+		out                           model.Certificate
+		monitorID, orgID, fingerprint []byte
+		subject, issuer, serial, sans sql.NullString
+		chainError                    sql.NullString
+		validFrom, chainValid         sql.NullInt64
+		validTo, observedAt           int64
+	)
+	if err := row.Scan(&monitorID, &orgID, &subject, &issuer, &serial, &validFrom,
+		&validTo, &fingerprint, &sans, &chainValid, &chainError, &observedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Certificate{}, ErrNotFound
+		}
+		return model.Certificate{}, err
+	}
+
+	copy(out.MonitorID[:], monitorID)
+	copy(out.OrgID[:], orgID)
+	out.Subject = subject.String
+	out.Issuer = issuer.String
+	out.SerialNumber = serial.String
+	out.ValidFrom = nullableTime(validFrom)
+	out.ValidTo = fromMillis(validTo)
+	out.FingerprintSHA256 = append([]byte(nil), fingerprint...)
+	if sans.Valid && sans.String != "" {
+		if err := json.Unmarshal([]byte(sans.String), &out.SANs); err != nil {
+			return model.Certificate{}, fmt.Errorf("certificate sans: %w", err)
+		}
+	}
+	if chainValid.Valid {
+		valid := chainValid.Int64 == 1
+		out.ChainValid = &valid
+	}
+	out.ChainError = chainError.String
+	out.ObservedAt = fromMillis(observedAt)
+	return out, nil
+}
+
+// ExpiringSoon counts certificates and domain registrations falling due inside
+// the horizon, for the overview.
+func (s *Store) ExpiringSoon(ctx context.Context, before time.Time) (certificates, domains int, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT (SELECT COUNT(*) FROM monitor_certificates WHERE org_id = ?1 AND valid_to < ?2),
+		       (SELECT COUNT(*) FROM monitor_domain_expiry WHERE org_id = ?1 AND expires_at < ?2)`,
+		model.SentinelOrgID[:], millis(before))
+	if err := row.Scan(&certificates, &domains); err != nil {
+		return 0, 0, fmt.Errorf("expiring soon: %w", err)
+	}
+	return certificates, domains, nil
 }

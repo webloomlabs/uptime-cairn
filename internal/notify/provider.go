@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
 // The delivery half: thirteen providers behind one function.
@@ -122,6 +124,12 @@ func (s *Sender) Send(ctx context.Context, channelType string, config map[string
 	send, ok := senders[channelType]
 	if !ok {
 		return Receipt{}, fmt.Errorf("no provider for channel type %q", channelType)
+	}
+	if channelType == model.ChannelEmail {
+		// The instance relay is overlaid here rather than at save time, so a
+		// channel picks up a settings change on its next delivery instead of
+		// carrying a stale copy of a host that has since moved.
+		config = withInstanceSMTP(config)
 	}
 	return send(ctx, s, conf(config), ev)
 }

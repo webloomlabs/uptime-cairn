@@ -49,6 +49,28 @@ const (
 	EventReportGenerated            = "report.generated"
 )
 
+// AllEventTypes is the vocabulary, in the spec's order. Declared once so a
+// validator and a published catalogue cannot drift apart — the way they do the
+// moment a new event type is added to one list and not the other.
+var AllEventTypes = []string{
+	EventMonitorUp, EventMonitorDown, EventMonitorPending,
+	EventMonitorCreated, EventMonitorUpdated, EventMonitorDeleted,
+	EventMonitorPaused, EventMonitorResumed,
+	EventMonitorCertificateExpiring, EventMonitorDomainExpiring,
+	EventIncidentOpened, EventIncidentUpdated, EventIncidentResolved,
+	EventMaintenanceStarted, EventMaintenanceEnded, EventReportGenerated,
+}
+
+// ValidEventType reports whether the spec defines this event type.
+func ValidEventType(eventType string) bool {
+	for _, known := range AllEventTypes {
+		if known == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 // Delivery outcomes, matching notification_deliveries.outcome.
 //
 // suppressed is a first-class outcome rather than an absence of a row, because

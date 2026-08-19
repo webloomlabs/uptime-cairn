@@ -473,4 +473,10 @@ type MaintenanceStore interface {
 	DeleteMaintenanceWindow(ctx context.Context, id model.ID) error
 	StatusPageIDsForWindows(ctx context.Context, windowIDs []model.ID) (map[model.ID][]model.ID, error)
 	MissingIDs(ctx context.Context, table string, orgID model.ID, ids []model.ID) ([]model.ID, error)
+
+	// DueMaintenanceWindows is the overview's "how many windows are open right
+	// now"; WindowsForStatusPage is what a visitor sees under "scheduled
+	// maintenance".
+	DueMaintenanceWindows(ctx context.Context, now time.Time) ([]model.MaintenanceWindow, error)
+	WindowsForStatusPage(ctx context.Context, pageID model.ID) ([]model.MaintenanceWindow, error)
 }

@@ -30,6 +30,11 @@ type Event struct {
 	// PreviousStatus is what the monitor was before this event moved it. Empty
 	// when the event is not a transition.
 	PreviousStatus string
+
+	// Incident is the subject of an incident.* event, and nil for every other
+	// kind. The envelope's `data` object is shaped by the event type, which is
+	// what the spec's EventEnvelope says and what a receiver branches on.
+	Incident *Incident
 }
 
 // Instance identifies the sending install, so an operator running three of them
@@ -129,3 +134,36 @@ func (e Event) Resolves() bool { return e.Type == model.EventMonitorUp }
 // provider that models incidents can resolve the same one it opened. Keyed by
 // monitor rather than by event, which is the whole point.
 func (e Event) DedupKey() string { return "cairn-monitor-" + e.Monitor.ID.String() }
+
+// Incident is the subject of an incident.* event, flattened for the same reason
+// Monitor is: a delivery retried ninety seconds later must describe the incident
+// as it was when the event happened, not as it is when the retry lands.
+type Incident struct {
+	ID         model.ID
+	Title      string
+	State      string
+	Impact     string
+	StartedAt  time.Time
+	ResolvedAt *time.Time
+
+	// MonitorIDs are the monitors the incident names, rendered as strings
+	// because a template variable is text and a receiver reading the envelope
+	// wants the same form the REST API gave it.
+	MonitorIDs []string
+}
+
+// NewIncidentEvent builds an incident lifecycle event.
+//
+// The monitor half of the envelope stays empty rather than being filled with the
+// first affected monitor. An incident is not about one monitor — that is the
+// whole reason it is a separate record — and picking one would make a template
+// like "{{monitor.name}} is down" render something arbitrary.
+func NewIncidentEvent(eventType string, inst Instance, in Incident, at time.Time) Event {
+	return Event{
+		ID:         model.NewID(),
+		Type:       eventType,
+		OccurredAt: at.UTC(),
+		Instance:   inst,
+		Incident:   &in,
+	}
+}

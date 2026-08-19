@@ -35,6 +35,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/maintenance"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
+	"github.com/webloomlabs/uptime-cairn/internal/outbound"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
@@ -120,8 +121,22 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 			"the twelve native channel types are unaffected")
 	}
 
+	// Outbound webhooks ride the same event stream. A separate dispatcher rather
+	// than a thirteenth channel type, because a webhook is aimed at a program and
+	// a channel is aimed at a person: one posts the envelope verbatim and signs
+	// it, the other renders a sentence and picks a colour.
+	webhooks := outbound.New(store, secrets.NewVault(keeper, "webhooks", "secret_encrypted"),
+		notify.Instance{Name: cfg.InstanceName, BaseURL: cfg.BaseURL, Version: version.Version},
+		log.With("component", "outbound"))
+	webhooks.Start(ctx)
+
+	// One publisher in front of both, so a caller raising an event does not have
+	// to know how many destinations there are — and so adding a third is a line
+	// here rather than a change at every call site.
+	events := &fanout{notify: alerts, outbound: webhooks}
+
 	publisher := controlplane.NewPublisher()
-	cp := controlplane.New(store, publisher, alerts, configVault, log.With("component", "controlplane"),
+	cp := controlplane.New(store, publisher, events, configVault, log.With("component", "controlplane"),
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
 	// Maintenance windows. The sweep is the only writer of the maintenance
@@ -187,9 +202,23 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		}
 	}()
 
+	apiServer := api.New(store, publisher, sweeps, cp, events, registry, keeper,
+		log.With("component", "api"), cfg.InstanceName).
+		WithOutbound(webhooks).
+		WithRetuner(rollups)
+
+	// Stored settings are applied before the listener opens, so an install
+	// configured yesterday behaves today the way it was configured rather than
+	// the way the compiled-in defaults say. Fatal on error: starting with a
+	// retention policy or a mail relay the operator did not choose is worse than
+	// not starting at all.
+	if err := apiServer.LoadSettings(ctx); err != nil {
+		return fmt.Errorf("load instance settings: %w", err)
+	}
+
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(store, publisher, sweeps, cp, alerts, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
+		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -465,3 +494,30 @@ func sweepSessions(ctx context.Context, store *sqlite.Store, log *slog.Logger) {
 		}
 	}
 }
+
+// fanout publishes one event to every destination that wants it.
+//
+// It exists because two things consume the event stream for different reasons —
+// notification channels, which render for a person, and outbound webhooks, which
+// deliver for a program — and neither the control plane nor the API should have
+// to know that there are two. Both halves are fire-and-forget, so this adds a
+// function call and no waiting.
+type fanout struct {
+	notify   *notify.Dispatcher
+	outbound *outbound.Dispatcher
+}
+
+func (f *fanout) Publish(ev notify.Event) {
+	f.notify.Publish(ev)
+	f.outbound.Publish(ev)
+}
+
+func (f *fanout) Instance() notify.Instance { return f.notify.Instance() }
+
+func (f *fanout) Test(ctx context.Context, channel model.NotificationChannel, eventType string) (notify.Receipt, error) {
+	return f.notify.Test(ctx, channel, eventType)
+}
+
+func (f *fanout) SampleEvent(eventType string) notify.Event { return f.notify.SampleEvent(eventType) }
+
+func (f *fanout) AppriseAvailable() bool { return f.notify.AppriseAvailable() }

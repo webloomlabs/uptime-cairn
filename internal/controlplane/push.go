@@ -134,3 +134,52 @@ func describeSince(last *time.Time, created time.Time) string {
 	}
 	return last.UTC().Format(time.RFC3339) + ", " + time.Since(*last).Round(time.Second).String() + " ago"
 }
+
+// RecordCheck ingests a check the API ran itself, and returns the heartbeat it
+// produced.
+//
+// The API runs the checker because the control plane must not import
+// probe/check — that is the ADR-001 seam, and breaking it here would tie a
+// control plane serving remote probes to the checker binaries it does not run.
+// What comes back through this door is an observation, in the same vocabulary a
+// probe would have used, and from here on a manual check is indistinguishable
+// from a scheduled one: same transition table, same consecutive-failure count,
+// same alerts. A "check now" that took a shortcut would be testing the shortcut.
+func (s *Server) RecordCheck(ctx context.Context, monitor model.Monitor, status model.Status, code, message string, responseTime *time.Duration) (model.Heartbeat, error) {
+	result := s.newResult(monitor, outcomeFor(status), message, time.Now().UTC())
+	result.Code = code
+	if responseTime != nil {
+		result.ResponseTimeMs = float64(responseTime.Microseconds()) / 1000.0
+	}
+
+	_, beats, err := s.ingestResults(ctx, []*probev1.Result{result})
+	if err != nil {
+		return model.Heartbeat{}, err
+	}
+	if len(beats) == 0 {
+		// The only way to get here is a result ingest rejected — a monitor
+		// deleted between the read and the check. Reported rather than returned
+		// as a zero heartbeat, which would render as a down verdict nobody made.
+		return model.Heartbeat{}, fmt.Errorf("check for monitor %s was not recorded", monitor.ID)
+	}
+	return beats[0], nil
+}
+
+// outcomeFor maps the stored status vocabulary onto the protocol's.
+//
+// The two enums genuinely differ — proto3 must start at zero with UNSPECIFIED,
+// and the stored values are the schema's and cannot be renumbered — so the
+// mapping is spelled out rather than cast. Casting one to the other silently
+// inverts up and down (docs/probe/protocol.md §6.2).
+func outcomeFor(status model.Status) probev1.Outcome {
+	switch status {
+	case model.StatusUp:
+		return probev1.Outcome_OUTCOME_UP
+	case model.StatusDown:
+		return probev1.Outcome_OUTCOME_DOWN
+	case model.StatusSkipped:
+		return probev1.Outcome_OUTCOME_SKIPPED
+	default:
+		return probev1.Outcome_OUTCOME_UNKNOWN
+	}
+}

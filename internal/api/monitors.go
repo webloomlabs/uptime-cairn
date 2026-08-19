@@ -26,6 +26,10 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	want, ok := s.parseIncludes(w, r, false)
+	if !ok {
+		return
+	}
 
 	monitors, hasMore, err := s.store.ListMonitors(r.Context(), after, s.limit(r), filter)
 	if err != nil {
@@ -57,6 +61,10 @@ func (s *Server) listMonitors(w http.ResponseWriter, r *http.Request) {
 		}
 		body.Data = append(body.Data,
 			withTags(withChannels(rendered, assignments[m.Monitor.ID]), tags[m.Monitor.ID]))
+	}
+	if err := s.embed(r.Context(), body.Data, monitors, want); err != nil {
+		s.internal(w, r, "embed monitor detail", err)
+		return
 	}
 	if hasMore && len(monitors) > 0 {
 		last := monitors[len(monitors)-1]
@@ -156,11 +164,15 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/api/v1/monitors/"+monitor.ID.String())
 	writeJSON(w, s.log, http.StatusCreated,
-		withPushToken(withTags(withChannels(rendered, channelIDs), tagIDs), pushToken, pushURL(r, pushToken)))
+		withPushToken(withTags(withChannels(rendered, channelIDs), tagIDs), pushToken, s.pushURL(r, pushToken)))
 }
 
 func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.monitorID(w, r)
+	if !ok {
+		return
+	}
+	want, ok := s.parseIncludes(w, r, true)
 	if !ok {
 		return
 	}
@@ -190,7 +202,12 @@ func (s *Server) getMonitor(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, "render monitor", err)
 		return
 	}
-	writeJSON(w, s.log, http.StatusOK, withTags(withChannels(rendered, channelIDs), tagIDs))
+	body := []monitorJSON{withTags(withChannels(rendered, channelIDs), tagIDs)}
+	if err := s.embed(r.Context(), body, []store.MonitorWithState{m}, want); err != nil {
+		s.internal(w, r, "embed monitor detail", err)
+		return
+	}
+	writeJSON(w, s.log, http.StatusOK, body[0])
 }
 
 func (s *Server) deleteMonitor(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +289,20 @@ func (s *Server) buildMonitor(body monitorWrite) (model.Monitor, []ValidationIte
 		NotifyOnRecovery: true,
 		CreatedAt:        now,
 		UpdatedAt:        now,
+	}
+
+	// The instance defaults, where they are configured. An operator who set
+	// "every monitor checks every 30 seconds" under settings and then created a
+	// monitor that checked every 60 would reasonably conclude the setting does
+	// nothing.
+	if v := s.defaults.DefaultIntervalSeconds; v != nil {
+		m.Interval = time.Duration(*v) * time.Second
+	}
+	if v := s.defaults.DefaultTimeoutSeconds; v != nil {
+		m.Timeout = time.Duration(*v) * time.Second
+	}
+	if v := s.defaults.DefaultRetries; v != nil {
+		m.Retries = *v
 	}
 
 	switch {

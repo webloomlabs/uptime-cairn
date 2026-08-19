@@ -1028,6 +1028,357 @@ Its URLs are written to a mode-0600 file rather than passed as arguments, becaus
 an Apprise URL embeds its own credentials and an argument vector is readable
 through `ps`.
 
+## Editing a monitor
+
+`PATCH` is a partial update. Omitted fields are left alone, an explicit `null`
+clears a nullable one, and `type` is not a field at all — changing what a monitor
+checks would make its history a record of two different things.
+
+```sh
+curl -sX PATCH localhost:3000/api/v1/monitors/$MONITOR \
+  -b jar -H "X-Cairn-CSRF-Token: $CSRF" -H 'content-type: application/json' \
+  -d '{"interval_seconds": 120}'
+```
+
+`config` merges shallowly against what is stored. The interesting case is the
+one a form produces: read the monitor, change one field, submit the whole object
+back. The read never showed you the password —
+
+```json
+"auth": {"type": "basic", "username": "cairn", "password": "__redacted__"}
+```
+
+— so a naive write path would either store the literal string `__redacted__` as
+the password or drop the credential entirely. Both fail hours later as a `401`
+attributed to the target. Instead the marker is resolved back to the stored
+value before the merge, verified live: after patching only the username, the
+probe's next check sent
+
+```
+Authorization: Basic Y2Fpcm4tMjpzM2NyZXQtbGl2ZQ==   → cairn-2:s3cret-live
+```
+
+and `strings cairn.db | grep s3cret-live` still finds nothing.
+
+Reparenting is the first endpoint that can genuinely close a dependency loop — a
+newly created monitor is nobody's ancestor, an existing one can be moved under
+its own descendant — so the cycle walk that has always been in `resolveParent`
+finally earns its keep:
+
+```
+422 | cycle | that parent would make the dependency chain a loop
+```
+
+## Pause, resume, and check now
+
+```sh
+curl -sX POST localhost:3000/api/v1/monitors/$MONITOR/pause  -b jar -H "X-Cairn-CSRF-Token: $CSRF"
+curl -sX POST localhost:3000/api/v1/monitors/$MONITOR/resume -b jar -H "X-Cairn-CSRF-Token: $CSRF"
+```
+
+Pausing writes `status: paused` and clears `next_check_at`. Resuming writes
+`pending` rather than restoring whatever the monitor was before: it has not been
+checked since, and reporting a stale verdict as current is how a monitor that
+broke while paused stays green.
+
+`POST .../check` runs one check outside the schedule and returns the heartbeat.
+The check itself runs in the API process, because the control plane must not
+import `probe/check` — that is the ADR-001 seam. The *result* goes back through
+the control plane's ingest, so a manual check counts, transitions, and alerts
+exactly like a scheduled one. A "test" that took a different path would be
+testing the test.
+
+It is rate-limited per monitor, not per caller, because the thing being protected
+is somebody else's server:
+
+```
+429 | This monitor was checked manually within the last 10s.
+      The target is somebody's server; try again in 10s.
+```
+
+A push monitor is refused: it is a deadline, not a check, and running one would
+write a heartbeat the target did not send.
+
+## Filtering, membership, and includes
+
+`status`, `type`, `enabled`, and `search` join `tag_id` and `group_id`. Repeated
+values OR within a parameter and AND across them. `search` matches the name *or*
+the target, because the question that brings somebody to the search box is
+usually "what else points at this host?" and the answer lives in a field they
+never named.
+
+An unrecognised value is a `400`, not an empty page — silently returning nothing
+for a typo is how somebody concludes their monitors have been deleted.
+
+`GET /api/v1/monitors/membership` takes the same filters and returns a version
+and a count. It is ADR-004's reconciliation half: live updates only reach the
+monitors a client has on screen, so a monitor that changes status *off* screen
+and would now match an active filter has no subscription telling the server
+anyone cares. Both numbers are needed — a monitor leaving a `status=down` view as
+another enters keeps the count identical while the view is now wrong. Live, the
+listing and the signal agree across every filter:
+
+```
+  (none)                         list=2 membership=2
+  ?status=paused                 list=1 membership=1
+  ?enabled=true                  list=1 membership=1
+  ?search=Checkout               list=1 membership=1
+```
+
+The version moves on a configuration edit too, not only on a check result:
+renaming a monitor bumps `state_version`, so an open list view learns about the
+new name instead of showing the old one until something fails.
+
+`include=last_heartbeat,uptime,tags,group` embeds related data, one query per
+embed for the whole page rather than one per row. It is opt-in because it costs
+per-row work: the dashboard's list view wants it and an export does not. Without
+`include=`, the response is byte-for-byte what it was before the embeds existed.
+
+`uptime` reads the precomputed cache and reports `null` for a monitor it has not
+computed yet — zero would be a claim of total downtime made by a table that
+simply had not run.
+
+## Bulk operations
+
+Up to a thousand monitors, one operation, per-identifier outcomes:
+
+```sh
+curl -sX POST localhost:3000/api/v1/monitors/bulk \
+  -b jar -H "X-Cairn-CSRF-Token: $CSRF" -H 'content-type: application/json' \
+  -d '{"monitor_ids": ["...", "...", "..."], "operation": "disable"}'
+```
+
+```json
+{"succeeded": ["...", "..."], "failed": [{"id": "...", "code": "not_found", ...}]}
+```
+
+Partial success is the contract, not a fallback. One monitor deleted five minutes
+ago must not fail the other nine hundred and ninety-nine — an endpoint that
+refuses the batch is useless at exactly the size it exists for. `add_tags` is
+idempotent, so a caller retrying a partial batch does not accumulate duplicates.
+
+## Incidents
+
+An incident is the human narrative laid over the machine's observations. A
+monitor going down is a fact; an incident is what somebody decided that fact
+meant, and it is the thing customers read.
+
+```sh
+curl -sX POST localhost:3000/api/v1/incidents \
+  -b jar -H "X-Cairn-CSRF-Token: $CSRF" -H 'content-type: application/json' \
+  -d '{"title":"Checkout is failing","impact":"major",
+       "monitor_ids":["'"$MONITOR"'"],
+       "body":"Investigating elevated errors."}'
+```
+
+**State changes do not go through `PATCH`.** Advancing an incident is done by
+posting a timeline entry that carries the new state, so every state change
+arrives with the sentence explaining it:
+
+```sh
+curl -sX POST localhost:3000/api/v1/incidents/$INCIDENT/updates \
+  -b jar -H "X-Cairn-CSRF-Token: $CSRF" -H 'content-type: application/json' \
+  -d '{"state":"resolved","body":"Rollback complete."}'
+```
+
+An incident whose history reads `investigating → identified → resolved` with no
+words attached answers no question anybody will actually ask afterwards, and a
+`PATCH` that could set `state` would make that the path of least resistance. Live:
+
+```
+   state resolved | resolved_at 2026-08-19T11:41:42.289Z
+   MTTR  77 s | MTTA None
+     investigating Investigating elevated errors.
+     identified    A bad deploy. Rolling back.
+     resolved      Rollback complete.
+```
+
+The three MTT\* figures are derived from the timestamps at read time and are
+deliberately not stored: a stored metric drifts from the timeline it was computed
+from, and the timeline is the thing anyone will argue about. MTTA is `null`
+because acknowledgement is Phase 3, rather than zero, which would be a claim.
+
+Resolving stamps `resolved_at`; reopening clears it, so the column always agrees
+with the state rather than recording the first time somebody thought it was over.
+
+## Status pages
+
+```sh
+curl -sX POST localhost:3000/api/v1/status-pages \
+  -b jar -H "X-Cairn-CSRF-Token: $CSRF" -H 'content-type: application/json' \
+  -d '{"slug":"acme","title":"Acme Status","published":true,
+       "sections":[{"name":"Core","monitor_ids":["'"$MONITOR"'"]}]}'
+```
+
+Then, with **no credential at all**:
+
+```sh
+curl -s localhost:3000/api/v1/public/status-pages/acme
+```
+
+The public view is assembled from its own store query rather than filtered down
+from the monitor read path. That costs a second query and buys the property that
+matters: a field cannot leak through a shape that has no place to put it. This is
+the one endpoint in the system where a leak reaches people who are not customers
+of the operator. Live, a visitor sees
+
+```
+     overall_status  : major_outage
+      Checkout API v2  down | keys: [description, id, name, response_time_ms, status, uptime_percentage]
+     leaks config?   : no — no url, no target, no credential
+```
+
+Other decisions worth knowing:
+
+- **An unpublished page is `404`, not `403`.** An operator building a page before
+  launch should not have its existence confirmed by the error code.
+- **A real outage during a maintenance window is still an outage.** `maintenance`
+  only wins the overall status when nothing is actually down; reporting a genuine
+  outage as scheduled work is the sort of thing that ends up on a screenshot.
+- **A day with no data renders as a gap, never as downtime.** The uptime bar
+  carries `null` for those days. It is the single most common way a status page
+  lies.
+- **`custom_css` is refused rather than sanitised** when it contains markup or a
+  `javascript:` URL. Stripping tags is whack-a-mole against an attacker who only
+  has to win once, on a page served to the operator's customers.
+- **A slug collision is `409`**, naming what is taken. A hostname in
+  `custom_domain` is unique across every organisation, because a request arrives
+  with nothing but a `Host` header to route on.
+
+Subscriptions are double opt-in and the address is encrypted at rest, because a
+notification replays it:
+
+```
+   first request : pending_confirmation
+   repeat request: pending_confirmation   ← the identical answer
+   stored        : al…@example.com | confirmed False
+   plaintext in the database? no
+```
+
+The repeat gets the same answer as the first because telling a stranger that an
+address is already subscribed turns the endpoint into a membership oracle. The
+operator's own subscriber list is masked too: it is an export of somebody else's
+customers, and the reason to open it is "did my subscriber confirm", which a mask
+answers.
+
+## Outbound webhooks
+
+A notification channel is aimed at a person — it renders a sentence and picks a
+colour. A webhook is aimed at a program, so it posts the event envelope verbatim,
+signs it, and logs every attempt.
+
+```sh
+curl -sX POST localhost:3000/api/v1/webhooks \
+  -b jar -H "X-Cairn-CSRF-Token: $CSRF" -H 'content-type: application/json' \
+  -d '{"name":"Ops bus","url":"https://hooks.example.com/cairn",
+       "events":["monitor.down","monitor.up","incident.opened"]}'
+```
+
+The response carries `secret` exactly once. It is **encrypted** at rest rather
+than hashed, because every delivery recomputes an HMAC with it — the distinction
+in data model §12.1, and the one that only bites at the first delivery if it is
+got wrong. Every later read carries `secret_prefix` and nothing else.
+
+Verify a delivery by recomputing over the raw body you read:
+
+```python
+want = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+hmac.compare_digest(request.headers["X-Cairn-Signature"], want)
+```
+
+Live, against a receiver that checks it:
+
+```
+{"event": "incident.opened", "monitor": null,      "signature_valid": true}
+{"event": "monitor.down",    "monitor": "Checkout", "signature_valid": true}
+```
+
+`X-Cairn-Event-Id` is stable across retries and across a manual redelivery, so a
+receiver that processed a delivery whose response was lost can recognise the
+repeat. Redelivery resends the *exact original body* — the reason to press the
+button is that the receiver was broken and has been fixed, and a payload
+regenerated from current state would describe a world the original event did not.
+
+Configured headers go on the request first and the reserved ones after, so an
+operator can add a header but never replace the signature or the event identity.
+A receiver whose deduplication key can be changed by a typo in a settings field
+has no deduplication.
+
+A subscription that fails ten times in a row disables itself and records when, so
+"why did this stop" has an answer in the row rather than in the logs. Re-enabling
+it clears the counter.
+
+## Settings
+
+`GET`/`PATCH /api/v1/settings`. Every section is optional on update, and a
+section that is present is a statement about that section as a whole; within it,
+an absent field leaves the stored value alone.
+
+Which sections this build actually **consults**, rather than merely stores:
+
+| Section | Effect |
+|---|---|
+| `general.instance_name` | The issuer in an authenticator app and the name on every alert, applied on save |
+| `general.base_url` | What a push URL is built from |
+| `retention` | Handed to the rollup runner on save — the next sweep, not the next restart |
+| `smtp` | What makes an email channel's `use_instance_smtp` mean something |
+| `monitoring` | The defaults a newly created monitor inherits |
+| `appearance`, `security`, `telemetry` | **Stored and not yet consulted** — no dashboard, limits compiled in, no exporter |
+
+That table is the honest list. Settings nothing reads would be a checklist that
+flatters itself.
+
+The `smtp` section closes the gap the alerting work left open. Before it, an
+email channel asking for the instance relay was refused at save time; now:
+
+```
+   before settings: 422 - this instance has no SMTP relay configured; set one under /api/v1/settings…
+   after settings : Ops mail created
+   smtp password in the database? no
+   read back      : smtp keys [encryption, from_address, from_name, host, port, username]
+```
+
+The password is encrypted with the same envelope every other credential uses,
+bound by AAD to its row, and lives inside the section's JSON — which is why
+adding it needed no migration and why the read shape has nowhere to put it.
+
+Retention is refused when it would leave a hole in history:
+
+```
+422 | rollup_1m_days (7) must be at least raw_days (30): a coarser tier kept for
+      less time than a finer one leaves a hole in history
+```
+
+## Prometheus metrics
+
+```sh
+curl -s localhost:3000/metrics
+```
+
+Unauthenticated from loopback, because the overwhelmingly common deployment is a
+Prometheus on the same host and a metrics endpoint that needs a credential is one
+somebody turns off. From anywhere else it needs an API key holding
+`metrics:read`.
+
+Hand-written, no client library. The exposition format is a dozen lines of text;
+the library brings a registry, a collector abstraction, and a dependency tree
+onto a binary whose whole pitch is that it is one static file you drop on a Pi.
+When this needs histograms it will need the library, and that is the moment to
+take the dependency.
+
+```
+cairn_monitor_status{monitor_id="…",monitor="Checkout",type="http"} 0
+cairn_monitor_response_time_seconds{monitor_id="…",monitor="Checkout"} 0.000478
+cairn_monitors{status="down"} 1
+cairn_webhook_events_dropped_total 0
+```
+
+`cairn_monitor_status` keeps the full status vocabulary rather than collapsing to
+zero-or-one. Flattening it would make a Prometheus alert fire during a
+maintenance window the operator declared. A monitor with nothing measured is
+absent from the response-time series rather than reported as zero — zero is a
+measurement of zero, which is a different claim.
+
 ## What the API answers
 
 | | Scope |
@@ -1039,8 +1390,10 @@ through `ps`.
 | `POST/DELETE /api/v1/auth/totp`, `POST .../totp/confirm` | User session only — not API keys |
 | `GET /api/v1/api-keys`, `GET /api/v1/api-keys/{id}` | `api_keys:read` |
 | `POST/PATCH/DELETE /api/v1/api-keys...` | `api_keys:write` |
-| `GET /api/v1/monitors`, `GET /api/v1/monitors/{id}` | `monitors:read` |
-| `POST`, `DELETE` `/api/v1/monitors...` | `monitors:write` |
+| `GET /api/v1/system/info` | Any authenticated caller |
+| `GET /api/v1/overview` | `monitors:read` |
+| `GET /api/v1/monitors`, `GET /api/v1/monitors/{id}`, `.../membership`, `.../{id}/certificate` | `monitors:read` |
+| `POST`, `PATCH`, `DELETE` `/api/v1/monitors...`, `.../{id}/pause`, `.../resume`, `.../check`, `.../bulk` | `monitors:write` |
 | `GET /api/v1/monitors/{id}/heartbeats` | `heartbeats:read` |
 | `GET /api/v1/monitors/{id}/history`, `.../uptime` | `heartbeats:read` |
 | `GET /api/v1/notification-channels`, `.../{id}`, `.../preview`, `.../template-variables` | `notifications:read` |
@@ -1051,8 +1404,20 @@ through `ps`.
 | `POST/PATCH/DELETE /api/v1/groups...` | `groups:write` |
 | `GET /api/v1/tags`, `.../{id}` | `tags:read` |
 | `POST/PATCH/DELETE /api/v1/tags...` | `tags:write` |
+| `GET /api/v1/incidents`, `.../{id}`, `.../{id}/updates` | `incidents:read` |
+| `POST/PATCH/DELETE /api/v1/incidents...`, `.../{id}/updates` | `incidents:write` |
+| `GET /api/v1/status-pages`, `.../{id}`, `.../{id}/subscribers` | `status_pages:read` |
+| `POST/PATCH/DELETE /api/v1/status-pages...` | `status_pages:write` |
+| `GET /api/v1/webhooks`, `.../{id}`, `.../{id}/deliveries` | `webhooks:read` |
+| `POST/PATCH/DELETE /api/v1/webhooks...`, `.../redeliver` | `webhooks:write` |
+| `GET /api/v1/settings` | `settings:read` |
+| `PATCH /api/v1/settings` | `settings:write` |
+| `GET /api/v1/users`, `.../{id}` | `users:read` |
+| `GET/PATCH /api/v1/users/me` | User session only — an API key is not an account |
 | `GET/POST /api/v1/push/{token}` | None — the token is the credential |
-| Anything else under `/api/v1/` | `501`, naming the spec — the endpoint exists in the contract, not in this build |
+| `GET /api/v1/public/status-pages/{slug}` and the rest of `/public/` | None — a status page whose audience needs a credential is not a status page |
+| `GET /metrics` | None from loopback; `metrics:read` from anywhere else |
+| `POST /api/v1/imports/kuma`, `GET /api/v1/imports/{id}` | `501` — the endpoint is in the contract and the importer is a separate deliverable |
 
 Errors are RFC 9457 problem documents, and clients branch on `type`:
 
@@ -1144,14 +1509,21 @@ an aeroplane is a test that gets deleted.
   in solo mode, which is the only mode this build has. In a multi-probe install
   "is this container running" is only answerable by the probe on that host, and
   nothing yet makes the assignment land there.
-- **`/monitors/{id}/certificate`.** The TLS and domain-expiry checkers observe
-  everything it reports and store none of it; migration `0003` created the tables
-  waiting for them.
-- **The rest of the monitor list filters.** `tag_id` and `group_id` work;
-  `status`, `type`, `enabled`, and `search` are specified and not built.
-- **Instance-wide SMTP settings, and everything else under `/settings`.** See the
-  email caveat above.
-- **Status pages, the UI, the importer.** Phase 1 Months 2–4. Migration `0003`
-  creates their tables; nothing has an API or a worker behind them yet.
+- **The observations behind `/monitors/{id}/certificate`.** The endpoint is real
+  and answers `404` for every monitor, which is the honest answer to "what
+  certificate was observed" when none has been. The TLS and HTTP checkers *see*
+  the certificate and report only an expiry verdict; carrying the observation to
+  the control plane means a new field on the probe protocol's result frame, which
+  is a protocol change rather than API work.
+- **The Kuma importer.** `POST /api/v1/imports/kuma` still answers `501`. The
+  endpoint without the importer behind it would accept a file and report success
+  for an import that never happened, which is worse than saying no.
+- **The UI.** Phase 1 Month 3. Every surface it needs now exists, which was the
+  point of finishing the API first.
+- **OpenTelemetry export.** `/metrics` is Prometheus text, hand-written, no new
+  dependency. OTel means the SDK's dependency tree on a binary whose pitch is
+  that it is one static file, and that is a decision worth taking on purpose.
+- **Generated Go and TypeScript clients.** Codegen belongs in CI, and CI is not
+  changed without being asked.
 - **The load-test harness against the real engine.** Its `http` target still
   refuses to run, which is the honest state until someone points it here.

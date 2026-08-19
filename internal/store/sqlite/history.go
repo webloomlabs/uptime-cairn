@@ -279,3 +279,57 @@ func scanUptime(row *sql.Row, start time.Time) (store.HistoryBucket, error) {
 	}
 	return b, nil
 }
+
+// DailyUptime returns one ratio per day per monitor over a range, for a status
+// page's uptime bar.
+//
+// Read from the 1d tier rather than computed from raw: the bar spans up to a
+// year, and the whole point of the rollup pipeline is that a year-long read is
+// 365 rows per monitor rather than several million. Days with no observations
+// are simply absent from the result, and the caller renders them as gaps —
+// filling them with zero would draw a year of downtime for a monitor created
+// last week.
+func (s *Store) DailyUptime(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.DailyUptime, error) {
+	if len(ids) == 0 {
+		return map[model.ID][]store.DailyUptime{}, nil
+	}
+
+	args := []any{millis(from), millis(to)}
+	for _, id := range ids {
+		args = append(args, id[:])
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT monitor_id, bucket_start, up_count, down_count
+		FROM heartbeat_1d
+		WHERE bucket_start >= ? AND bucket_start < ? AND monitor_id IN (`+placeholders(len(ids))+`)
+		ORDER BY bucket_start`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("daily uptime: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[model.ID][]store.DailyUptime, len(ids))
+	for rows.Next() {
+		var (
+			id       []byte
+			bucket   int64
+			up, down int
+		)
+		if err := rows.Scan(&id, &bucket, &up, &down); err != nil {
+			return nil, err
+		}
+		var key model.ID
+		copy(key[:], id)
+
+		day := store.DailyUptime{Date: fromMillis(bucket)}
+		// unknown and skipped are excluded from the denominator here as
+		// everywhere else: a day where the probe could not run is a day with no
+		// observation, not a day of downtime (ADR-005 decision 16).
+		if observed := up + down; observed > 0 {
+			ratio := float64(up) / float64(observed)
+			day.Ratio = &ratio
+		}
+		out[key] = append(out[key], day)
+	}
+	return out, rows.Err()
+}

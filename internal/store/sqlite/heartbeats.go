@@ -100,39 +100,10 @@ func (s *Store) ListHeartbeats(ctx context.Context, monitorID model.ID, before *
 
 	var out []model.Heartbeat
 	for rows.Next() {
-		var (
-			b                     model.Heartbeat
-			timeMicros            int64
-			monitor, org, probe   []byte
-			status                int64
-			responseTime          any
-			code, message         any
-			important, suppressed int64
-			reason                sql.NullInt64
-		)
-		if err := rows.Scan(&timeMicros, &monitor, &org, &probe, &status,
-			&responseTime, &code, &message, &b.Attempt, &important, &suppressed,
-			&reason); err != nil {
+		b, err := scanHeartbeat(rows)
+		if err != nil {
 			return nil, false, err
 		}
-		b.Time = fromMicros(timeMicros)
-		copy(b.MonitorID[:], monitor)
-		copy(b.OrgID[:], org)
-		copy(b.ProbeID[:], probe)
-		b.Status = model.Status(status)
-		if ms, ok := responseTime.(float64); ok {
-			d := time.Duration(ms * float64(time.Millisecond))
-			b.ResponseTime = &d
-		}
-		if s, ok := code.(string); ok {
-			b.Code = s
-		}
-		if s, ok := message.(string); ok {
-			b.Message = s
-		}
-		b.Important = important == 1
-		b.Suppressed = suppressed == 1
-		b.SuppressionReason = int(reason.Int64)
 		out = append(out, b)
 	}
 	if err := rows.Err(); err != nil {
@@ -144,4 +115,45 @@ func (s *Store) ListHeartbeats(ctx context.Context, monitorID model.ID, before *
 		out = out[:limit]
 	}
 	return out, hasMore, nil
+}
+
+// scanHeartbeat reads one row in the column order every heartbeat query above
+// selects. Shared so that a column added to the table is a change in two places
+// rather than in every query that reads it.
+func scanHeartbeat(row scanner) (model.Heartbeat, error) {
+	var (
+		b                     model.Heartbeat
+		timeMicros            int64
+		monitor, org, probe   []byte
+		status                int64
+		responseTime          any
+		code, message         any
+		important, suppressed int64
+		reason                sql.NullInt64
+	)
+	if err := row.Scan(&timeMicros, &monitor, &org, &probe, &status,
+		&responseTime, &code, &message, &b.Attempt, &important, &suppressed,
+		&reason); err != nil {
+		return model.Heartbeat{}, err
+	}
+
+	b.Time = fromMicros(timeMicros)
+	copy(b.MonitorID[:], monitor)
+	copy(b.OrgID[:], org)
+	copy(b.ProbeID[:], probe)
+	b.Status = model.Status(status)
+	if ms, ok := responseTime.(float64); ok {
+		d := time.Duration(ms * float64(time.Millisecond))
+		b.ResponseTime = &d
+	}
+	if s, ok := code.(string); ok {
+		b.Code = s
+	}
+	if s, ok := message.(string); ok {
+		b.Message = s
+	}
+	b.Important = important == 1
+	b.Suppressed = suppressed == 1
+	b.SuppressionReason = int(reason.Int64)
+	return b, nil
 }
