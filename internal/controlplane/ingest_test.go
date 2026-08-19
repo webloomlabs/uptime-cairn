@@ -24,6 +24,13 @@ type fakeStore struct {
 	// writeErr makes the heartbeat write fail, which is how the "nothing is
 	// alerted about a transition that was never stored" rule is exercised.
 	writeErr error
+
+	// graph holds several monitors when a test needs more than one — dependency
+	// suppression is about the relationship between two of them, which a single
+	// monitor cannot express. Nil for every other test, which keeps the simple
+	// ones simple.
+	graph      map[model.ID]model.Monitor
+	graphState map[model.ID]*model.MonitorState
 }
 
 func (f *fakeStore) ListAssignable(context.Context) ([]model.Monitor, error) {
@@ -37,15 +44,33 @@ func (f *fakeStore) ListPushMonitors(context.Context) ([]store.MonitorWithState,
 	return []store.MonitorWithState{{Monitor: f.monitor, State: f.state}}, nil
 }
 
-func (f *fakeStore) LoadMonitor(context.Context, model.ID) (model.Monitor, error) {
+func (f *fakeStore) LoadMonitor(_ context.Context, id model.ID) (model.Monitor, error) {
+	if f.graph != nil {
+		m, ok := f.graph[id]
+		if !ok {
+			return model.Monitor{}, store.ErrNotFound
+		}
+		return m, nil
+	}
 	return f.monitor, nil
 }
 
-func (f *fakeStore) GetState(context.Context, model.ID) (model.MonitorState, error) {
+func (f *fakeStore) GetState(_ context.Context, id model.ID) (model.MonitorState, error) {
+	if f.graph != nil {
+		st, ok := f.graphState[id]
+		if !ok {
+			return model.MonitorState{}, store.ErrNotFound
+		}
+		return *st, nil
+	}
 	return f.state, nil
 }
 
 func (f *fakeStore) SaveState(_ context.Context, s model.MonitorState) error {
+	if f.graph != nil {
+		f.graphState[s.MonitorID] = &s
+		return nil
+	}
 	f.state = s
 	return nil
 }

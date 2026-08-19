@@ -288,7 +288,7 @@ func (s *Store) GetState(ctx context.Context, id model.ID) (model.MonitorState, 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT monitor_id, org_id, status, last_check_at, next_check_at,
 		       last_status_change_at, consecutive_failures, last_response_time_ms,
-		       last_message, state_version
+		       last_message, suppressed_by, state_version
 		FROM monitor_state WHERE monitor_id = ?`, id[:])
 
 	var (
@@ -296,10 +296,11 @@ func (s *Store) GetState(ctx context.Context, id model.ID) (model.MonitorState, 
 		monitorID, orgID                 []byte
 		lastCheck, nextCheck, lastChange sql.NullInt64
 		responseTime                     sql.NullFloat64
-		message                          sql.NullString
+		message, suppressedBy            sql.NullString
 	)
 	if err := row.Scan(&monitorID, &orgID, &st.Status, &lastCheck, &nextCheck,
-		&lastChange, &st.ConsecutiveFailures, &responseTime, &message, &st.StateVersion); err != nil {
+		&lastChange, &st.ConsecutiveFailures, &responseTime, &message,
+		&suppressedBy, &st.StateVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.MonitorState{}, ErrNotFound
 		}
@@ -312,6 +313,7 @@ func (s *Store) GetState(ctx context.Context, id model.ID) (model.MonitorState, 
 	st.LastStatusChangeAt = nullableTime(lastChange)
 	st.LastResponseTimeMs = nullableFloat(responseTime)
 	st.LastMessage = message.String
+	st.SuppressedBy = suppressedBy.String
 	return st, nil
 }
 
@@ -319,15 +321,24 @@ func (s *Store) GetState(ctx context.Context, id model.ID) (model.MonitorState, 
 // membership signal: a browser polls the version to learn its filtered view
 // moved, instead of being sent the view.
 func (s *Store) SaveState(ctx context.Context, st model.MonitorState) error {
+	// The two CASE expressions are what keep the maintenance sweep and the result
+	// path from racing on one column. The sweep owns the value 'maintenance';
+	// ingest owns 'dependency' and null. A sweep that lands between this caller
+	// reading the state and writing it back therefore wins, which is the right
+	// way round: a monitor the operator has declared under maintenance must not
+	// be dragged back out by a check that was already in flight.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE monitor_state
-		SET status = ?, last_check_at = ?, next_check_at = ?, last_status_change_at = ?,
+		SET status = CASE WHEN suppressed_by = 'maintenance' THEN 'maintenance' ELSE ? END,
+		    last_check_at = ?, next_check_at = ?, last_status_change_at = ?,
 		    consecutive_failures = ?, last_response_time_ms = ?, last_message = ?,
+		    suppressed_by = CASE WHEN suppressed_by = 'maintenance' THEN suppressed_by ELSE ? END,
 		    state_version = state_version + 1
 		WHERE monitor_id = ?`,
 		st.Status, nullMillis(st.LastCheckAt), nullMillis(st.NextCheckAt),
 		nullMillis(st.LastStatusChangeAt), st.ConsecutiveFailures,
-		nullFloat(st.LastResponseTimeMs), nullString(st.LastMessage), st.MonitorID[:])
+		nullFloat(st.LastResponseTimeMs), nullString(st.LastMessage),
+		nullString(st.SuppressedBy), st.MonitorID[:])
 	if err != nil {
 		return fmt.Errorf("save monitor_state: %w", err)
 	}

@@ -79,6 +79,7 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 
 	channelIDs, channelProblems := s.resolveChannels(r.Context(), body.NotificationChannelIDs)
 	problems = append(problems, channelProblems...)
+	problems = append(problems, s.resolveParent(r.Context(), &monitor, body.ParentMonitorID)...)
 
 	if len(problems) > 0 {
 		writeProblem(w, r, s.log, http.StatusUnprocessableEntity, "validation-failed",
@@ -429,6 +430,64 @@ func (s *Server) sealMonitor(m *model.Monitor) error {
 		return err
 	}
 	m.Config, m.ConfigSecrets = public, sealed
+	return nil
+}
+
+// maxDependencyDepth is how deep a dependency chain may go.
+//
+// Ten is far past any real topology — router, switch, host, service is four —
+// and the bound exists so that a chain which somehow became a cycle is a
+// validation error here rather than an infinite walk in ingest.
+const maxDependencyDepth = 10
+
+// resolveParent validates parent_monitor_id: it must exist, it must not be the
+// monitor itself, and the chain it joins must be acyclic and shallow.
+//
+// A cycle cannot form through this endpoint today, because a monitor's parent
+// must already exist and the new monitor is not yet anybody's ancestor. The walk
+// is here because that is a property of the endpoint rather than of the data,
+// and the first PATCH that lets a parent change would silently lose it.
+func (s *Server) resolveParent(ctx context.Context, m *model.Monitor, raw *string) []ValidationItem {
+	if raw == nil || *raw == "" {
+		return nil
+	}
+
+	parentID, ok := model.ParseID(*raw)
+	if !ok {
+		return []ValidationItem{{Pointer: "/parent_monitor_id", Code: "invalid",
+			Message: fmt.Sprintf("%q is not a valid identifier", *raw)}}
+	}
+	if parentID == m.ID {
+		return []ValidationItem{{Pointer: "/parent_monitor_id", Code: "cycle",
+			Message: "a monitor cannot depend on itself"}}
+	}
+
+	seen := map[model.ID]bool{m.ID: true}
+	cursor := &parentID
+	for depth := 0; cursor != nil; depth++ {
+		if depth >= maxDependencyDepth {
+			return []ValidationItem{{Pointer: "/parent_monitor_id", Code: "too_deep",
+				Message: fmt.Sprintf("dependency chains are limited to %d levels", maxDependencyDepth)}}
+		}
+		if seen[*cursor] {
+			return []ValidationItem{{Pointer: "/parent_monitor_id", Code: "cycle",
+				Message: "that parent would make the dependency chain a loop"}}
+		}
+		seen[*cursor] = true
+
+		parent, err := s.store.GetMonitor(ctx, *cursor)
+		if errors.Is(err, store.ErrNotFound) {
+			return []ValidationItem{{Pointer: "/parent_monitor_id", Code: "not_found",
+				Message: fmt.Sprintf("no monitor %s exists", cursor)}}
+		} else if err != nil {
+			s.log.Error("resolve dependency parent", "error", err)
+			return []ValidationItem{{Pointer: "/parent_monitor_id", Code: "unavailable",
+				Message: "the parent monitor could not be checked"}}
+		}
+		cursor = parent.Monitor.ParentMonitorID
+	}
+
+	m.ParentMonitorID = &parentID
 	return nil
 }
 

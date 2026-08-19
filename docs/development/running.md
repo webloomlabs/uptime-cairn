@@ -568,6 +568,159 @@ space of its own page — but it applies from that connection onward. A credenti
 that was ever stored in plaintext should be rotated. [Data model §12.7](../data-model/README.md)
 is the list of things encryption at rest does not do, and this belongs on it.
 
+## Maintenance windows
+
+Planned downtime that pages somebody is not planned downtime.
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/maintenance-windows \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{
+    "title": "Sunday patching",
+    "strategy": "recurring_weekly",
+    "timezone": "Australia/Sydney",
+    "starts_at": "2026-08-23T02:00:00+10:00",
+    "duration_minutes": 120,
+    "recurrence": {"weekdays": [0]},
+    "targets": {"monitor_ids": ["<id>"]}
+  }'
+```
+
+Five strategies: `single`, `recurring_daily`, `recurring_weekly`,
+`recurring_monthly`, and `cron` for the schedules the named ones cannot express.
+
+**The timezone is an IANA name, and that is the whole point.** The schedule is
+evaluated in local time, so "02:00 every Sunday" is still 02:00 after a
+daylight-saving transition — an offset could not express that, and a window that
+fires an hour late pages the engineer during the change they scheduled it
+around. The zone database is embedded in the binary rather than read from the
+host, because a `FROM scratch` image has no `/usr/share/zoneinfo` and
+`Australia/Sydney` silently becoming UTC is exactly the failure this avoids.
+
+A day past the end of a short month is **skipped, not clamped**: a monthly window
+on the 31st does not fire in February. "The 31st" meaning the 28th is a guess
+about intent, and a maintenance window is a poor place to guess.
+
+### What it does to a check
+
+A monitor inside an active window still gets checked. Its heartbeat records the
+result — message, code, response time, all of it — but the verdict is recorded
+as `maintenance` rather than as up or down:
+
+```
+07:41:11  maintenance  suppressed=True  reason=maintenance
+          Get "http://10.0.0.1/": dial tcp 10.0.0.1: connect: connection refused
+```
+
+That is what makes `/uptime`'s three-way maintenance choice mean anything. The
+same window, three defensible numbers:
+
+```
+exclude        ratio=0       total=20  down=20  maintenance_seconds=160
+count_as_up    ratio=0.2857  total=20  down=20  maintenance_seconds=160
+count_as_down  ratio=0       total=20  down=20  maintenance_seconds=160
+```
+
+The failure count is frozen for the duration rather than reset — a window says
+nothing about the target either way, so counting resumes where it left off. On
+the way out the monitor returns to `pending` rather than to whatever it was
+before: the last real observation predates the window, and presenting it as
+current would be the dashboard lying about how fresh it is. The next check
+settles it within one interval.
+
+### state is derived, not stored
+
+```json
+{"state": "active", "next_occurrence_at": "2026-08-23T16:00:00Z"}
+```
+
+`state` is computed from the schedule and the clock on every read. Storing it
+would make it wrong between the moment a window starts and the moment something
+notices, which is exactly the interval anybody asks about. `next_occurrence_at`
+*is* stored, for the opposite reason: it is what lets the sweep find due windows
+with an index seek instead of evaluating every cron expression on every tick,
+forever, for windows scheduled months out.
+
+The sweep runs every 15 seconds and is woken immediately by any write, so a
+window created to start now suppresses the check that is about to run rather
+than the one after it.
+
+### suppress_notifications off means annotation, not suppression
+
+A window with `suppress_notifications: false` still has a schedule and still
+appears as scheduled maintenance, but it does not mark heartbeats or silence
+anything. Marking the period as maintenance while still paging would exclude it
+from uptime *and* wake somebody — the worst of both answers.
+
+### What is refused
+
+A schedule that will never fire is a 422, not a saved window:
+
+| Body | Refused because |
+|---|---|
+| no `targets` | a window covering nothing suppresses nothing |
+| `recurring_weekly` with no weekdays | it produces no occurrence, ever |
+| `recurring_daily` with no `duration_minutes` | an occurrence needs a length |
+| `"timezone": "+11:00"` | an offset is not an IANA zone |
+| `"cron": "0 2 * *"` | four fields, not five |
+| `recurrence.until` already past | the recurrence has already stopped |
+
+Every write runs the same evaluator the sweep runs, so a window that parses but
+never occurs is caught on the form rather than discovered by its silence.
+
+## Dependency suppression
+
+Set `parent_monitor_id` on a monitor and it stops paging while the thing it
+depends on is unavailable. The router going down should page once, not forty
+times.
+
+```sh
+curl -sS -X POST localhost:3000/api/v1/monitors \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"name": "API", "type": "http", "config": {"url": "https://api.example.com"},
+       "parent_monitor_id": "<the router>"}'
+```
+
+Live, with the parent down:
+
+```
+parent  07:40:11  down  suppressed=False
+child   07:40:07  down  suppressed=True  reason=dependency
+```
+
+Three things about that child heartbeat are deliberate:
+
+- **It is recorded as `down`, not `maintenance`.** The service really was
+  unavailable, so it counts against the child's uptime. Only the page is
+  withheld.
+- **It is still marked important.** Suppression withholds the alert, not the
+  history — `important_only` and the activity feed still show the change.
+- **The reason is recorded**, so "why was I not told?" is a query rather than an
+  argument.
+
+Suppression is **transitive** — a router, a switch behind it, and the services
+behind that is the shape this exists for — and a parent under **maintenance**
+suppresses its children too. Taking the router down for a firmware upgrade is
+the most known problem there is; the alternative is making the operator target
+every descendant by hand, which is a list that goes stale the first time
+somebody adds a service.
+
+A dangling parent suppresses nothing. Failing open is the right direction here:
+the cost is an alert that should have been silent, and the alternative is
+silence that should have been an alert.
+
+Chains are limited to ten levels and cycles are rejected at write time. A cycle
+cannot form through the create endpoint today — a parent must already exist — so
+the check is there for the first `PATCH` that lets a parent change.
+
+**One bounded gap, stated because it is easier to find here than in the code.**
+When a parent leaves a maintenance window it returns to `pending` for one
+interval, and `pending` is not `down`, so a child that happens to transition
+inside that interval will page. It is at most one interval wide and only occurs
+on the way out of a window; widening suppression to cover `pending` would mean a
+monitor whose parent is merely flapping through its retry budget never alerts at
+all, which is worse.
+
 ## Alerting
 
 A monitoring tool that detects an outage and tells nobody is a logging tool. This
@@ -787,6 +940,8 @@ through `ps`.
 | `GET /api/v1/monitors/{id}/history`, `.../uptime` | `heartbeats:read` |
 | `GET /api/v1/notification-channels`, `.../{id}`, `.../preview`, `.../template-variables` | `notifications:read` |
 | `POST/PATCH/DELETE /api/v1/notification-channels...`, `.../{id}/test` | `notifications:write` |
+| `GET /api/v1/maintenance-windows`, `.../{id}` | `maintenance:read` |
+| `POST/PATCH/DELETE /api/v1/maintenance-windows...` | `maintenance:write` |
 | `GET/POST /api/v1/push/{token}` | None — the token is the credential |
 | Anything else under `/api/v1/` | `501`, naming the spec — the endpoint exists in the contract, not in this build |
 
@@ -828,6 +983,17 @@ nobody and report the target down, which is a lie about the target. The
 re-sealing pass has its own tests, because a migration path nobody runs twice is
 a migration path nobody has tested.
 
+The maintenance tests are mostly about the schedule, because a recurrence rule
+is where being approximately right is worst: a window that fires an hour late
+pages somebody during the change it was scheduled around. They cover the DST
+transition in both directions, the short-month skip, cron's union rule for its
+two day fields, and the four-year lookahead a February 29th expression needs.
+The suppression tests cover the difference between the two kinds — that a window
+records `maintenance` and freezes the failure count, and that a dependency
+records a real `down` and withholds only the page — because collapsing the two
+would either hide a real outage from the SLA figure or count planned downtime
+against it.
+
 The alerting tests cover the two things that fail invisibly. One is the secret
 boundary: that a token is not in the serialised config, does not appear in any
 read response, and survives a form round-tripping its own `GET`. The other is the
@@ -864,10 +1030,9 @@ an aeroplane is a test that gets deleted.
 - **`/monitors/{id}/certificate`.** The TLS and domain-expiry checkers observe
   everything it reports and store none of it; migration `0003` created the tables
   waiting for them.
-- **Maintenance windows and dependency suppression.** Both suppress alerts, both
-  have their tables and their columns — `monitor_state.suppressed_by` is there
-  waiting — and neither exists in ingest. A parent going down currently pages
-  once per child.
+- **Groups and tags.** Tables, no API. Maintenance windows can already resolve
+  targets through both, so a window covering "everything tagged production" is
+  one endpoint away from working; today only monitor targets can be created.
 - **Instance-wide SMTP settings, and everything else under `/settings`.** See the
   email caveat above.
 - **Status pages, the UI, the importer.** Phase 1 Months 2–4. Migration `0003`

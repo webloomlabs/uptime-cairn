@@ -3,7 +3,15 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** Nothing in the database is a credential in the clear. The
+**Status: 2026-08-19.** It pages appropriately. A maintenance window silences
+what it covers and annotates the history so the period can be excluded from an
+SLA figure; a dependency parent silences everything behind it without touching
+those monitors' own uptime. Those are deliberately different operations — one
+says the observation is not about the target, the other says it is real and
+nobody needs waking — and the three-way `maintenance` parameter on `/uptime`
+now returns three different numbers, which is what it was always for.
+
+Nothing in the database is a credential in the clear. The
 last plaintext store — HTTP auth, Docker client keys, gRPC metadata sitting in
 `monitors.config` — is closed, sealed through the same envelope the TOTP secret
 and the notification channels use, and a pre-existing database is migrated on
@@ -33,19 +41,19 @@ by which "90% done" lasts three months.
 
 | Area | Done | Total |
 |---|---|---|
-| Engine & storage | 13 | 15 |
+| Engine & storage | 14 | 15 |
 | Monitor types | 9 | 10 |
-| Core monitoring features | 3 | 8 |
+| Core monitoring features | 5 | 8 |
 | Alerting & webhooks | 10 | 10 |
 | Status pages | 0 | 5 |
-| REST API | 12 | 21 |
+| REST API | 13 | 22 |
 | Kuma migration | 0 | 5 |
 | UI | 0 | 8 |
 | Security | 7 | 8 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 3 | 8 |
-| **Total** | **58** | **115** |
+| **Total** | **62** | **116** |
 
 ---
 
@@ -66,7 +74,7 @@ by which "90% done" lasts three months.
 - [x] Rollup pipeline: raw → 1m → 5m → hourly → daily, each tier from the tier below, buckets epoch-aligned and half-open, watermark derived from the data, every write an idempotent full recount
 - [x] Retention enforcement per tier, with disk actually reclaimed on SQLite — `auto_vacuum=INCREMENTAL` had never actually been applied; the PRAGMA in `0001` is a no-op inside the migration runner's transaction, so it now lives in the connection DSN, and a test asserts the file shrinks
 - [x] Asynchronous purge of a deleted monitor's history, in bounded batches
-- [ ] Dependency-suppression handling in ingest — `resend_after` is done, derived from `consecutive_failures` so no second source of truth exists; parent-down suppression is not
+- [x] `resend_after` and dependency-suppression handling in ingest — both derived rather than stored: the resend from `consecutive_failures`, the suppression from the parent's current state at the moment the result lands, because a parent and its children can fail within the same second and a sweep would be a tick behind
 - [ ] Reader pool alongside the single writer (one connection today)
 
 ## Monitor types
@@ -88,8 +96,8 @@ by which "90% done" lasts three months.
 - [x] Upside-down mode
 - [ ] Groups — tables exist, no API or engine behaviour
 - [ ] Tags — tables exist, no API or engine behaviour
-- [ ] Dependency-aware suppression (parent down suppresses child alerts)
-- [ ] Maintenance windows: scheduled, recurring, attached to monitors/groups/tags
+- [x] Dependency-aware suppression — transitive up the chain, and a parent under maintenance suppresses its children as surely as a parent that is down: taking the router down for a firmware upgrade is the most known problem there is. The child's own heartbeat still records the real outage, so its uptime figure is unaffected; only the page is withheld
+- [x] Maintenance windows: single, daily, weekly, monthly, and cron, evaluated in the window's own IANA zone with the zone database embedded in the binary — "02:00 every Sunday" survives a daylight-saving transition still meaning 02:00. Targets resolve by query through monitors, groups, and tags, so a window covering a tag keeps covering monitors added later. **Groups and tags have tables and no API**, so only monitor targets can be created today; referencing a group or tag is a validation error naming the field rather than a foreign-key failure
 - [ ] Certificate and domain expiry surfaced as upcoming-expiry data
 - [x] Uptime history browsing over arbitrary past ranges via rollups
 
@@ -132,7 +140,8 @@ by which "90% done" lasts three months.
 - [x] First-run setup, login, logout, session description
 - [x] TOTP enrolment, confirmation, and removal
 - [x] Notification channels — CRUD, test-fire, template preview, and the published variable catalogue
-- [ ] Groups, tags, status pages, incidents, maintenance windows, settings — the rest of the specified surface, currently answering `501`
+- [x] Maintenance windows — CRUD, with a schedule that will never fire refused at write time rather than discovered by its silence
+- [ ] Groups, tags, status pages, incidents, settings — the rest of the specified surface, currently answering `501`
 - [ ] Scoped API keys: permissions, expiry, last-used, revocation
 - [ ] Outbound webhooks for every state change
 - [ ] Prometheus `/metrics` and OpenTelemetry export
@@ -206,10 +215,10 @@ by which "90% done" lasts three months.
 
 ## What to do next, and why in this order
 
-1. **Maintenance windows and dependency suppression.** Both suppress alerts, both
-   have their tables, and neither exists in ingest. Now that alerting works, they
-   are the difference between "it pages me" and "it pages me appropriately" —
-   a router going down should page once, not forty times.
+1. **Groups and tags.** They are now the thing blocking two features rather than
+   one: maintenance windows can resolve targets through them and there is no way
+   to create one, and the monitor list still cannot be filtered by either. Both
+   are small tables with an obvious API.
 2. **The load-test harness against the real engine.** The 5,000-monitor claim is
    the project's central promise, and every week it goes unmeasured against real
    code is a week the number is an assumption. It now has a third thing to

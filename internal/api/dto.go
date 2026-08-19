@@ -78,6 +78,8 @@ type monitorWrite struct {
 	UpsideDown           *bool           `json:"upside_down"`
 	NotifyOnRecovery     *bool           `json:"notify_on_recovery"`
 
+	ParentMonitorID *string `json:"parent_monitor_id"`
+
 	// NotificationChannelIDs is a pointer to a slice so the three cases stay
 	// distinguishable: absent means "attach the default channels", an empty
 	// array means "no alerts for this monitor", and a populated one means
@@ -87,16 +89,17 @@ type monitorWrite struct {
 }
 
 type heartbeatJSON struct {
-	MonitorID      string    `json:"monitor_id"`
-	Time           time.Time `json:"time"`
-	Status         string    `json:"status"`
-	ResponseTimeMs *float64  `json:"response_time_ms"`
-	Message        *string   `json:"message"`
-	Code           *string   `json:"code"`
-	Attempt        int       `json:"attempt"`
-	Important      bool      `json:"important"`
-	Suppressed     bool      `json:"suppressed"`
-	ProbeID        *string   `json:"probe_id"`
+	MonitorID         string    `json:"monitor_id"`
+	Time              time.Time `json:"time"`
+	Status            string    `json:"status"`
+	ResponseTimeMs    *float64  `json:"response_time_ms"`
+	Message           *string   `json:"message"`
+	Code              *string   `json:"code"`
+	Attempt           int       `json:"attempt"`
+	Important         bool      `json:"important"`
+	Suppressed        bool      `json:"suppressed"`
+	SuppressionReason *string   `json:"suppression_reason"`
+	ProbeID           *string   `json:"probe_id"`
 }
 
 type pagination struct {
@@ -176,6 +179,9 @@ func toHeartbeatJSON(b model.Heartbeat) heartbeatJSON {
 	}
 	if b.Code != "" {
 		out.Code = &b.Code
+	}
+	if reason := model.SuppressionReasonName(b.SuppressionReason); reason != "" {
+		out.SuppressionReason = &reason
 	}
 	if !b.ProbeID.IsZero() {
 		id := b.ProbeID.String()
@@ -296,6 +302,120 @@ func toUptimeWindowJSON(b store.HistoryBucket, handling string, interval time.Du
 	if b.ResponseTimeCount > 0 {
 		avg := b.ResponseTimeSum / float64(b.ResponseTimeCount)
 		out.ResponseTimeAvg = &avg
+	}
+	return out
+}
+
+// maintenanceWindowJSON is MaintenanceWindow in docs/api/openapi.yaml.
+type maintenanceWindowJSON struct {
+	ID          string  `json:"id"`
+	Title       string  `json:"title"`
+	Description *string `json:"description"`
+	Strategy    string  `json:"strategy"`
+
+	// State is derived from the schedule and the clock on every read. Storing it
+	// would make it wrong between the moment a window starts and the moment
+	// something notices, which is exactly the interval anyone asks about.
+	State string `json:"state"`
+
+	Timezone              string          `json:"timezone"`
+	StartsAt              time.Time       `json:"starts_at"`
+	EndsAt                *time.Time      `json:"ends_at"`
+	DurationMinutes       *int            `json:"duration_minutes"`
+	Recurrence            *recurrenceJSON `json:"recurrence"`
+	Targets               targetsJSON     `json:"targets"`
+	SuppressNotifications bool            `json:"suppress_notifications"`
+	ShowOnStatusPages     bool            `json:"show_on_status_pages"`
+	StatusPageIDs         []string        `json:"status_page_ids"`
+	NextOccurrenceAt      *time.Time      `json:"next_occurrence_at"`
+	CreatedAt             time.Time       `json:"created_at"`
+	UpdatedAt             time.Time       `json:"updated_at"`
+}
+
+type recurrenceJSON struct {
+	Weekdays    []int      `json:"weekdays,omitempty"`
+	DaysOfMonth []int      `json:"days_of_month,omitempty"`
+	Cron        *string    `json:"cron,omitempty"`
+	Until       *time.Time `json:"until,omitempty"`
+}
+
+type targetsJSON struct {
+	MonitorIDs []string `json:"monitor_ids"`
+	GroupIDs   []string `json:"group_ids"`
+	TagIDs     []string `json:"tag_ids"`
+}
+
+// maintenanceWindowWrite is the request body for both create and update. The
+// spec makes them the same shape, so an update is a replacement rather than a
+// patch — and a replacement is what a target set wants, because "these two
+// monitors" has to be able to mean exactly two.
+type maintenanceWindowWrite struct {
+	Title                 *string         `json:"title"`
+	Description           *string         `json:"description"`
+	Strategy              *string         `json:"strategy"`
+	Timezone              *string         `json:"timezone"`
+	StartsAt              *time.Time      `json:"starts_at"`
+	EndsAt                *time.Time      `json:"ends_at"`
+	DurationMinutes       *int            `json:"duration_minutes"`
+	Recurrence            *recurrenceJSON `json:"recurrence"`
+	Targets               *targetsJSON    `json:"targets"`
+	SuppressNotifications *bool           `json:"suppress_notifications"`
+	ShowOnStatusPages     *bool           `json:"show_on_status_pages"`
+	StatusPageIDs         *[]string       `json:"status_page_ids"`
+
+	// Cancelled is not in the spec's write shape; a window is cancelled by
+	// deleting it. Declared here only so a client echoing a read back is met
+	// with a clear rejection rather than "unknown field".
+	State *string `json:"state"`
+}
+
+func toMaintenanceWindowJSON(w model.MaintenanceWindow, state string, statusPageIDs []model.ID) maintenanceWindowJSON {
+	out := maintenanceWindowJSON{
+		ID:                    w.ID.String(),
+		Title:                 w.Title,
+		Strategy:              w.Strategy,
+		State:                 state,
+		Timezone:              w.Timezone,
+		StartsAt:              w.StartsAt,
+		EndsAt:                w.EndsAt,
+		SuppressNotifications: w.SuppressNotifications,
+		ShowOnStatusPages:     w.ShowOnStatusPages,
+		NextOccurrenceAt:      w.NextOccurrenceAt,
+		CreatedAt:             w.CreatedAt,
+		UpdatedAt:             w.UpdatedAt,
+		Targets: targetsJSON{
+			MonitorIDs: idStrings(w.Targets.MonitorIDs),
+			GroupIDs:   idStrings(w.Targets.GroupIDs),
+			TagIDs:     idStrings(w.Targets.TagIDs),
+		},
+		StatusPageIDs: idStrings(statusPageIDs),
+	}
+	if w.Description != "" {
+		out.Description = &w.Description
+	}
+	if w.Duration > 0 {
+		minutes := int(w.Duration.Minutes())
+		out.DurationMinutes = &minutes
+	}
+
+	// Omitted rather than returned as an empty object when the strategy has no
+	// recurrence rule: a single window with `"recurrence": {}` invites the reader
+	// to wonder what it recurs on.
+	if r := w.Recurrence; len(r.Weekdays) > 0 || len(r.DaysOfMonth) > 0 || r.Cron != "" || r.Until != nil {
+		rendered := recurrenceJSON{Weekdays: r.Weekdays, DaysOfMonth: r.DaysOfMonth, Until: r.Until}
+		if r.Cron != "" {
+			cron := r.Cron
+			rendered.Cron = &cron
+		}
+		out.Recurrence = &rendered
+	}
+	return out
+}
+
+func idStrings(ids []model.ID) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, id.String())
 	}
 	return out
 }

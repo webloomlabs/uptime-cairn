@@ -79,7 +79,7 @@ func (s *Server) ingest(ctx context.Context, results []*probev1.Result) (*probev
 			states[id] = state
 		}
 
-		beat, raised, err := apply(monitor, state, r, s.probeID)
+		beat, raised, err := apply(monitor, state, r, s.probeID, s.suppression(ctx, monitor, state, states))
 		if err != nil {
 			return nil, err
 		}
@@ -134,10 +134,80 @@ type pendingAlert struct {
 	alert   alert
 }
 
+// suppression decides whether this result should be silent, and why.
+//
+// Two sources, and they are computed differently on purpose. Maintenance is a
+// property of the clock, so the sweep materialises it onto monitor_state and
+// this only has to read it. A dependency is a property of another monitor's
+// current state, so it is derived here, at the moment the result lands — a
+// sweep would be up to one interval stale, and the case that matters most is a
+// parent and its children failing within the same second.
+func (s *Server) suppression(ctx context.Context, monitor model.Monitor, state *model.MonitorState, batch map[model.ID]*model.MonitorState) int {
+	if state.SuppressedBy == model.SuppressedByMaintenance {
+		return model.SuppressionMaintenance
+	}
+	if s.ancestorUnavailable(ctx, monitor, batch) {
+		return model.SuppressionDependency
+	}
+	return model.SuppressionNone
+}
+
+// maxDependencyDepth bounds the walk up the parent chain.
+//
+// Creation rejects cycles, so a cycle should be impossible; the bound is here
+// because "should be impossible" and "cannot happen" are different, and the
+// difference is an infinite loop on the hottest path in the system.
+const maxDependencyDepth = 10
+
+// ancestorUnavailable reports whether anything this monitor depends on is
+// already known to be unavailable — down, or inside a maintenance window.
+//
+// Maintenance counts, and the case that forces it is worth stating: taking the
+// router down for a firmware upgrade is the most known problem there is, and
+// being paged about the forty services behind it is exactly what the operator
+// scheduled the window to avoid. The alternative is making them target every
+// descendant by hand, which is a list that goes stale the first time somebody
+// adds a service.
+//
+// Transitive on purpose, for the same reason: suppressing only the router's
+// immediate children would still page thirty-nine times.
+func (s *Server) ancestorUnavailable(ctx context.Context, monitor model.Monitor, batch map[model.ID]*model.MonitorState) bool {
+	parentID := monitor.ParentMonitorID
+
+	for depth := 0; parentID != nil && depth < maxDependencyDepth; depth++ {
+		// The batch first: a parent that went down earlier in this same batch is
+		// already down as far as its children are concerned, and reading the
+		// stored row would miss it by one flush.
+		state, ok := batch[*parentID]
+		if !ok {
+			loaded, err := s.store.GetState(ctx, *parentID)
+			if err != nil {
+				// A dangling parent suppresses nothing. Failing open is the
+				// right direction here: the cost is an alert that should have
+				// been silent, and the alternative is silence that should have
+				// been an alert.
+				return false
+			}
+			state = &loaded
+		}
+		switch state.Status {
+		case model.MonitorStatusDown, model.MonitorStatusMaintenance:
+			return true
+		}
+
+		parent, err := s.store.LoadMonitor(ctx, *parentID)
+		if err != nil {
+			return false
+		}
+		parentID = parent.ParentMonitorID
+	}
+	return false
+}
+
 // apply records one result against a monitor's state and returns the heartbeat
 // to store. It mutates state in place; the caller persists it once per batch
 // rather than once per result.
-func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, probeID model.ID) (model.Heartbeat, alert, error) {
+func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, probeID model.ID, suppressedBy int) (model.Heartbeat, alert, error) {
 	at := time.UnixMicro(r.GetTimeUnixMicros()).UTC()
 
 	// The probe id comes from the session, not from the result: the connection
@@ -169,6 +239,53 @@ func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, 
 	if ms := r.GetResponseTimeMs(); ms > 0 {
 		d := time.Duration(ms * float64(time.Millisecond))
 		beat.ResponseTime = &d
+	}
+
+	if suppressedBy != model.SuppressionNone {
+		beat.Suppressed = true
+		beat.SuppressionReason = suppressedBy
+	}
+
+	// Under maintenance the check still runs and its result is still recorded —
+	// the message, the code, and the response time are all kept — but the
+	// verdict is recorded as maintenance rather than as up or down. That is what
+	// makes /uptime's three-way maintenance choice implementable: an operator
+	// can exclude planned downtime from an SLA figure only if the rows carrying
+	// it are distinguishable from the rows that are not.
+	//
+	// The failure count is frozen rather than reset. A window says nothing about
+	// the target either way, so the monitor resumes counting from where it was
+	// when the window opened.
+	if suppressedBy == model.SuppressionMaintenance {
+		beat.Status = model.StatusMaintenance
+
+		// Not marked important, and not because it does not matter. The move
+		// into maintenance is made by the sweep at the instant the window opens,
+		// when no check is running and there is no heartbeat to mark. It is
+		// carried by state_version and by the window itself, both of which the
+		// API can show; inventing a heartbeat for it would put a check in the
+		// history that never ran.
+		state.Status = model.MonitorStatusMaintenance
+		state.LastCheckAt = &at
+		next := at.Add(monitor.Interval)
+		state.NextCheckAt = &next
+		state.LastMessage = beat.Message
+		if beat.ResponseTime != nil {
+			ms := float64(beat.ResponseTime.Microseconds()) / 1000.0
+			state.LastResponseTimeMs = &ms
+		}
+		// No alert either way. Planned downtime that pages somebody is not
+		// planned downtime.
+		return beat, alert{}, nil
+	}
+
+	// Dependency suppression is different in kind, and deliberately so. A child
+	// whose parent is down really is unreachable, so the transition is recorded
+	// and the status changes and the uptime figure moves. The only thing
+	// withheld is the page.
+	state.SuppressedBy = ""
+	if suppressedBy == model.SuppressionDependency {
+		state.SuppressedBy = model.SuppressedByDependency
 	}
 
 	previous := state.Status
@@ -217,6 +334,14 @@ func apply(monitor model.Monitor, state *model.MonitorState, r *probev1.Result, 
 	} else if shouldResend(monitor, state) {
 		// Still down, and far enough past the last notification to say so again.
 		raised.fire, raised.eventType = true, model.EventMonitorDown
+	}
+
+	// The whole point of the feature: the transition is recorded, and nobody is
+	// woken up about it. A suppressed heartbeat is still important, so the
+	// activity feed and important_only still show the change — what is withheld
+	// is the alert, not the history.
+	if suppressedBy != model.SuppressionNone {
+		raised.fire = false
 	}
 
 	state.LastCheckAt = &at

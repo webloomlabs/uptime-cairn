@@ -86,7 +86,7 @@ func testServerWithStore(t *testing.T, extra ...check.Checker) (*httptest.Server
 		secrets.NewVault(keeper, "monitors", "config"), log,
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
-	api := New(store, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance")
+	api := New(store, noopNotifier{}, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance")
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)

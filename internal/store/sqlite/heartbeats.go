@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -33,7 +34,7 @@ func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) error {
 		INSERT INTO heartbeats (
 			time, monitor_id, org_id, probe_id, status, response_time_ms,
 			code, message, attempt, important, suppressed, suppression_reason
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT DO NOTHING`)
 	if err != nil {
 		return fmt.Errorf("prepare heartbeat insert: %w", err)
@@ -48,12 +49,23 @@ func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) error {
 		if _, err := stmt.ExecContext(ctx,
 			micros(b.Time), b.MonitorID[:], b.OrgID[:], b.ProbeID[:], int64(b.Status),
 			responseTime, nullString(b.Code), nullString(b.Message), b.Attempt,
-			boolToInt(b.Important), boolToInt(b.Suppressed),
+			boolToInt(b.Important), boolToInt(b.Suppressed), nullReason(b.SuppressionReason),
 		); err != nil {
 			return fmt.Errorf("insert heartbeat: %w", err)
 		}
 	}
 	return tx.Commit()
+}
+
+// nullReason stores the suppression reason as an integer, or null when there was
+// none. Integer rather than text because this table takes 21 million rows a day
+// and the API's string form costs several gigabytes a year for no benefit
+// (data model §5.2).
+func nullReason(reason int) any {
+	if reason == model.SuppressionNone {
+		return nil
+	}
+	return int64(reason)
 }
 
 // ListHeartbeats returns one page of raw results, newest first.
@@ -65,7 +77,7 @@ func (s *Store) WriteBatch(ctx context.Context, beats []model.Heartbeat) error {
 func (s *Store) ListHeartbeats(ctx context.Context, monitorID model.ID, before *time.Time, limit int, importantOnly bool) ([]model.Heartbeat, bool, error) {
 	query := `
 		SELECT time, monitor_id, org_id, probe_id, status, response_time_ms,
-		       code, message, attempt, important, suppressed
+		       code, message, attempt, important, suppressed, suppression_reason
 		FROM heartbeats
 		WHERE monitor_id = ?`
 	args := []any{monitorID[:]}
@@ -96,9 +108,11 @@ func (s *Store) ListHeartbeats(ctx context.Context, monitorID model.ID, before *
 			responseTime          any
 			code, message         any
 			important, suppressed int64
+			reason                sql.NullInt64
 		)
 		if err := rows.Scan(&timeMicros, &monitor, &org, &probe, &status,
-			&responseTime, &code, &message, &b.Attempt, &important, &suppressed); err != nil {
+			&responseTime, &code, &message, &b.Attempt, &important, &suppressed,
+			&reason); err != nil {
 			return nil, false, err
 		}
 		b.Time = fromMicros(timeMicros)
@@ -118,6 +132,7 @@ func (s *Store) ListHeartbeats(ctx context.Context, monitorID model.ID, before *
 		}
 		b.Important = important == 1
 		b.Suppressed = suppressed == 1
+		b.SuppressionReason = int(reason.Int64)
 		out = append(out, b)
 	}
 	if err := rows.Err(); err != nil {

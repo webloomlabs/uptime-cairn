@@ -32,6 +32,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/api"
 	"github.com/webloomlabs/uptime-cairn/internal/config"
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
+	"github.com/webloomlabs/uptime-cairn/internal/maintenance"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
@@ -123,6 +124,13 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	cp := controlplane.New(store, publisher, alerts, configVault, log.With("component", "controlplane"),
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
+	// Maintenance windows. The sweep is the only writer of the maintenance
+	// suppression flag; ingest owns the dependency one, which is derived at the
+	// moment a result lands because a parent and its children can fail within
+	// the same second and a sweep would be a tick behind.
+	sweeps := maintenance.NewTrigger()
+	go sweepMaintenance(ctx, maintenance.NewSweeper(store, log.With("component", "maintenance")), sweeps, log)
+
 	// The rollup pipeline. Raw heartbeats are kept for seven days, so every
 	// history range beyond that — the 90-day uptime bar a status page shows, the
 	// year Phase 2's reports quote — is made of rows this job writes and nothing
@@ -181,7 +189,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           api.New(store, publisher, cp, alerts, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
+		Handler:           api.New(store, publisher, sweeps, cp, alerts, registry, keeper, log.With("component", "api"), cfg.InstanceName).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -366,6 +374,47 @@ func runRollups(ctx context.Context, runner *rollup.Runner) {
 			return
 		case now := <-ticker.C:
 			runner.Run(ctx, now.UTC())
+		}
+	}
+}
+
+// maintenanceSweepInterval bounds how late a window boundary is honoured.
+//
+// Fifteen seconds is inside the 20-second interval floor, so a monitor gets at
+// most one check on the wrong side of a boundary. Nobody schedules maintenance
+// to the second, and the API wakes the sweep on every write, so this interval
+// only matters for a boundary nothing else announced — the moment an occurrence
+// ends.
+const maintenanceSweepInterval = 15 * time.Second
+
+func sweepMaintenance(ctx context.Context, sweeper *maintenance.Sweeper, trigger *maintenance.Trigger, log *slog.Logger) {
+	ticker := time.NewTicker(maintenanceSweepInterval)
+	defer ticker.Stop()
+
+	run := func(now time.Time) {
+		result, err := sweeper.Sweep(ctx, now)
+		if err != nil {
+			log.Warn("sweep maintenance windows", "error", err)
+			return
+		}
+		if result.Entered > 0 || result.Exited > 0 {
+			log.Info("maintenance applied",
+				"entered", result.Entered, "exited", result.Exited, "active_windows", result.Active)
+		}
+	}
+
+	// Once at startup: a process that was down through the start of a window has
+	// to notice on the way back up, not a quarter of a minute later.
+	run(time.Now().UTC())
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-trigger.C():
+			run(time.Now().UTC())
+		case now := <-ticker.C:
+			run(now.UTC())
 		}
 	}
 }

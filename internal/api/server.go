@@ -69,6 +69,7 @@ type Store interface {
 	MonitorStore
 	IdentityStore
 	ChannelStore
+	MaintenanceStore
 }
 
 // Page sizes. The server caps rather than rejects, per the spec: a client
@@ -83,6 +84,7 @@ const (
 type Server struct {
 	store    Store
 	notify   Notifier
+	sweeps   Notifier
 	push     PushIngest
 	alerts   Alerts
 	registry *check.Registry
@@ -108,13 +110,14 @@ type Server struct {
 type Notifier interface{ Notify() }
 
 // New returns a server.
-func New(s Store, publisher Notifier, push PushIngest, alerts Alerts, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
+func New(s Store, publisher Notifier, sweeps Notifier, push PushIngest, alerts Alerts, registry *check.Registry, keeper *secrets.Keeper, log *slog.Logger, instanceName string) *Server {
 	if instanceName == "" {
 		instanceName = "Uptime Cairn"
 	}
 	return &Server{
 		store:        s,
 		notify:       publisher,
+		sweeps:       sweeps,
 		push:         push,
 		alerts:       alerts,
 		registry:     registry,
@@ -182,6 +185,12 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("PATCH /api/v1/notification-channels/{channelId}", s.require(auth.ScopeNotificationsWrit, s.updateNotificationChannel))
 	authed.HandleFunc("DELETE /api/v1/notification-channels/{channelId}", s.require(auth.ScopeNotificationsWrit, s.deleteNotificationChannel))
 	authed.HandleFunc("POST /api/v1/notification-channels/{channelId}/test", s.require(auth.ScopeNotificationsWrit, s.testNotificationChannel))
+
+	authed.HandleFunc("GET /api/v1/maintenance-windows", s.require(auth.ScopeMaintenanceRead, s.listMaintenanceWindows))
+	authed.HandleFunc("POST /api/v1/maintenance-windows", s.require(auth.ScopeMaintenanceWrite, s.createMaintenanceWindow))
+	authed.HandleFunc("GET /api/v1/maintenance-windows/{maintenanceWindowId}", s.require(auth.ScopeMaintenanceRead, s.getMaintenanceWindow))
+	authed.HandleFunc("PATCH /api/v1/maintenance-windows/{maintenanceWindowId}", s.require(auth.ScopeMaintenanceWrite, s.updateMaintenanceWindow))
+	authed.HandleFunc("DELETE /api/v1/maintenance-windows/{maintenanceWindowId}", s.require(auth.ScopeMaintenanceWrite, s.deleteMaintenanceWindow))
 
 	authed.HandleFunc("/api/v1/", s.notImplemented)
 
