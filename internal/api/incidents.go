@@ -143,6 +143,16 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.raiseIncidentEvent(model.EventIncidentOpened, incident)
+	// The opening entry is what a subscriber reads; without one the message is
+	// the title and the impact, which is still worth sending — an incident
+	// opened against a public page is news whether or not somebody has typed the
+	// detail yet.
+	opening := ""
+	if body.Body != nil {
+		opening = *body.Body
+	}
+	s.announce(incident, model.EventIncidentOpened, opening,
+		body.NotifySubscribers == nil || *body.NotifySubscribers)
 	s.log.Info("incident opened", "id", incident.ID.String(), "impact", incident.Impact)
 	s.writeIncident(w, r, incident.ID, http.StatusCreated)
 }
@@ -302,6 +312,7 @@ func (s *Server) createIncidentUpdate(w http.ResponseWriter, r *http.Request) {
 			event = model.EventIncidentResolved
 		}
 		s.raiseIncidentEvent(event, incident)
+		s.announce(incident, event, update.Body, update.NotifiedSubscribers)
 	}
 
 	w.Header().Set("Location", "/api/v1/incidents/"+id.String()+"/updates")
@@ -364,7 +375,11 @@ func (s *Server) raiseIncidentEvent(eventType string, in model.Incident) {
 	if s.alerts == nil {
 		return
 	}
-	s.alerts.Publish(notify.NewIncidentEvent(eventType, s.alerts.Instance(), notify.Incident{
+	s.alerts.Publish(notify.NewIncidentEvent(eventType, s.alerts.Instance(), flatten(in), time.Now().UTC()))
+}
+
+func flatten(in model.Incident) notify.Incident {
+	return notify.Incident{
 		ID:         in.ID,
 		Title:      in.Title,
 		State:      in.State,
@@ -372,7 +387,33 @@ func (s *Server) raiseIncidentEvent(eventType string, in model.Incident) {
 		StartedAt:  in.StartedAt,
 		ResolvedAt: in.ResolvedAt,
 		MonitorIDs: idStrings(in.MonitorIDs),
-	}, time.Now().UTC()))
+	}
+}
+
+// announce tells the subscribers of the pages this incident is attached to.
+//
+// Separate from raiseIncidentEvent, which is aimed at the operator's own
+// channels, because the two answer to different rules. An alert goes wherever
+// the operator wired it and says whatever the template says; a bulletin goes to
+// people who asked a specific status page for updates, and only when whoever
+// wrote the entry said to send it.
+//
+// notify_subscribers defaults to true in the spec, which is the right default —
+// an operator posting a public incident update has already decided to be public
+// — but it is checked here rather than assumed, because the box exists precisely
+// for the internal note that should not reach a customer.
+func (s *Server) announce(in model.Incident, eventType, update string, notifySubscribers bool) {
+	if s.relay == nil || !notifySubscribers || len(in.StatusPageIDs) == 0 {
+		return
+	}
+	s.relay.Announce(notify.Announcement{
+		EventType:  eventType,
+		PageIDs:    in.StatusPageIDs,
+		Incident:   flatten(in),
+		Update:     update,
+		OccurredAt: time.Now().UTC(),
+		BaseURL:    s.baseURL,
+	})
 }
 
 func (s *Server) writeIncident(w http.ResponseWriter, r *http.Request, id model.ID, status int) {

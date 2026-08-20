@@ -15,6 +15,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 )
 
@@ -49,9 +50,9 @@ type StatusPageStore interface {
 
 	MonitorsOnStatusPage(ctx context.Context, pageID model.ID) (map[model.ID]store.PublicMonitor, error)
 
-	CreateSubscriber(ctx context.Context, sub model.Subscriber, sealed []byte) error
-	ListSubscribers(ctx context.Context, pageID model.ID, limit int) ([]model.Subscriber, [][]byte, error)
-	SubscriberByToken(ctx context.Context, confirmHash, unsubscribeHash []byte) (model.Subscriber, []byte, error)
+	CreateSubscriber(ctx context.Context, sub model.Subscriber) error
+	ListSubscribers(ctx context.Context, pageID model.ID, limit int) ([]model.Subscriber, error)
+	SubscriberByToken(ctx context.Context, confirmHash, unsubscribeHash []byte) (model.Subscriber, error)
 	ConfirmSubscriber(ctx context.Context, id model.ID, at time.Time) error
 	DeleteSubscriber(ctx context.Context, id model.ID) error
 }
@@ -512,19 +513,19 @@ func (s *Server) listStatusPageSubscribers(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	subscribers, sealed, err := s.store.ListSubscribers(r.Context(), id, s.limit(r))
+	subscribers, err := s.store.ListSubscribers(r.Context(), id, s.limit(r))
 	if err != nil {
 		s.internal(w, r, "list subscribers", err)
 		return
 	}
 
 	data := make([]subscriberJSON, 0, len(subscribers))
-	for i, sub := range subscribers {
+	for _, sub := range subscribers {
 		// Masked even for an authenticated operator. This list is an export of
 		// somebody else's customers, and the reason to open it is "did my
 		// subscriber confirm", which a mask answers.
 		target := "(unreadable)"
-		if plain, err := s.subscriberTarget(sub, sealed[i]); err == nil {
+		if plain, err := s.subscriberTarget(sub); err == nil {
 			target = model.MaskTarget(sub.Channel, plain)
 		} else {
 			s.log.Error("open subscriber target", "error", err, "subscriber", sub.ID.String())
@@ -568,8 +569,8 @@ func (s *Server) subscriberNotFound(w http.ResponseWriter, r *http.Request) {
 // subscriberTarget opens the encrypted address. Encrypted rather than hashed
 // because a notification replays it; bound by AAD to its row, so relocating the
 // blob onto another subscriber fails to open.
-func (s *Server) subscriberTarget(sub model.Subscriber, sealed []byte) (string, error) {
-	plain, err := s.subscribers.Open(sub.OrgID[:], sub.ID[:], sealed)
+func (s *Server) subscriberTarget(sub model.Subscriber) (string, error) {
+	plain, err := s.subscribers.Open(sub.OrgID[:], sub.ID[:], sub.SealedTarget)
 	if err != nil {
 		return "", err
 	}
@@ -959,17 +960,28 @@ func (s *Server) subscribeToStatusPage(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:            time.Now().UTC().Truncate(time.Millisecond),
 	}
 
-	sealed, err := s.subscribers.Seal(subscriber.OrgID[:], subscriber.ID[:], []byte(*body.Target))
+	// Two envelopes, both bound to this row. The address, because every
+	// notification replays it; and the unsubscribe token, because every
+	// notification has to render its link again and a hash cannot be un-hashed.
+	subscriber.SealedTarget, err = s.subscribers.Seal(subscriber.OrgID[:], subscriber.ID[:], []byte(*body.Target))
 	if err != nil {
 		s.internal(w, r, "seal subscriber target", err)
 		return
 	}
+	subscriber.SealedUnsubscribeToken, err = s.subscribers.Seal(
+		subscriber.OrgID[:], subscriber.ID[:], []byte(unsubscribeToken))
+	if err != nil {
+		s.internal(w, r, "seal unsubscribe token", err)
+		return
+	}
 
-	if err := s.store.CreateSubscriber(r.Context(), subscriber, sealed); err != nil {
+	if err := s.store.CreateSubscriber(r.Context(), subscriber); err != nil {
 		if errors.Is(err, store.ErrConflict) {
-			// The same answer a new subscription gets. Telling a stranger that
-			// an address is already subscribed to a page turns this endpoint
-			// into an address-membership oracle.
+			// The same answer a new subscription gets, and no second
+			// confirmation sent. Telling a stranger that an address is already
+			// subscribed to a page turns this endpoint into an
+			// address-membership oracle — and re-sending on a repeat request
+			// would turn it into a way to mail somebody repeatedly.
 			writeJSON(w, s.log, http.StatusAccepted, map[string]string{
 				"status": "pending_confirmation",
 			})
@@ -977,6 +989,21 @@ func (s *Server) subscribeToStatusPage(w http.ResponseWriter, r *http.Request) {
 		}
 		s.internal(w, r, "create subscriber", err)
 		return
+	}
+
+	// Queued after the row is durable, and never waited on: the answer below is
+	// identical whether the message goes out, bounces, or finds no relay
+	// configured, because each of those is a fact about this install that a
+	// stranger is not entitled to learn from a status page.
+	if s.relay != nil {
+		s.relay.Confirm(notify.Confirmation{
+			Page:             page,
+			Subscriber:       subscriber,
+			Target:           *body.Target,
+			Token:            confirmToken,
+			UnsubscribeToken: unsubscribeToken,
+			BaseURL:          s.baseURL,
+		})
 	}
 
 	s.log.Info("status page subscription requested", "page", page.Slug, "channel", channel)
@@ -1021,7 +1048,7 @@ func (s *Server) subscriberByToken(w http.ResponseWriter, r *http.Request) (mode
 	// Both token columns are looked up by hash through their own unique index,
 	// so guessing costs one index probe rather than a scan — this endpoint is
 	// unauthenticated and the token in the path is the whole credential.
-	subscriber, _, err := s.store.SubscriberByToken(r.Context(), hash, hash)
+	subscriber, err := s.store.SubscriberByToken(r.Context(), hash, hash)
 	if errors.Is(err, store.ErrNotFound) {
 		writeProblem(w, r, s.log, http.StatusNotFound, "not-found",
 			"Not found", "That link is no longer valid.")

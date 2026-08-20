@@ -142,6 +142,13 @@ type Server struct {
 	// on.
 	outbound Redeliverer
 
+	// relay delivers to status page subscribers: the confirmation a new
+	// subscription needs, and the incident updates that are the whole reason
+	// somebody subscribed. Nil in a test that is not exercising it, which every
+	// call site checks — a status page must still work on an install with no
+	// mail relay, it just cannot promise anybody anything.
+	relay SubscriberRelay
+
 	// instanceName is the issuer shown in an authenticator app.
 	instanceName string
 
@@ -205,6 +212,21 @@ func (s *Server) WithOutbound(d Redeliverer) *Server {
 func (s *Server) WithRetuner(r Retuner) *Server {
 	s.retuner = r
 	return s
+}
+
+// WithSubscribers attaches the status page relay.
+func (s *Server) WithSubscribers(r SubscriberRelay) *Server {
+	s.relay = r
+	return s
+}
+
+// SubscriberRelay is what the API needs from status page delivery. Both methods
+// are fire-and-forget: a public subscribe request and an incident update are
+// both HTTP requests somebody is waiting on, and neither should be held open for
+// an SMTP conversation with a stranger's mail server.
+type SubscriberRelay interface {
+	Confirm(c notify.Confirmation)
+	Announce(a notify.Announcement)
 }
 
 // Handler builds the routing table. Scopes come from each operation's

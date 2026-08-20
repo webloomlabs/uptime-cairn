@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
@@ -96,7 +97,12 @@ func testAPI(t *testing.T, extra ...check.Checker) (*httptest.Server, *sqlite.St
 		secrets.NewVault(keeper, "monitors", "config"), log,
 		model.EmbeddedProbeID, model.SentinelOrgID)
 
-	api := New(store, noopNotifier{}, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance")
+	// The subscriber relay is recorded rather than real: what the handlers decide
+	// — who gets told, and with what — is the half that lives here. Whether the
+	// message then reaches a mail server is tested in internal/notify, against a
+	// mail server.
+	api := New(store, noopNotifier{}, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance").
+		WithSubscribers(&recordingRelay{})
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)
@@ -211,4 +217,41 @@ func (j *cookieJar) Cookies(*url.URL) []*http.Cookie {
 		}
 	}
 	return live
+}
+
+// recordingRelay captures what the API asked status page delivery to do.
+type recordingRelay struct {
+	mu            sync.Mutex
+	confirmations []notify.Confirmation
+	announcements []notify.Announcement
+}
+
+func (r *recordingRelay) Confirm(c notify.Confirmation) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.confirmations = append(r.confirmations, c)
+}
+
+func (r *recordingRelay) Announce(a notify.Announcement) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.announcements = append(r.announcements, a)
+}
+
+func (r *recordingRelay) sent() ([]notify.Confirmation, []notify.Announcement) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]notify.Confirmation(nil), r.confirmations...),
+		append([]notify.Announcement(nil), r.announcements...)
+}
+
+// relayOf reaches the recording relay testAPI attached.
+func relayOf(t *testing.T, api *Server) *recordingRelay {
+	t.Helper()
+
+	relay, ok := api.relay.(*recordingRelay)
+	if !ok {
+		t.Fatal("the test server has no recording relay")
+	}
+	return relay
 }

@@ -126,18 +126,34 @@ type Subscriber struct {
 	OrgID        ID
 	Channel      string
 
-	// Target is the address, encrypted at rest: it is replayed on every
-	// notification, so it cannot be hashed (data model §12.1).
+	// Target is the plaintext address. Populated only where a caller has opened
+	// the envelope below; the store never fills it, because the store holds no
+	// key.
 	Target string
+
+	// SealedTarget is the address as stored: encrypted rather than hashed,
+	// because it is replayed on every notification (data model §12.1).
+	SealedTarget []byte
 
 	// TargetHash carries the uniqueness constraint without an index over every
 	// subscriber address on the instance in plaintext (§12.5).
 	TargetHash []byte
 
-	ConfirmTokenHash     []byte
-	ConfirmedAt          *time.Time
-	UnsubscribeTokenHash []byte
-	CreatedAt            time.Time
+	ConfirmTokenHash []byte
+	ConfirmedAt      *time.Time
+
+	// The unsubscribe token, stored twice, and the duplication is the point.
+	//
+	// "Hash what you verify, encrypt what you replay" decides this one twice
+	// over, because the token is both: it is verified when somebody follows the
+	// link, and replayed at the foot of every message this page ever sends
+	// them. The hash carries the unique index the lookup probes; the envelope
+	// carries the value, which nothing else can reproduce and without which a
+	// notification would go out with no way out of it.
+	UnsubscribeTokenHash   []byte
+	SealedUnsubscribeToken []byte
+
+	CreatedAt time.Time
 }
 
 // Confirmed reports whether this subscriber has completed double opt-in.

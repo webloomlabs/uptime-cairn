@@ -323,6 +323,16 @@ and it is the input to Phase 2's post-mortem "alerts fired" section.
 Append-only, time-ordered, and subject to retention like the other logs. Indexed
 `(org_id, created_at desc)` and `(org_id, monitor_id, created_at desc)`.
 
+A status page bulletin is recorded here too, with `channel_id` null and
+`incident_id` naming what it was about — "did my customers hear about the outage"
+is asked afterwards, and this row is the answer. Its `rendered_payload` is
+deliberately **not** the message: a bulletin carries the subscriber's address and
+their live unsubscribe token, and this column is plaintext and subject to
+retention rather than to the key hierarchy, so writing the message here would
+undo §12.1 and §12.5 in one line. What is stored is the subject and the masked
+address — the same mask the subscriber list endpoint returns, for the same
+reason.
+
 ### 4.6 `monitor_certificates`
 
 One row per monitor, replaced on each observation — the `/certificate` endpoint
@@ -397,8 +407,23 @@ appear in only one section per page.
 
 `subscribers`: `id`, `status_page_id`, `org_id`, `channel` (`email`|`webhook`),
 `target`, `target_hash` (for the uniqueness check without a plaintext index),
-`confirm_token_hash`, `confirmed_at`, `unsubscribe_token_hash`, `created_at`.
-`UNIQUE (status_page_id, target_hash)`.
+`confirm_token_hash`, `confirmed_at`, `unsubscribe_token_hash`,
+`unsubscribe_token_encrypted`, `created_at`. `UNIQUE (status_page_id,
+target_hash)`, and a unique partial index on each token column so the
+unauthenticated resolver is two index probes rather than a table scan.
+
+The unsubscribe token is stored **twice**, and the duplication is the point. It
+is the one value in this schema that is both verified and replayed: verified when
+somebody follows the link, and replayed at the foot of every message the page
+ever sends them. §12.1's rule decides it once each way — the hash carries the
+lookup, the envelope carries the value. A notification with no unsubscribe link
+is not sent at all, so the second column is what makes delivery possible rather
+than merely tidy (migration `0005`).
+
+Delivery reads this table through "confirmed only": nothing is ever sent to an
+address that has not completed double opt-in, and the filter is in the query
+rather than in the caller, because "everyone who asked" and "everyone who agreed"
+are one clause apart in SQL and a different product in a mailbox.
 
 ### 4.10 Outbound webhooks
 
@@ -1167,6 +1192,8 @@ answer "does this match?"
 | `webhooks.headers` | May carry an `Authorization` value. |
 | `monitors.config` secret fields | HTTP basic/bearer credentials, gRPC metadata, Docker client TLS key, and the push token. |
 | `settings.smtp.password` | |
+| `subscribers.target` | A status page notification is addressed to it. |
+| `subscribers.unsubscribe_token_encrypted` | Rendered into a link on every message — see §4.9. |
 | `report_schedules` S3 credentials | Phase 2. |
 
 ### 12.2 Cipher and envelope

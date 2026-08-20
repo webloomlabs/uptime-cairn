@@ -375,7 +375,7 @@ func (s *Store) MonitorsOnStatusPage(ctx context.Context, pageID model.ID) (map[
 // A repeat request for an address already on the page is ErrConflict rather than
 // a second row: the uniqueness index is over the hash, so this holds without a
 // plaintext index over every subscriber address on the instance (§12.5).
-func (s *Store) CreateSubscriber(ctx context.Context, sub model.Subscriber, sealed []byte) error {
+func (s *Store) CreateSubscriber(ctx context.Context, sub model.Subscriber) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -397,43 +397,91 @@ func (s *Store) CreateSubscriber(ctx context.Context, sub model.Subscriber, seal
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO subscribers (id, status_page_id, org_id, channel, target, target_hash,
-		                         confirm_token_hash, confirmed_at, unsubscribe_token_hash, created_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?)`,
-		sub.ID[:], sub.StatusPageID[:], sub.OrgID[:], sub.Channel, sealed, sub.TargetHash,
+		                         confirm_token_hash, confirmed_at, unsubscribe_token_hash,
+		                         unsubscribe_token_encrypted, created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		sub.ID[:], sub.StatusPageID[:], sub.OrgID[:], sub.Channel, sub.SealedTarget, sub.TargetHash,
 		nullBytes(sub.ConfirmTokenHash), nullMillis(sub.ConfirmedAt),
-		nullBytes(sub.UnsubscribeTokenHash), millis(sub.CreatedAt)); err != nil {
+		nullBytes(sub.UnsubscribeTokenHash), nullBytes(sub.SealedUnsubscribeToken),
+		millis(sub.CreatedAt)); err != nil {
 		return fmt.Errorf("insert subscriber: %w", err)
 	}
 	return tx.Commit()
 }
 
-// ListSubscribers returns a page's subscribers, newest first. The sealed target
-// comes back as stored; opening it is the caller's, because only the caller
-// holds a key.
-func (s *Store) ListSubscribers(ctx context.Context, pageID model.ID, limit int) ([]model.Subscriber, [][]byte, error) {
-	rows, err := s.ro.QueryContext(ctx, `
-		SELECT id, status_page_id, org_id, channel, target, target_hash,
-		       confirm_token_hash, confirmed_at, unsubscribe_token_hash, created_at
-		FROM subscribers WHERE status_page_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+// ListSubscribers returns a page's subscribers, newest first. The envelopes come
+// back as stored; opening them is the caller's, because only the caller holds a
+// key.
+func (s *Store) ListSubscribers(ctx context.Context, pageID model.ID, limit int) ([]model.Subscriber, error) {
+	rows, err := s.ro.QueryContext(ctx, subscriberColumns+`
+		WHERE status_page_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
 		pageID[:], limit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list subscribers: %w", err)
+		return nil, fmt.Errorf("list subscribers: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var (
-		subscribers []model.Subscriber
-		sealed      [][]byte
-	)
+	var subscribers []model.Subscriber
 	for rows.Next() {
-		sub, envelope, err := scanSubscriber(rows)
+		sub, err := scanSubscriber(rows)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		subscribers = append(subscribers, sub)
-		sealed = append(sealed, envelope)
 	}
-	return subscribers, sealed, rows.Err()
+	return subscribers, rows.Err()
+}
+
+// ConfirmedSubscribers returns the subscribers a notification actually goes to:
+// this page's, and only the ones who completed double opt-in.
+//
+// The filter is in the query rather than in the caller on purpose. "Everyone who
+// asked" and "everyone who confirmed" are one keystroke apart in Go and a
+// different product in a mailbox, and the difference is only visible to whoever
+// receives the mail they never agreed to.
+//
+// Unpaginated, because a bulletin goes to all of them or it is not a bulletin.
+// The bound is the fan-out policy in internal/notify, which is where a list long
+// enough to matter has to be dealt with anyway.
+func (s *Store) ConfirmedSubscribers(ctx context.Context, pageID model.ID) ([]model.Subscriber, error) {
+	rows, err := s.ro.QueryContext(ctx, subscriberColumns+`
+		WHERE status_page_id = ? AND confirmed_at IS NOT NULL ORDER BY created_at`,
+		pageID[:])
+	if err != nil {
+		return nil, fmt.Errorf("list confirmed subscribers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var subscribers []model.Subscriber
+	for rows.Next() {
+		sub, err := scanSubscriber(rows)
+		if err != nil {
+			return nil, err
+		}
+		subscribers = append(subscribers, sub)
+	}
+	return subscribers, rows.Err()
+}
+
+// ReissueUnsubscribeToken replaces both halves of a subscriber's unsubscribe
+// token, for the rows written before migration 0005 added the envelope.
+//
+// Those rows can be verified against but not rendered from, so the link at the
+// foot of a message cannot be built for them. Delivery issues a fresh token and
+// calls this rather than sending without one: a notification a person cannot
+// unsubscribe from is the thing that gets a status page reported as spam, and it
+// is worth one write per legacy subscriber to never send it.
+func (s *Store) ReissueUnsubscribeToken(ctx context.Context, id model.ID, hash, sealed []byte) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE subscribers SET unsubscribe_token_hash = ?, unsubscribe_token_encrypted = ? WHERE id = ?`,
+		hash, sealed, id[:])
+	if err != nil {
+		return fmt.Errorf("reissue unsubscribe token: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SubscriberByToken resolves a confirmation or unsubscribe token to its row.
@@ -441,18 +489,16 @@ func (s *Store) ListSubscribers(ctx context.Context, pageID model.ID, limit int)
 // Both tokens are looked up by hash through their own index, so a caller
 // guessing tokens costs one index probe — this endpoint is unauthenticated, and
 // the token in the path is the whole credential.
-func (s *Store) SubscriberByToken(ctx context.Context, confirmHash, unsubscribeHash []byte) (model.Subscriber, []byte, error) {
-	row := s.ro.QueryRowContext(ctx, `
-		SELECT id, status_page_id, org_id, channel, target, target_hash,
-		       confirm_token_hash, confirmed_at, unsubscribe_token_hash, created_at
-		FROM subscribers WHERE confirm_token_hash = ? OR unsubscribe_token_hash = ?`,
+func (s *Store) SubscriberByToken(ctx context.Context, confirmHash, unsubscribeHash []byte) (model.Subscriber, error) {
+	row := s.ro.QueryRowContext(ctx, subscriberColumns+`
+		WHERE confirm_token_hash = ? OR unsubscribe_token_hash = ?`,
 		confirmHash, unsubscribeHash)
 
-	sub, sealed, err := scanSubscriber(row)
+	sub, err := scanSubscriber(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return model.Subscriber{}, nil, ErrNotFound
+		return model.Subscriber{}, ErrNotFound
 	}
-	return sub, sealed, err
+	return sub, err
 }
 
 // ConfirmSubscriber completes double opt-in and burns the confirmation token.
@@ -482,29 +528,40 @@ func (s *Store) DeleteSubscriber(ctx context.Context, id model.ID) error {
 	return nil
 }
 
-func scanSubscriber(row scanner) (model.Subscriber, []byte, error) {
+// subscriberColumns is shared by the three reads so a column added to one is
+// added to all of them, rather than to the two somebody remembered.
+const subscriberColumns = `
+	SELECT id, status_page_id, org_id, channel, target, target_hash,
+	       confirm_token_hash, confirmed_at, unsubscribe_token_hash,
+	       unsubscribe_token_encrypted, created_at
+	FROM subscribers `
+
+func scanSubscriber(row scanner) (model.Subscriber, error) {
 	var (
 		sub                          model.Subscriber
 		id, pageID, orgID            []byte
 		sealed, targetHash           []byte
 		confirmHash, unsubscribeHash []byte
+		sealedToken                  []byte
 		confirmedAt                  sql.NullInt64
 		created                      int64
 	)
 	if err := row.Scan(&id, &pageID, &orgID, &sub.Channel, &sealed, &targetHash,
-		&confirmHash, &confirmedAt, &unsubscribeHash, &created); err != nil {
-		return model.Subscriber{}, nil, err
+		&confirmHash, &confirmedAt, &unsubscribeHash, &sealedToken, &created); err != nil {
+		return model.Subscriber{}, err
 	}
 
 	copy(sub.ID[:], id)
 	copy(sub.StatusPageID[:], pageID)
 	copy(sub.OrgID[:], orgID)
+	sub.SealedTarget = append([]byte(nil), sealed...)
 	sub.TargetHash = append([]byte(nil), targetHash...)
 	sub.ConfirmTokenHash = append([]byte(nil), confirmHash...)
 	sub.UnsubscribeTokenHash = append([]byte(nil), unsubscribeHash...)
+	sub.SealedUnsubscribeToken = append([]byte(nil), sealedToken...)
 	sub.ConfirmedAt = nullableTime(confirmedAt)
 	sub.CreatedAt = fromMillis(created)
-	return sub, append([]byte(nil), sealed...), nil
+	return sub, nil
 }
 
 func scanStatusPage(row scanner) (model.StatusPage, error) {

@@ -146,10 +146,17 @@ func (c NotificationChannel) WantsEvent(eventType string) bool {
 // NotificationDelivery is one attempt to reach one channel, recorded whether it
 // worked or not.
 type NotificationDelivery struct {
-	ID              ID
-	OrgID           ID
-	MonitorID       *ID
-	ChannelID       *ID
+	ID        ID
+	OrgID     ID
+	MonitorID *ID
+	ChannelID *ID
+
+	// IncidentID is set on the deliveries that are not about a monitor: a status
+	// page bulletin goes to a subscriber because of an incident, and "who did we
+	// tell about this outage" is a question asked afterwards that nothing else
+	// in the row can answer.
+	IncidentID *ID
+
 	EventType       string
 	Outcome         string
 	Error           string

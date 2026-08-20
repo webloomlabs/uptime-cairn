@@ -33,11 +33,7 @@ import (
 // worker would sit in it.
 const smtpTimeout = 30 * time.Second
 
-func sendEmail(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error) {
-	encryption := c.str("smtp_encryption", "starttls")
-	host := c.str("smtp_host", "")
-	port := c.num("smtp_port", defaultSMTPPort(encryption))
-
+func sendEmail(ctx context.Context, _ *Sender, c conf, ev Event) (Receipt, error) {
 	to := c.list("to")
 	cc := c.list("cc")
 	if len(to) == 0 {
@@ -47,23 +43,69 @@ func sendEmail(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error
 	body := composeMail(c, ev, to, cc)
 	receipt := Receipt{Payload: truncate(body, maxRecordedPayload)}
 
+	return receipt, deliverSMTP(ctx, relayFrom(c), append(append([]string{}, to...), cc...), body)
+}
+
+// relay is a resolved SMTP endpoint: what to dial, how to encrypt it, and who to
+// authenticate as.
+//
+// It exists because two callers now need the same conversation with different
+// message-building around it — a notification channel, whose settings come from
+// its own config, and a status page bulletin, whose settings come from the
+// instance relay and which builds one message per recipient. Duplicating the
+// connection modes for the second one would mean two implementations of implicit
+// TLS versus STARTTLS, and the one used less often would be the one that breaks.
+type relay struct {
+	host       string
+	port       int
+	encryption string
+	username   string
+	password   string
+
+	// from is the envelope sender, and the address a bounce goes to.
+	from string
+	// fromName is the display name, used only when a caller composes headers.
+	fromName string
+}
+
+func relayFrom(c conf) relay {
+	encryption := c.str("smtp_encryption", "starttls")
+	return relay{
+		host:       c.str("smtp_host", ""),
+		port:       c.num("smtp_port", defaultSMTPPort(encryption)),
+		encryption: encryption,
+		username:   c.str("smtp_username", ""),
+		password:   c.str("smtp_password", ""),
+		from:       c.str("from_address", ""),
+		fromName:   c.str("from_name", ""),
+	}
+}
+
+// deliverSMTP holds one conversation and hands over one message.
+//
+// A fresh connection per message rather than a pooled one, including on the
+// bulletin path where several go out together. Pooling would mean holding a
+// session open across a fan-out that can stall on any single recipient, and mail
+// servers close idle sessions on their own schedule — a reconnect that only
+// happens under load is a bug that only appears under load.
+func deliverSMTP(ctx context.Context, r relay, recipients []string, message string) error {
 	ctx, cancel := context.WithTimeout(ctx, smtpTimeout)
 	defer cancel()
 
-	address := net.JoinHostPort(host, strconv.Itoa(port))
+	address := net.JoinHostPort(r.host, strconv.Itoa(r.port))
 	dialer := &net.Dialer{}
 
 	var conn net.Conn
 	var err error
-	if encryption == "tls" {
+	if r.encryption == "tls" {
 		// Implicit TLS, the port-465 form: the connection is encrypted before
 		// the server says anything.
-		conn, err = (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: host}}).DialContext(ctx, "tcp", address)
+		conn, err = (&tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: r.host}}).DialContext(ctx, "tcp", address)
 	} else {
 		conn, err = dialer.DialContext(ctx, "tcp", address)
 	}
 	if err != nil {
-		return receipt, fmt.Errorf("connect to %s: %w", address, err)
+		return fmt.Errorf("connect to %s: %w", address, err)
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -71,54 +113,53 @@ func sendEmail(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error
 		_ = conn.SetDeadline(deadline)
 	}
 
-	client, err := smtp.NewClient(conn, host)
+	client, err := smtp.NewClient(conn, r.host)
 	if err != nil {
-		return receipt, fmt.Errorf("smtp handshake: %w", err)
+		return fmt.Errorf("smtp handshake: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	if encryption == "starttls" {
-		if err := client.StartTLS(&tls.Config{ServerName: host}); err != nil {
-			return receipt, fmt.Errorf("starttls: %w", err)
+	if r.encryption == "starttls" {
+		if err := client.StartTLS(&tls.Config{ServerName: r.host}); err != nil {
+			return fmt.Errorf("starttls: %w", err)
 		}
 	}
 
-	if user := c.str("smtp_username", ""); user != "" {
+	if r.username != "" {
 		// PlainAuth refuses to send a password over an unencrypted connection to
 		// anything but localhost. That refusal is the standard library
 		// protecting the operator, and it is not this program's place to work
 		// around it — the resulting error names the problem.
-		auth := smtp.PlainAuth("", user, c.str("smtp_password", ""), host)
-		if err := client.Auth(auth); err != nil {
-			return receipt, fmt.Errorf("smtp authentication: %w", err)
+		if err := client.Auth(smtp.PlainAuth("", r.username, r.password, r.host)); err != nil {
+			return fmt.Errorf("smtp authentication: %w", err)
 		}
 	}
 
-	if err := client.Mail(envelopeSender(c)); err != nil {
-		return receipt, fmt.Errorf("MAIL FROM: %w", err)
+	if err := client.Mail(r.from); err != nil {
+		return fmt.Errorf("MAIL FROM: %w", err)
 	}
-	for _, recipient := range append(append([]string{}, to...), cc...) {
+	for _, recipient := range recipients {
 		if err := client.Rcpt(recipient); err != nil {
-			return receipt, fmt.Errorf("RCPT TO %s: %w", recipient, err)
+			return fmt.Errorf("RCPT TO %s: %w", recipient, err)
 		}
 	}
 
 	writer, err := client.Data()
 	if err != nil {
-		return receipt, fmt.Errorf("DATA: %w", err)
+		return fmt.Errorf("DATA: %w", err)
 	}
-	if _, err := writer.Write([]byte(body)); err != nil {
-		return receipt, fmt.Errorf("write message: %w", err)
+	if _, err := writer.Write([]byte(message)); err != nil {
+		return fmt.Errorf("write message: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return receipt, fmt.Errorf("finish message: %w", err)
+		return fmt.Errorf("finish message: %w", err)
 	}
 
 	// Quit rather than just closing: a server that has accepted the message
 	// still gets to say so, and a QUIT failure after a clean DATA close is not
 	// a delivery failure.
 	_ = client.Quit()
-	return receipt, nil
+	return nil
 }
 
 func defaultSMTPPort(encryption string) int {
@@ -131,8 +172,6 @@ func defaultSMTPPort(encryption string) int {
 		return 587
 	}
 }
-
-func envelopeSender(c conf) string { return c.str("from_address", "") }
 
 // composeMail builds one text/plain message.
 //
@@ -168,14 +207,25 @@ func composeMail(c conf, ev Event, to, cc []string) string {
 	headers.WriteString("Auto-Submitted: auto-generated\r\n")
 	headers.WriteString("\r\n")
 
-	encoded := base64.StdEncoding.EncodeToString([]byte(Title(ev) + "\n\n" + Body(ev) + "\n"))
+	headers.WriteString(base64Lines(Title(ev) + "\n\n" + Body(ev)))
+	return headers.String()
+}
+
+// base64Lines encodes a body and wraps it to the 76 columns RFC 2045 fixes.
+//
+// base64 rather than quoted-printable because SMTP's 998-octet line limit is a
+// real constraint and a user template — or an incident update somebody pasted a
+// URL into — can contain a line of any length.
+func base64Lines(body string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(body + "\n"))
+
+	var out strings.Builder
 	for len(encoded) > 76 {
-		headers.WriteString(encoded[:76] + "\r\n")
+		out.WriteString(encoded[:76] + "\r\n")
 		encoded = encoded[76:]
 	}
-	headers.WriteString(encoded + "\r\n")
-
-	return headers.String()
+	out.WriteString(encoded + "\r\n")
+	return out.String()
 }
 
 // Instance-wide SMTP.
@@ -219,11 +269,43 @@ func SetInstanceSMTP(settings InstanceSMTP) {
 }
 
 // InstanceSMTPConfigured reports whether a relay is available, which is what
-// decides whether an email channel asking for one is accepted.
+// decides whether an email channel asking for one is accepted — and whether a
+// status page can promise a subscriber anything at all.
 func InstanceSMTPConfigured() bool {
 	instanceSMTP.mu.RLock()
 	defer instanceSMTP.mu.RUnlock()
 	return instanceSMTP.settings.Configured()
+}
+
+// instanceRelay resolves the instance-wide relay for a caller that has no
+// channel config of its own. Status page bulletins are the case: a subscriber
+// belongs to a page, not to a notification channel, so there is nothing else for
+// them to inherit from.
+func instanceRelay() (relay, bool) {
+	instanceSMTP.mu.RLock()
+	settings := instanceSMTP.settings
+	instanceSMTP.mu.RUnlock()
+
+	if !settings.Configured() {
+		return relay{}, false
+	}
+	encryption := settings.Encryption
+	if encryption == "" {
+		encryption = "starttls"
+	}
+	port := settings.Port
+	if port == 0 {
+		port = defaultSMTPPort(encryption)
+	}
+	return relay{
+		host:       settings.Host,
+		port:       port,
+		encryption: encryption,
+		username:   settings.Username,
+		password:   settings.Password,
+		from:       settings.FromAddress,
+		fromName:   settings.FromName,
+	}, true
 }
 
 // withInstanceSMTP overlays the instance relay onto a channel's config.

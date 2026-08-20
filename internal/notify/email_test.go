@@ -144,8 +144,18 @@ type fakeSMTP struct {
 	host string
 	port int
 
-	mu    sync.Mutex
-	lines []string
+	mu       sync.Mutex
+	lines    []string
+	messages []sentMail
+}
+
+// sentMail is one complete message the server accepted. Captured per connection
+// rather than read out of the transcript, because a status page bulletin opens
+// several connections at once and an interleaved transcript cannot say which
+// body went to which address — which is exactly what those tests are about.
+type sentMail struct {
+	recipients []string
+	data       string
 }
 
 func newFakeSMTP(t *testing.T) *fakeSMTP {
@@ -164,13 +174,20 @@ func newFakeSMTP(t *testing.T) *fakeSMTP {
 	port, _ := strconv.Atoi(portText)
 	server := &fakeSMTP{host: host, port: port}
 
+	// A loop rather than a single Accept: a status page bulletin opens one
+	// connection per subscriber, and a server that answers the first and hangs
+	// up on the rest would make a fan-out test pass for the wrong reason.
 	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				server.serve(conn)
+			}()
 		}
-		defer func() { _ = conn.Close() }()
-		server.serve(conn)
 	}()
 	return server
 }
@@ -181,6 +198,7 @@ func (s *fakeSMTP) serve(conn net.Conn) {
 
 	write("220 fake ESMTP")
 	inData := false
+	current := sentMail{}
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -196,8 +214,14 @@ func (s *fakeSMTP) serve(conn net.Conn) {
 		if inData {
 			if line == "." {
 				inData = false
+				s.mu.Lock()
+				s.messages = append(s.messages, current)
+				s.mu.Unlock()
+				current = sentMail{}
 				write("250 2.0.0 Ok: queued")
+				continue
 			}
+			current.data += line + "\r\n"
 			continue
 		}
 
@@ -207,6 +231,15 @@ func (s *fakeSMTP) serve(conn net.Conn) {
 			write("250 8BITMIME")
 		case "HELO":
 			write("250 fake")
+		case "RCPT":
+			// "RCPT TO:<someone@example.com>". The verb is matched
+			// case-insensitively and the address is taken verbatim, because it
+			// is the thing being asserted on.
+			if _, address, found := strings.Cut(line, ":"); found {
+				current.recipients = append(current.recipients,
+					strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(address), "<"), ">"))
+			}
+			write("250 2.0.0 Ok")
 		case "DATA":
 			inData = true
 			write("354 End data with <CR><LF>.<CR><LF>")
@@ -217,6 +250,13 @@ func (s *fakeSMTP) serve(conn net.Conn) {
 			write("250 2.0.0 Ok")
 		}
 	}
+}
+
+// sent returns the messages the server has accepted so far.
+func (s *fakeSMTP) sent() []sentMail {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]sentMail(nil), s.messages...)
 }
 
 func (s *fakeSMTP) transcript() string {

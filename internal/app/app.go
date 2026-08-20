@@ -118,7 +118,8 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	// The dispatcher is fire-and-forget by design. Ingest must never block on a
 	// mail server, because the moment alerting is under strain is exactly the
 	// moment heartbeats matter most.
-	alerts := notify.NewDispatcher(store, notify.NewVault(keeper), notify.NewSender(),
+	sender := notify.NewSender()
+	alerts := notify.NewDispatcher(store, notify.NewVault(keeper), sender,
 		notify.Instance{Name: cfg.InstanceName, BaseURL: cfg.BaseURL, Version: version.Version},
 		log.With("component", "notify"))
 	alerts.Start(ctx)
@@ -135,6 +136,15 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		notify.Instance{Name: cfg.InstanceName, BaseURL: cfg.BaseURL, Version: version.Version},
 		log.With("component", "outbound"))
 	webhooks.Start(ctx)
+
+	// Status page subscribers are a third destination and a different audience:
+	// people who are not the operator, reached through the instance relay rather
+	// than through a channel they configured. It stays out of the fan-out below
+	// because a bulletin is not an event — it goes to the subscribers of the
+	// pages an incident names, which is a question only the incident can answer.
+	subscribers := notify.NewRelay(store, secrets.NewVault(keeper, "subscribers", "target"),
+		sender, log.With("component", "subscribers"))
+	subscribers.Start(ctx)
 
 	// One publisher in front of both, so a caller raising an event does not have
 	// to know how many destinations there are — and so adding a third is a line
@@ -211,7 +221,8 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	apiServer := api.New(store, publisher, sweeps, cp, events, registry, keeper,
 		log.With("component", "api"), cfg.InstanceName).
 		WithOutbound(webhooks).
-		WithRetuner(rollups)
+		WithRetuner(rollups).
+		WithSubscribers(subscribers)
 
 	// Stored settings are applied before the listener opens, so an install
 	// configured yesterday behaves today the way it was configured rather than
@@ -261,6 +272,10 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	alerts.Wait()
 	if dropped := alerts.Dropped(); dropped > 0 {
 		log.Warn("notifications were dropped because the queue was full", "count", dropped)
+	}
+	subscribers.Wait()
+	if dropped := subscribers.Dropped(); dropped > 0 {
+		log.Warn("status page bulletins were dropped because the queue was full", "count", dropped)
 	}
 
 	// Buffered results that were never acknowledged are lost here: the probe

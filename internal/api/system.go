@@ -10,6 +10,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
 	"github.com/webloomlabs/uptime-cairn/internal/version"
@@ -71,6 +72,13 @@ func (s *Server) capabilities(r *http.Request) map[string]bool {
 		"bulk_operations":    true,
 		"kuma_import":        false,
 		"certificate_detail": true,
+
+		// Three facts about this process, not a setting. A status page can offer
+		// a subscribe box only if there is somewhere to deliver from, a relay to
+		// deliver through, and a base URL to put in the confirmation link — and
+		// a form that takes an address the install cannot write to is worse than
+		// no form, because the person who used it believes they will be told.
+		"subscriber_delivery": s.relay != nil && s.baseURL != "" && notify.InstanceSMTPConfigured(),
 	}
 	if _, ok := s.registry.Lookup(model.TypeICMP); ok {
 		caps["icmp"] = true

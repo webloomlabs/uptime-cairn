@@ -263,6 +263,60 @@ published list. Worth resolving before either document is quoted at anyone:
   has those twelve plus Apprise, which makes thirteen channel types in total —
   which may well be what was meant.
 
+## Links a status page sends to its subscribers
+
+Subscriber mail carries three absolute URLs, and none of them is an API endpoint.
+They are recorded here because they are a contract between the mail the server
+sends today and the frontend that has to answer them — a link in somebody's inbox
+outlives any amount of refactoring, so these paths are fixed now rather than
+chosen later.
+
+| URL | What answers it |
+|---|---|
+| `{base_url}/status/{slug}` | The public page. A page with a custom domain links to `https://{custom_domain}` instead. |
+| `{base_url}/subscriptions/confirm/{token}` | A frontend page that completes double opt-in by calling `POST /api/v1/public/subscriptions/{token}`. |
+| `{base_url}/subscriptions/unsubscribe/{token}` | A frontend page that calls `DELETE /api/v1/public/subscriptions/{token}`. |
+
+The two subscription links are frontend routes rather than the API operations
+themselves because a link in an email is followed with `GET`, and neither
+operation is a `GET`. **The frontend does not implement them yet** — the UI is
+Month 3 — so a subscriber who follows one today reaches the SPA shell. The
+messages are still correct and the API operations behind them work; what is
+missing is the two pages that call them.
+
+`base_url` comes from `general.base_url` in `/api/v1/settings` and is required:
+with none configured, a bulletin is recorded as `suppressed` with that reason
+rather than sent. Deriving one from whichever request triggered the incident
+would put whatever hostname the operator's browser used into a customer's inbox.
+
+`List-Unsubscribe` carries the unsubscribe URL as a plain link and deliberately
+*not* as RFC 8058 one-click, because one-click `POST`s to the URL it is given and
+a `POST` to a subscription token is the confirm operation on this API. A client
+helpfully unsubscribing somebody would confirm them instead.
+
+### The webhook subscriber payload
+
+A subscriber whose channel is `webhook` receives a `POST` with this body. It is
+not `EventEnvelope`: that shape is aimed at an operator's own integration and
+carries a monitor, while this one is aimed at whoever runs a receiver on behalf
+of a status page audience.
+
+```json
+{
+  "event": "incident.updated",
+  "status_page": { "id": "…", "slug": "acme", "title": "Acme Status", "url": "https://…/status/acme" },
+  "incident": { "id": "…", "title": "…", "state": "identified", "impact": "major",
+                "started_at": "…", "resolved_at": "…" },
+  "update": "The words the operator wrote in the timeline entry.",
+  "unsubscribe_url": "https://…/subscriptions/unsubscribe/…",
+  "occurred_at": "…"
+}
+```
+
+`event` is `incident.opened`, `incident.updated`, `incident.resolved`, or
+`subscription.confirmation` — the last of which carries `confirm_url` instead of
+`incident` and `update`. `resolved_at` is absent until the incident is resolved.
+
 ## Deliberately absent
 
 - **Tenancy.** No `org_id` field and no organisation endpoints, per

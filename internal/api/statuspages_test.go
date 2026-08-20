@@ -306,3 +306,115 @@ func pageID(t *testing.T, c *client, slug string) string {
 	t.Fatalf("no status page with slug %q", slug)
 	return ""
 }
+
+// The confirmation is what makes double opt-in a promise rather than a column:
+// without it the row sits unconfirmed forever and nothing is ever delivered.
+func TestSubscribingQueuesAConfirmation(t *testing.T) {
+	t.Parallel()
+
+	server, _, api := testAPI(t)
+	c := newClient(t, server)
+	c.setup()
+
+	// A base URL, because every link in the message is absolute — there is no
+	// request to derive one from by the time an incident update goes out.
+	c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"general": map[string]any{"base_url": "https://cairn.example.com"},
+	})
+	createStatusPage(t, c, map[string]any{
+		"slug": "status", "title": "Acme", "published": true, "subscriptions_enabled": true,
+	})
+
+	resp, body := c.do(http.MethodPost, "/api/v1/public/status-pages/status/subscribers",
+		map[string]any{"channel": "email", "target": "alice@example.com"})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("subscribe = %d (%v)", resp.StatusCode, body)
+	}
+
+	confirmations, _ := relayOf(t, api).sent()
+	if len(confirmations) != 1 {
+		t.Fatalf("queued %d confirmations, want 1", len(confirmations))
+	}
+
+	sent := confirmations[0]
+	if sent.Target != "alice@example.com" {
+		t.Errorf("target = %q", sent.Target)
+	}
+	if sent.Token == "" || sent.UnsubscribeToken == "" {
+		t.Error("a confirmation went out without one of its tokens; both exist only in this request")
+	}
+	if sent.BaseURL != "https://cairn.example.com" {
+		t.Errorf("base URL = %q", sent.BaseURL)
+	}
+	// The envelopes are on the row before the message is queued: the relay opens
+	// them on every later notification, and a row without them is a subscriber
+	// who can never be written to.
+	if len(sent.Subscriber.SealedTarget) == 0 || len(sent.Subscriber.SealedUnsubscribeToken) == 0 {
+		t.Error("the stored row is missing an envelope")
+	}
+	// And neither token is stored in the clear: what the row holds is a hash of
+	// the first and an envelope around the second.
+	if string(sent.Subscriber.ConfirmTokenHash) == sent.Token {
+		t.Error("the confirmation token is stored in plaintext")
+	}
+
+	// A repeat request sends nothing. The answer is identical either way, which
+	// is what keeps the endpoint from being a membership oracle — but a second
+	// message would make it a way to mail somebody repeatedly.
+	c.do(http.MethodPost, "/api/v1/public/status-pages/status/subscribers",
+		map[string]any{"channel": "email", "target": "alice@example.com"})
+	if confirmations, _ := relayOf(t, api).sent(); len(confirmations) != 1 {
+		t.Errorf("a repeat subscription queued %d confirmations, want 1", len(confirmations))
+	}
+}
+
+// The full round trip a subscriber takes: confirm with the token from the
+// message, then leave with the other one.
+func TestConfirmThenUnsubscribe(t *testing.T) {
+	t.Parallel()
+
+	server, _, api := testAPI(t)
+	c := newClient(t, server)
+	c.setup()
+	created := createStatusPage(t, c, map[string]any{
+		"slug": "status", "title": "Acme", "published": true, "subscriptions_enabled": true,
+	})
+	id := created["id"].(string)
+
+	c.do(http.MethodPost, "/api/v1/public/status-pages/status/subscribers",
+		map[string]any{"channel": "email", "target": "alice@example.com"})
+	confirmations, _ := relayOf(t, api).sent()
+	if len(confirmations) != 1 {
+		t.Fatalf("queued %d confirmations", len(confirmations))
+	}
+	sent := confirmations[0]
+
+	resp, body := c.do(http.MethodPost, "/api/v1/public/subscriptions/"+sent.Token, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("confirm = %d (%v)", resp.StatusCode, body)
+	}
+
+	_, listed := c.do(http.MethodGet, "/api/v1/status-pages/"+id+"/subscribers", nil)
+	entry := listed["data"].([]any)[0].(map[string]any)
+	if entry["confirmed"] != true {
+		t.Fatalf("confirmed = %v after following the link", entry["confirmed"])
+	}
+
+	// One click, no login, no confirmation step: making somebody prove who they
+	// are to stop receiving mail is how a status page gets reported as spam.
+	resp, _ = c.do(http.MethodDelete, "/api/v1/public/subscriptions/"+sent.UnsubscribeToken, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("unsubscribe = %d", resp.StatusCode)
+	}
+
+	_, listed = c.do(http.MethodGet, "/api/v1/status-pages/"+id+"/subscribers", nil)
+	if remaining := listed["data"].([]any); len(remaining) != 0 {
+		t.Errorf("subscribers = %v, want none after unsubscribing", remaining)
+	}
+
+	// The spent confirmation token is not a second way back in.
+	resp, _ = c.do(http.MethodPost, "/api/v1/public/subscriptions/"+sent.Token, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("a spent token answered %d, want 404", resp.StatusCode)
+	}
+}

@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"testing"
+
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
 func openIncident(t *testing.T, c *client, title string, extra map[string]any) map[string]any {
@@ -217,5 +219,105 @@ func TestIncidentRefusesAMonitorThatDoesNotExist(t *testing.T) {
 	// Named field, not a foreign-key error nobody can map back.
 	if pointer := firstErrorPointer(body); pointer != "/monitor_ids" {
 		t.Fatalf("pointer = %q, want /monitor_ids", pointer)
+	}
+}
+
+// Who hears about an incident, and when the operator has said not to tell them.
+//
+// The default is to notify — somebody posting a public incident update has
+// already decided to be public — but notify_subscribers exists precisely for the
+// internal note that must not reach a customer, and a bug in that check is only
+// visible from outside the company.
+func TestIncidentUpdatesReachStatusPageSubscribers(t *testing.T) {
+	t.Parallel()
+
+	server, _, api := testAPI(t)
+	c := newClient(t, server)
+	c.setup()
+	c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"general": map[string]any{"base_url": "https://cairn.example.com"},
+	})
+
+	monitor := createHTTPMonitor(t, c, "Checkout")
+	page := createStatusPage(t, c, map[string]any{
+		"slug": "status", "title": "Acme", "published": true, "subscriptions_enabled": true,
+		"sections": []map[string]any{{"name": "Core", "monitor_ids": []string{monitor}}},
+	})
+	pageIdentifier := page["id"].(string)
+
+	incident := openIncident(t, c, "Checkout is failing", map[string]any{
+		"monitor_ids": []string{monitor}, "status_page_ids": []string{pageIdentifier},
+		"body": "Investigating elevated errors.",
+	})
+	id := incident["id"].(string)
+
+	_, announcements := relayOf(t, api).sent()
+	if len(announcements) != 1 {
+		t.Fatalf("opening the incident queued %d announcements, want 1", len(announcements))
+	}
+	opened := announcements[0]
+	if opened.EventType != model.EventIncidentOpened {
+		t.Errorf("event = %q", opened.EventType)
+	}
+	if len(opened.PageIDs) != 1 || opened.PageIDs[0].String() != pageIdentifier {
+		t.Errorf("pages = %v, want only the page the incident names", opened.PageIDs)
+	}
+	if opened.Update != "Investigating elevated errors." {
+		t.Errorf("update = %q, want the opening note verbatim", opened.Update)
+	}
+	if opened.Incident.Title != "Checkout is failing" || opened.BaseURL != "https://cairn.example.com" {
+		t.Errorf("announcement = %+v", opened)
+	}
+
+	// An internal note. The timeline still records it — the operator's own
+	// history is not edited — and nobody outside is told.
+	resp, body := c.do(http.MethodPost, "/api/v1/incidents/"+id+"/updates",
+		map[string]any{"body": "Suspect the payment provider. Do not publish.", "notify_subscribers": false})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("post update = %d (%v)", resp.StatusCode, body)
+	}
+	if _, announcements := relayOf(t, api).sent(); len(announcements) != 1 {
+		t.Fatalf("an update marked notify_subscribers=false was announced anyway: %d", len(announcements))
+	}
+
+	// Resolving is the message a subscriber is actually waiting for, and it is
+	// announced under its own event type rather than as one more update.
+	resp, body = c.do(http.MethodPost, "/api/v1/incidents/"+id+"/updates",
+		map[string]any{"body": "The provider recovered.", "state": "resolved"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("resolve = %d (%v)", resp.StatusCode, body)
+	}
+
+	_, announcements = relayOf(t, api).sent()
+	if len(announcements) != 2 {
+		t.Fatalf("queued %d announcements, want 2", len(announcements))
+	}
+	resolved := announcements[1]
+	if resolved.EventType != model.EventIncidentResolved {
+		t.Errorf("event = %q, want %q", resolved.EventType, model.EventIncidentResolved)
+	}
+	if resolved.Incident.ResolvedAt == nil {
+		t.Error("the resolution carried no resolved_at, which is the one fact it is for")
+	}
+}
+
+// An incident attached to no status page has no subscribers to tell. Announcing
+// it would mean sending somebody an incident about a monitor they cannot see.
+func TestIncidentWithNoStatusPageAnnouncesNothing(t *testing.T) {
+	t.Parallel()
+
+	server, _, api := testAPI(t)
+	c := newClient(t, server)
+	c.setup()
+	monitor := createHTTPMonitor(t, c, "Checkout")
+
+	incident := openIncident(t, c, "Internal only", map[string]any{
+		"monitor_ids": []string{monitor}, "body": "Nobody outside needs this.",
+	})
+	c.do(http.MethodPost, "/api/v1/incidents/"+incident["id"].(string)+"/updates",
+		map[string]any{"body": "Still looking."})
+
+	if _, announcements := relayOf(t, api).sent(); len(announcements) != 0 {
+		t.Errorf("an incident with no status page queued %d announcements", len(announcements))
 	}
 }

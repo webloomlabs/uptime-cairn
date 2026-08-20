@@ -183,9 +183,10 @@ carried forward.
 ## Status pages
 
 - [x] Multiple pages per install, monitor and group selection — ordered sections, a monitor in at most one section per page, and a slug collision answered `409` naming what is taken
+- [ ] The two frontend routes subscriber mail links to — `/subscriptions/confirm/{token}` and `/subscriptions/unsubscribe/{token}`, plus `/status/{slug}` for the page itself ([the contract is written down](../api/README.md#links-a-status-page-sends-to-its-subscribers)). The messages are correct and the API operations behind them work; a link followed today reaches the SPA shell, because a link in an inbox is a `GET` and neither operation is one. This is UI work and lands with the UI
 - [ ] Custom domains, with reverse-proxy and ACME documentation — **the column and its cross-organisation uniqueness are enforced; the reverse-proxy and ACME recipes are not written**, and a hostname without them routes nowhere
 - [x] Uptime bars, incident and maintenance display — read from the 1d rollup tier, and a day with no observations carries a null ratio rather than being drawn as downtime, which is the single most common way a status page lies
-- [x] Subscribe-to-updates via the API — double opt-in, the address encrypted at rest because a notification replays it, and a repeat request answered identically to a first so the endpoint is not a membership oracle. **Nothing delivers to a subscriber yet:** confirmation and notification mail need the instance relay wired to a sender, which is the next thing this unblocks
+- [x] Subscribe-to-updates via the API, and delivery to the people who subscribed — double opt-in with the confirmation actually sent through the instance relay, and incident updates announced to the confirmed subscribers of every page an incident names, when `notify_subscribers` says to. Email and webhook subscribers both. Every message carries a one-click unsubscribe link, and a message whose link cannot be rendered is not sent at all: the token is stored hashed *and* encrypted (migration `0005`), because it is verified when somebody follows it and replayed at the foot of every message, and a subscription predating that column is issued a fresh token on first use rather than mailed without one. Bulletins are recorded in `notification_deliveries` against their incident, so "did my customers hear about the outage" has an answer. **Two conditions, both reported rather than assumed:** with no instance SMTP relay or no `general.base_url`, a bulletin is recorded `suppressed` naming which is missing, and `/system/info` reports `subscriber_delivery: false` so a dashboard can hide a subscribe box the install cannot honour
 - [ ] Unauthenticated read path that holds up under load — it exists and is correct, and "under load" is a claim the load-test harness has to make
 
 ## REST API
@@ -283,16 +284,13 @@ carried forward.
 
 ## What to do next, and why in this order
 
-1. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
-   and double opt-in, and nothing sends the confirmation mail. The instance relay
-   now exists to send it through.
-2. **The assignment reload itself.** The reader pool moved it off the write
+1. **The assignment reload itself.** The reader pool moved it off the write
    connection; it is still an O(N) scan of every assignable monitor, and creation
    still slows as the install grows — it is simply no longer blocking anything
    while it does. What is left is the cost of the scan rather than the queue in
    front of it, and `cairn_db_pool_wait_total` is now the number that tells the
    two apart.
-3. **The load test against the observation path.** The 5,000-monitor gate has
+2. **The load test against the observation path.** The 5,000-monitor gate has
    never run with certificates on the wire. The arithmetic says it is on the order
    of one row a second and a few hundred extra bytes on one result an hour per
    monitor, and the harness is what turns that from arithmetic into a number —

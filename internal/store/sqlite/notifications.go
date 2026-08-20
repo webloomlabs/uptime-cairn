@@ -367,10 +367,10 @@ func (s *Store) RecordDelivery(ctx context.Context, d model.NotificationDelivery
 		INSERT INTO notification_deliveries (
 			id, org_id, monitor_id, channel_id, event_type, incident_id,
 			outcome, error, duration_ms, attempt, rendered_payload, created_at
-		) VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?)`,
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 		d.ID[:], d.OrgID[:], nullID(d.MonitorID), nullID(d.ChannelID), d.EventType,
-		d.Outcome, nullString(d.Error), nullFloat(d.DurationMs), d.Attempt,
-		nullString(d.RenderedPayload), millis(d.CreatedAt))
+		nullID(d.IncidentID), d.Outcome, nullString(d.Error), nullFloat(d.DurationMs),
+		d.Attempt, nullString(d.RenderedPayload), millis(d.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("record notification delivery: %w", err)
 	}
