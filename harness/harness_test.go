@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -219,5 +220,52 @@ func TestPercentilesAreOrdered(t *testing.T) {
 	}
 	if stat.P95() != 95*time.Millisecond {
 		t.Errorf("p95 = %s, want 95ms", stat.P95())
+	}
+}
+
+// A growth ratio between two runs that returned different numbers of rows is
+// not a growth ratio. This is the check that turned a passing gate red on a
+// history scenario whose sample was one bucket against two — the same build
+// produced 257µs and 1.618ms minutes apart, purely on where the clock fell.
+func TestGrowthIsNotJudgedOnIncomparableSamples(t *testing.T) {
+	t.Parallel()
+
+	scenarios := []Scenario{{Name: "history", RangeBounded: true, MaxGrowth: 3.0}}
+
+	coinFlip := []ScaleResult{
+		{Scale: 500, Stats: map[string]*Stat{"history": {Rows: 1, Durations: []time.Duration{285 * time.Microsecond}}}},
+		{Scale: 5000, Stats: map[string]*Stat{"history": {Rows: 2, Durations: []time.Duration{1489 * time.Microsecond}}}},
+	}
+	findings := Evaluate(scenarios, coinFlip, 0)
+	if len(findings) != 1 {
+		t.Fatalf("one bucket against two produced %v", findings)
+	}
+	if findings[0].Failed {
+		t.Error("a sample too small to read was reported as a failure")
+	}
+	if !strings.Contains(findings[0].Detail, "not compared") {
+		t.Errorf("detail = %q, want it to say the comparison was not made", findings[0].Detail)
+	}
+
+	// Same row count at both scales: the comparison is valid and the cap applies.
+	real := []ScaleResult{
+		{Scale: 500, Stats: map[string]*Stat{"history": {Rows: 2, Durations: []time.Duration{285 * time.Microsecond}}}},
+		{Scale: 5000, Stats: map[string]*Stat{"history": {Rows: 2, Durations: []time.Duration{1489 * time.Microsecond}}}},
+	}
+	findings = Evaluate(scenarios, real, 0)
+	if len(findings) != 1 || !findings[0].Failed {
+		t.Fatalf("a 5x growth over an equal sample produced %v", findings)
+	}
+
+	// And a large sample at both ends, where one row either way cannot be the
+	// whole signal.
+	big := []ScaleResult{
+		{Scale: 500, Stats: map[string]*Stat{"history": {Rows: 60, Durations: []time.Duration{285 * time.Microsecond}}}},
+		{Scale: 5000, Stats: map[string]*Stat{"history": {Rows: 61, Durations: []time.Duration{400 * time.Microsecond}}}},
+	}
+	for _, f := range Evaluate(scenarios, big, 0) {
+		if strings.Contains(f.Detail, "not compared") {
+			t.Errorf("a sixty-bucket sample was dismissed as too small: %v", f)
+		}
 	}
 }

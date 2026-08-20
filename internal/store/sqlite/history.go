@@ -44,7 +44,7 @@ func (s *Store) RawCovers(ctx context.Context, id model.ID, from time.Time, tier
 	}
 
 	var rawMin, tierMin sql.NullInt64
-	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+	err := s.ro.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT (SELECT MIN(time) FROM heartbeats WHERE org_id = ?1 AND monitor_id = ?2),
 		       (SELECT MIN(bucket_start) FROM heartbeat_%s WHERE monitor_id = ?2)`, tier),
 		model.SentinelOrgID[:], id[:]).Scan(&rawMin, &tierMin)
@@ -129,7 +129,7 @@ SELECT agg.bucket_start, agg.up_count, agg.down_count, agg.pending_count,
 FROM agg LEFT JOIN p95 ON p95.bucket_start = agg.bucket_start
 ORDER BY agg.bucket_start`, micros, micros)
 
-	rows, err := s.db.QueryContext(ctx, query,
+	rows, err := s.ro.QueryContext(ctx, query,
 		model.SentinelOrgID[:], id[:], from.UnixMicro(), to.UnixMicro())
 	if err != nil {
 		return nil, fmt.Errorf("history from raw: %w", err)
@@ -157,7 +157,7 @@ func (s *Store) HistoryFromTier(ctx context.Context, id model.ID, from, to time.
 		WHERE monitor_id = ? AND bucket_start >= ? AND bucket_start < ?
 		ORDER BY bucket_start`, p95, tier)
 
-	rows, err := s.db.QueryContext(ctx, query, id[:], from.UnixMilli(), to.UnixMilli())
+	rows, err := s.ro.QueryContext(ctx, query, id[:], from.UnixMilli(), to.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("history from %s: %w", tier, err)
 	}
@@ -224,7 +224,7 @@ SELECT SUM(status = 1), SUM(status = 0), SUM(status = 2), SUM(status = 3),
        (SELECT response_time_ms FROM ranked WHERE rn = (n * 95 + 99) / 100)
 FROM sample`
 
-	row := s.db.QueryRowContext(ctx, query,
+	row := s.ro.QueryRowContext(ctx, query,
 		model.SentinelOrgID[:], id[:], from.UnixMicro(), to.UnixMicro())
 	return scanUptime(row, from)
 }
@@ -243,7 +243,7 @@ func (s *Store) UptimeFromTier(ctx context.Context, id model.ID, from, to time.T
 		FROM heartbeat_%s
 		WHERE monitor_id = ? AND bucket_start >= ? AND bucket_start < ?`, tier)
 
-	row := s.db.QueryRowContext(ctx, query, id[:], from.UnixMilli(), to.UnixMilli())
+	row := s.ro.QueryRowContext(ctx, query, id[:], from.UnixMilli(), to.UnixMilli())
 	return scanUptime(row, from)
 }
 
@@ -298,7 +298,7 @@ func (s *Store) DailyUptime(ctx context.Context, ids []model.ID, from, to time.T
 	for _, id := range ids {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT monitor_id, bucket_start, up_count, down_count
 		FROM heartbeat_1d
 		WHERE bucket_start >= ? AND bucket_start < ? AND monitor_id IN (`+placeholders(len(ids))+`)

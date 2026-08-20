@@ -90,13 +90,29 @@ built around comparison:
 2. **p95 must not grow more than its declared factor** between the smallest and
    largest scale. A 10× increase in monitors with a >3× increase in page-fetch
    latency means the index is not doing its job.
+
+   Only when the two runs did the same work, though. Two p95s are a growth ratio
+   if the row counts match — a page is 25 rows at every scale — or if both are
+   large enough that one row either way cannot be the signal. Otherwise the
+   figures are printed and no verdict is given, because a ratio between a query
+   that returned one row and one that returned two is measuring which query ran.
 3. **Absolute ceilings** are a generous backstop for order-of-magnitude
    regressions only.
 4. **Sustained write rate.** On the SQLite target, clear 250 heartbeats/sec —
    what 5,000 monitors on the 20-second floor require. On the HTTP target, come
    within 15% of the rate the schedule implies, and shed nothing while doing it.
 5. **A total partition** must mark every monitor down inside two intervals, bring
-   them all back, and lose no alerts on the way.
+   them all back, and lose no alerts on the way. "All" means back to the
+   pre-partition baseline, which is sampled twice an interval apart and only
+   accepted once it stops moving — a monitor is `pending` until it has been
+   checked, and a baseline read mid-sweep sets a recovery target that can never
+   be reached.
+
+The engine target also reports **how much of a slow path was queueing**, read
+from `cairn_db_pool_wait_total{pool="writer"}` either side of the creation phase.
+A rate that falls while that counter stays flat is work getting harder; the same
+rate with it climbing is a queue behind somebody else's write. Not asserted on —
+it is a diagnostic for the numbers that are.
 
 The membership scenarios deliberately have **no growth bound**. `COUNT(*)` over
 an index is inherently O(n), so it is expected to grow; the number is reported
@@ -233,12 +249,28 @@ building this kind of thing rather than reasoning about the numbers:
   which reloaded and re-diffed the whole set: 2,116 full recomputations for 5,000
   creations, and the run never finished. The publisher now settles for a second
   before recomputing, which is invisible against a 20-second floor.
-- **Monitor creation still degrades with size** — 1,144/sec at 500 monitors,
-  38/sec at 5,000. The reload holds the store's single connection while it scans
-  every assignable monitor, so writes queue behind it. That is the open "reader
-  pool alongside the single writer" item, now with a number against it. Reported
-  as a finding rather than a failure: there is no product commitment about
-  creation speed, and inventing one here would be the harness making policy.
+- **Monitor creation was queued behind the store's one connection.** The reload
+  holds it while it scans every assignable monitor, and every write queues
+  behind that. Three back-to-back pairs on the same machine, because the absolute
+  figures move with whatever else the machine is doing and only the pair means
+  anything: at 5,000 monitors, 73, 36 and 60 creations/sec on one connection
+  against 105, 142 and 99 with a reader pool alongside it. Roughly double, every
+  run.
+
+  Creation still slows as the install grows — 1,861/sec at 500 against 173/sec at
+  5,000 — but the queue is no longer where the time goes, and the harness now
+  says so rather than leaving it to be argued:
+
+  ```
+  created 5000 monitors through the API in 28.683s (174/sec)
+    2676 statements queued for the write connection, 1.301s in total, 486µs each
+  ```
+
+  1.3 seconds of queueing across eight workers inside 28.7 seconds of creation.
+  What remains is the O(N) reload itself, now merely running somewhere it blocks
+  nothing. Reported as a finding rather than a failure: there is no product
+  commitment about creation speed, and inventing one here would be the harness
+  making policy.
 - **A gate threshold was wrong, and had never run.** `list: filter status=down`
   capped growth at 4.0x and measured 4.8x at 500→5,000 — scales it had never
   reached, because the harness had no committed `go.sum` and CI refused it first.
@@ -255,3 +287,24 @@ building this kind of thing rather than reasoning about the numbers:
   counted by check time said 250/sec, rows counted by write time said 500, and
   both were true. The warm-up now waits for the observed rate to settle rather
   than sleeping a fixed interval and hoping.
+- **Two of its own assertions were coin flips**, found while measuring the reader
+  pool and fixed before its result could be read at all — a gate that goes red at
+  random cannot tell you whether a change helped.
+
+  *Recovery* compared against a down-count sampled once, before the partition.
+  But a monitor is `pending` until it has actually been checked, and at 5,000
+  monitors the first sweep is still running when the write window ends: the probe
+  reported 4,923 checks started against 5,000 monitors. A baseline one too low
+  makes the recovery target one too high — a number that can never be reached, a
+  wait that runs to its deadline, and a report that the engine failed to recover
+  a monitor which was never up. The baseline is now two agreeing samples an
+  interval apart.
+
+  *Growth* compared two p95s without asking whether the two runs had done the
+  same work. `history` reads whatever the engine produced during warm-up, which
+  lands on nought, one or two one-minute buckets depending on where the clock
+  fell; the same build produced 257µs and 1.618ms minutes apart, and the ratio
+  between two such runs is a measurement of which query ran rather than of scale.
+  A ratio is now only computed when both scales returned the same number of rows,
+  or enough rows that one either way cannot be the signal. Otherwise both figures
+  are printed and no verdict is given.

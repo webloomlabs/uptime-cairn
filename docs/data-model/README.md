@@ -763,7 +763,7 @@ with the write rate.
 | Row-value cursor | Supported (3.15+) | Supported |
 | Partial index | Supported | Supported |
 | Foreign keys | **`PRAGMA foreign_keys = ON` per connection** | On by default |
-| Concurrency | Single writer, WAL | MVCC |
+| Concurrency | One writer, a pool of readers, WAL | MVCC |
 
 **SQLite pragmas** are part of the schema contract, not incidental setup, and
 belong in the connection initialiser where they cannot be forgotten:
@@ -775,6 +775,30 @@ PRAGMA busy_timeout = 5000;        -- single writer: wait rather than fail
 PRAGMA synchronous = NORMAL;       -- safe with WAL; FULL costs an fsync per commit
 PRAGMA auto_vacuum = INCREMENTAL;  -- must be set before first write, see §9.2
 ```
+
+**Two pools, and the split is a correctness boundary rather than a tuning knob.**
+SQLite takes one write lock per database, so the write pool is exactly one
+connection and stays that way. WAL's other half is that readers run against a
+committed snapshot without taking that lock at all, so reads get their own pool,
+opened `mode=ro` — a scan of every assignable monitor no longer sits in front of
+the writes queued behind it.
+
+What makes the split safe is the writer staying at one. Every check-then-act in
+the store does its check inside a transaction on the write connection — a tag
+slug that is already taken, a status-page subscriber that already exists — and
+those are exact because there is one write connection, therefore one such
+transaction at a time. A check that moved to the read pool would stop being
+exact and start being a race that shows up as a duplicate row once a month.
+Reads that return, on the read pool; reads a write depends on, on the writer.
+
+`mode=ro` is enforcement rather than convention: routing is decided per call
+site, and the operating system refusing the write turns a mistake into an
+immediate failure instead of a rare lock error under load. The cost is one new
+failure mode worth knowing about — an unclosed result set now holds a read
+snapshot, which blocks WAL checkpointing and grows the `-wal` file quietly,
+where against a single shared connection it would have deadlocked the next
+statement. `cairn_db_pool_in_use_connections{pool="reader"}` sitting above zero
+on an idle instance is what that looks like.
 
 `synchronous = NORMAL` under WAL risks losing the last commits on OS or power
 failure, not corruption — **decided** ([§11.7](#117-sqlite-durability-setting)).

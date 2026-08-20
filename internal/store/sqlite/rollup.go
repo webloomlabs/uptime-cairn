@@ -161,7 +161,7 @@ func (s *Store) bucketBound(ctx context.Context, fn string, tier rollup.Tier) (t
 	query := fmt.Sprintf(`SELECT %s(bucket_start) FROM heartbeat_%s`, fn, tier.Name)
 
 	var value sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, query).Scan(&value); err != nil {
+	if err := s.ro.QueryRowContext(ctx, query).Scan(&value); err != nil {
 		return time.Time{}, fmt.Errorf("%s bucket in %s: %w", fn, tier.Name, err)
 	}
 	if !value.Valid {
@@ -173,7 +173,7 @@ func (s *Store) bucketBound(ctx context.Context, fn string, tier rollup.Tier) (t
 // EarliestRaw is the oldest heartbeat, used to bootstrap the 1m tier.
 func (s *Store) EarliestRaw(ctx context.Context) (time.Time, error) {
 	var value sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT MIN(time) FROM heartbeats`).Scan(&value); err != nil {
+	if err := s.ro.QueryRowContext(ctx, `SELECT MIN(time) FROM heartbeats`).Scan(&value); err != nil {
 		return time.Time{}, fmt.Errorf("earliest heartbeat: %w", err)
 	}
 	if !value.Valid {
@@ -345,6 +345,13 @@ var purgeTables = []string{
 // PurgeNext deletes one batch of the oldest queued entity's history.
 //
 // Returns done=true when the queue is empty.
+//
+// The head read stays on the writer while every other read in this file moved to
+// the reader pool. It is a dequeue, not a query: the row it picks is the row the
+// deletes below act on, and reading it on the same connection that does the
+// deleting is what keeps "which entity am I purging" from drifting between the
+// two. It costs nothing — one indexed row, once per batch — where the scans
+// above cost a table.
 func (s *Store) PurgeNext(ctx context.Context, limit int) (int64, bool, error) {
 	var (
 		entityType string
@@ -395,6 +402,10 @@ func (s *Store) IncrementalVacuum(ctx context.Context, pages int) error {
 
 // AutoVacuumMode reports the database's auto_vacuum setting: 0 none,
 // 1 full, 2 incremental.
+//
+// On the writer deliberately. This exists to confirm that the writer's DSN took
+// effect, and asking a different connection whether the first one is configured
+// correctly answers a question nobody asked.
 func (s *Store) AutoVacuumMode(ctx context.Context) (int, error) {
 	var mode int
 	if err := s.db.QueryRowContext(ctx, "PRAGMA auto_vacuum").Scan(&mode); err != nil {

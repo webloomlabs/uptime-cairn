@@ -210,6 +210,7 @@ func (s *Server) getPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 
 	writeEngineMetrics(&b)
 	writeProbeMetrics(&b)
+	s.writePoolMetrics(&b)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -334,6 +335,65 @@ func writeEngineMetrics(b *strings.Builder) {
 	b.WriteString("\n# HELP cairn_process_uptime_seconds Seconds since this process started.\n")
 	b.WriteString("# TYPE cairn_process_uptime_seconds gauge\n")
 	fmt.Fprintf(b, "cairn_process_uptime_seconds %d\n", int64(telemetry.Uptime(time.Now()).Seconds()))
+}
+
+// writePoolMetrics reports the store's connection pools.
+//
+// Asked for rather than required, the same way the outbound queue's drop counter
+// is: the store arrives here as the consumer-defined interface ADR-002 asks for,
+// which describes what the API needs from a store and says nothing about
+// connections — a backend may not have a pool at all. A backend that has one
+// reports it; one that does not stays silent, and neither has to change.
+//
+// The pair to read together is cairn_db_pool_wait_total on the writer and the
+// latency of whatever endpoint is slow. SQLite takes one write lock per
+// database, so the writer pool is one connection by construction and its wait
+// count is the queue depth in front of it. Reads run on a separate read-only
+// pool and no longer join that queue, which is the whole point: before, a scan
+// of every assignable monitor held the one connection every write also needed,
+// and monitor creation fell from 1,144/sec to 38/sec as the install grew — a
+// number the load-test harness produced and this pool exists to answer.
+//
+// cairn_db_pool_in_use_connections on the reader is the other one worth an
+// alert, for a failure the pool introduced. A result set that is never closed
+// holds its connection and, in WAL, holds a read snapshot that stops the write
+// ahead log being checkpointed — so the disk grows and nothing else complains.
+// With one shared connection that mistake deadlocked the process on the next
+// statement, which is unpleasant but impossible to miss. Now it leaks quietly,
+// and this gauge sitting at a floor above zero while the instance is idle is
+// what it looks like.
+func (s *Server) writePoolMetrics(b *strings.Builder) {
+	reporter, ok := s.store.(interface{ Pools() []telemetry.Pool })
+	if !ok {
+		return
+	}
+	pools := reporter.Pools()
+	if len(pools) == 0 {
+		return
+	}
+
+	for _, series := range []struct {
+		name, help, kind string
+		value            func(telemetry.Pool) float64
+	}{
+		{"cairn_db_pool_max_connections", "Configured connection ceiling for this pool.", "gauge",
+			func(p telemetry.Pool) float64 { return float64(p.Max) }},
+		{"cairn_db_pool_open_connections", "Connections currently open.", "gauge",
+			func(p telemetry.Pool) float64 { return float64(p.Open) }},
+		{"cairn_db_pool_in_use_connections", "Connections currently executing a statement.", "gauge",
+			func(p telemetry.Pool) float64 { return float64(p.InUse) }},
+		{"cairn_db_pool_idle_connections", "Connections open and idle.", "gauge",
+			func(p telemetry.Pool) float64 { return float64(p.Idle) }},
+		{"cairn_db_pool_wait_total", "Times a caller had to queue for a connection.", "counter",
+			func(p telemetry.Pool) float64 { return float64(p.WaitCount) }},
+		{"cairn_db_pool_wait_seconds_total", "Total time spent queued for a connection.", "counter",
+			func(p telemetry.Pool) float64 { return p.WaitSeconds }},
+	} {
+		fmt.Fprintf(b, "\n# HELP %s %s\n# TYPE %s %s\n", series.name, series.help, series.name, series.kind)
+		for _, p := range pools {
+			fmt.Fprintf(b, "%s{pool=%q} %g\n", series.name, p.Name, series.value(p))
+		}
+	}
 }
 
 // writeProbeMetrics republishes what each probe reported about itself.

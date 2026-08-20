@@ -140,7 +140,7 @@ carried forward.
 - [x] `resend_after` and dependency-suppression handling in ingest — both derived rather than stored: the resend from `consecutive_failures`, the suppression from the parent's current state at the moment the result lands, because a parent and its children can fail within the same second and a sweep would be a tick behind
 - [x] Engine self-metrics: heartbeats written and results ingested counted separately, so a probe redelivering is distinguishable from the system doing twice the work; alerts published and shed; and each probe's own report — shed results, skipped checks, due-queue depth, buffer depth, clock offset — republished from the result stream, because a probe has no inbound port to scrape. This is what the load test reads, and reading the same endpoint an operator scrapes is the point: a harness with a private back door measures a system nobody else can see
 - [x] Assignment publishing coalesces a burst of writes into one recompute. Each write used to reload and re-diff the whole assignment set, making the creation of N monitors O(N²) — the load-test harness measured 2,116 full recomputations while creating 5,000 through the API, and the run never finished. A one-second settle window is invisible against the 20-second interval floor
-- [ ] Reader pool alongside the single writer (one connection today) — **now measured rather than assumed.** Monitor creation runs at 1,144/sec at 500 monitors and 38/sec at 5,000, because the assignment reload holds the single connection while it scans every assignable monitor and writes queue behind it. That is the shape of an import of somebody's existing install, which is the first thing this product asks a new user to do
+- [x] Reader pool alongside the single writer — reads run on a separate read-only pool, opened `mode=ro` so a routing mistake fails immediately instead of surfacing as a rare lock error under load; the writer stays at exactly one connection, which is what keeps every check-then-act in the store exact. Roughly doubles monitor creation at 5,000 monitors (73/36/60 per second on one connection against 105/142/99 with the pool, measured back to back on the same machine because the absolute figures move with whatever else it is doing). `/metrics` reports both pools' wait counts, which is what separates a query that got slower from one that is queued behind somebody else's write — a question that could not be asked when everything shared one connection
 
 ## Monitor types
 
@@ -282,22 +282,22 @@ carried forward.
 
 ## What to do next, and why in this order
 
-1. **The reader pool alongside the single writer.** No longer a hunch: monitor
-   creation runs at 1,144/sec at 500 monitors and 38/sec at 5,000, because the
-   assignment reload holds the one connection while it scans every assignable
-   monitor. That is precisely the shape of an import of somebody's existing
-   install — the first thing this product asks a new user to do — and it is the
-   only measured number in the system that gets worse as the install grows.
-2. **Certificate and domain observations.** `/monitors/{id}/certificate`,
+1. **Certificate and domain observations.** `/monitors/{id}/certificate`,
    `include=certificate`, and the overview's expiring-soon counts are built and
    read tables nothing writes. Closing that needs the observation carried from the
    checker to the control plane — a field on the probe protocol's result frame,
    which is the one change in this list that is not API work.
    `monitor.certificate_expiring` is an event type with nothing raising it, and it
    is the alert people actually want from a TLS monitor.
-3. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
+2. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
    and double opt-in, and nothing sends the confirmation mail. The instance relay
    now exists to send it through.
+3. **The assignment reload itself.** The reader pool moved it off the write
+   connection; it is still an O(N) scan of every assignable monitor, and creation
+   still slows as the install grows — it is simply no longer blocking anything
+   while it does. What is left is the cost of the scan rather than the queue in
+   front of it, and `cairn_db_pool_wait_total` is now the number that tells the
+   two apart.
 
 The UI comes after those deliberately: the plan puts it in Month 3, and every
 surface it needs now exists — which was the point of finishing the API first. The

@@ -137,7 +137,7 @@ func (s *Store) StatusPageIDsForWindows(ctx context.Context, windowIDs []model.I
 	for _, id := range windowIDs {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT window_id, status_page_id FROM maintenance_status_pages
 		WHERE window_id IN (`+placeholders(len(windowIDs))+`)
 		ORDER BY window_id, status_page_id`, args...)
@@ -183,7 +183,7 @@ func writeTargets(ctx context.Context, tx *sql.Tx, w model.MaintenanceWindow) er
 
 // GetMaintenanceWindow returns one window with its targets.
 func (s *Store) GetMaintenanceWindow(ctx context.Context, id model.ID) (model.MaintenanceWindow, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.ro.QueryRowContext(ctx,
 		`SELECT `+windowColumns+` FROM maintenance_windows w WHERE w.id = ?`, id[:])
 
 	w, err := scanWindow(row)
@@ -235,7 +235,7 @@ func (s *Store) ListMaintenanceWindows(ctx context.Context, after *Cursor, limit
 	query += ` ORDER BY w.updated_at DESC, w.id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list maintenance windows: %w", err)
 	}
@@ -278,7 +278,7 @@ func (s *Store) ListMaintenanceWindows(ctx context.Context, after *Cursor, limit
 // An active window always qualifies, because its occurrence started in the past;
 // that is what lets the caller compute the whole active set from this subset.
 func (s *Store) DueMaintenanceWindows(ctx context.Context, now time.Time) ([]model.MaintenanceWindow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+windowColumns+`
 		FROM maintenance_windows w
 		WHERE w.org_id = ? AND w.cancelled_at IS NULL
@@ -352,7 +352,7 @@ func (s *Store) MonitorsUnderWindows(ctx context.Context, windowIDs []model.ID) 
 	}
 	list := placeholders(len(windowIDs))
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT m.id FROM monitors m
 		WHERE m.org_id = ? AND m.enabled = 1 AND (
 			m.id IN (SELECT target_id FROM maintenance_targets
@@ -461,7 +461,7 @@ func (s *Store) MissingIDs(ctx context.Context, table string, orgID model.ID, id
 	for _, id := range ids {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT id FROM `+table+` WHERE org_id = ? AND id IN (`+placeholders(len(ids))+`)`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("check %s ids: %w", table, err)
@@ -508,7 +508,7 @@ func (s *Store) loadTargets(ctx context.Context, windows []*model.MaintenanceWin
 		args = append(args, w.ID[:])
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT window_id, target_type, target_id FROM maintenance_targets
 		WHERE window_id IN (`+placeholders(len(windows))+`)
 		ORDER BY window_id, target_type, target_id`, args...)
@@ -597,7 +597,7 @@ func nullMinutes(d time.Duration) any {
 // exactly what a customer needs to see and sometimes an internal detail, and the
 // operator decides which per window rather than per page.
 func (s *Store) WindowsForStatusPage(ctx context.Context, pageID model.ID) ([]model.MaintenanceWindow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+windowColumns+`
 		FROM maintenance_windows w
 		WHERE w.id IN (SELECT window_id FROM maintenance_status_pages WHERE status_page_id = ?)

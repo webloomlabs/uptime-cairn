@@ -155,3 +155,43 @@ func TestMetricsNeedsAScopeFromOffLoopback(t *testing.T) {
 		}
 	}
 }
+
+// The pool series are how an operator tells "this query is slow" from "this
+// query is queued". Without them the reader pool is an improvement nobody can
+// see: the endpoint latency that motivated it is the same number before and
+// after until you can read the wait counter beside it.
+func TestMetricsExposeTheConnectionPools(t *testing.T) {
+	telemetry.Reset()
+	t.Cleanup(telemetry.Reset)
+
+	server := testServer(t)
+	c := newClient(t, server)
+	c.setup()
+
+	body := scrape(t, server.URL)
+
+	for _, name := range []string{
+		"cairn_db_pool_max_connections",
+		"cairn_db_pool_open_connections",
+		"cairn_db_pool_in_use_connections",
+		"cairn_db_pool_idle_connections",
+		"cairn_db_pool_wait_total",
+		"cairn_db_pool_wait_seconds_total",
+	} {
+		if !strings.Contains(body, "\n"+name+"{") {
+			t.Errorf("series %q is missing from /metrics", name)
+		}
+		if !strings.Contains(body, "# HELP "+name+" ") {
+			t.Errorf("series %q has no HELP line", name)
+		}
+	}
+
+	// Both pools, labelled. One line would leave a reader waiting on the writer
+	// and a writer waiting on itself looking identical.
+	if !strings.Contains(body, `cairn_db_pool_max_connections{pool="writer"} 1`) {
+		t.Error("the writer pool is not reported as one connection")
+	}
+	if !strings.Contains(body, `cairn_db_pool_max_connections{pool="reader"}`) {
+		t.Error("the reader pool is not reported")
+	}
+}

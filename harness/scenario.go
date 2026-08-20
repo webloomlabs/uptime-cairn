@@ -307,8 +307,36 @@ func Evaluate(scenarios []Scenario, results []ScaleResult, minWriteRate float64)
 			})
 		}
 		if sc.MaxGrowth > 0 && ss.P95() > 0 {
+			// The two p95s are only a growth ratio if the two runs did the same
+			// work. Equal row counts is the usual case — a page is 25 rows at
+			// every scale — and a large sample at both ends is the other, where
+			// one row either way cannot be the whole signal.
+			//
+			// Neither holds for history on the HTTP target. The window is
+			// whatever the engine produced while the harness warmed up, which
+			// lands on nought, one or two one-minute buckets depending on where
+			// the clock happened to be, and the p95 of a query returning two
+			// buckets against one returning one is not a measurement of growth —
+			// it is a measurement of which query ran. Observed at 257µs and
+			// 1.618ms on the same build, minutes apart.
+			//
+			// Reported and not judged, because a gate that fails on a coin flip
+			// is worse than no gate: the first response to a red build nobody
+			// can reproduce is to stop reading the gate.
+			comparable := ss.Rows == ls.Rows ||
+				(ss.Rows >= minRangeSample && ls.Rows >= minRangeSample)
 			growth := float64(ls.P95()) / float64(ss.P95())
-			if growth > sc.MaxGrowth {
+
+			switch {
+			case !comparable:
+				findings = append(findings, Finding{
+					Scenario: sc.Name,
+					Detail: fmt.Sprintf(
+						"not compared: %s over %d rows at %d monitors against %s over %d at %d — too few rows, and not the same number, so the ratio would be measuring the sample rather than the scale",
+						ss.P95().Round(time.Microsecond), ss.Rows, small.Scale,
+						ls.P95().Round(time.Microsecond), ls.Rows, large.Scale),
+				})
+			case growth > sc.MaxGrowth:
 				findings = append(findings, Finding{
 					Scenario: sc.Name,
 					Failed:   true,

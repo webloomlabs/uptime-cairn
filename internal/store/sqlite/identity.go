@@ -21,7 +21,7 @@ import (
 // rather than a flag someone can forget to set.
 func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&n); err != nil {
+	if err := s.ro.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count users: %w", err)
 	}
 	return n, nil
@@ -53,14 +53,14 @@ const userColumns = `id, org_id, email, name, password_hash, role, active,
 // UserByEmail looks up a login. Email is stored lowercased so that uniqueness
 // means what a user expects it to mean.
 func (s *Store) UserByEmail(ctx context.Context, orgID model.ID, email string) (model.User, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.ro.QueryRowContext(ctx,
 		`SELECT `+userColumns+` FROM users WHERE org_id = ? AND email = ?`, orgID[:], email)
 	return scanUser(row)
 }
 
 // UserByID looks up the account behind a session.
 func (s *Store) UserByID(ctx context.Context, id model.ID) (model.User, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, id[:])
+	row := s.ro.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, id[:])
 	return scanUser(row)
 }
 
@@ -181,7 +181,7 @@ func (s *Store) CreateSession(ctx context.Context, sess model.Session) error {
 // rather than deleted on the read path: a request should not depend on a write
 // succeeding, and DeleteExpiredSessions sweeps them.
 func (s *Store) SessionByTokenHash(ctx context.Context, hash []byte, now time.Time) (model.Session, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT id, user_id, token_hash, csrf_token_hash, expires_at, created_at, last_seen_at, ip, user_agent
 		FROM sessions WHERE token_hash = ? AND expires_at > ?`, hash, millis(now))
 
@@ -267,13 +267,13 @@ func (s *Store) CreateAPIKey(ctx context.Context, k model.APIKey) error {
 // returned rather than filtered, so the caller can tell "no such key" from
 // "this key is dead" — the second deserves a different message.
 func (s *Store) APIKeyByHash(ctx context.Context, hash []byte) (model.APIKey, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+apiKeyColumns+` FROM api_keys WHERE key_hash = ?`, hash)
+	row := s.ro.QueryRowContext(ctx, `SELECT `+apiKeyColumns+` FROM api_keys WHERE key_hash = ?`, hash)
 	return scanAPIKey(row)
 }
 
 // GetAPIKey reads one by id.
 func (s *Store) GetAPIKey(ctx context.Context, id model.ID) (model.APIKey, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+apiKeyColumns+` FROM api_keys WHERE id = ?`, id[:])
+	row := s.ro.QueryRowContext(ctx, `SELECT `+apiKeyColumns+` FROM api_keys WHERE id = ?`, id[:])
 	return scanAPIKey(row)
 }
 
@@ -288,7 +288,7 @@ func (s *Store) ListAPIKeys(ctx context.Context, after *store.Cursor, limit int)
 	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list api keys: %w", err)
 	}
@@ -399,7 +399,7 @@ type WrappedKey struct {
 
 // EncryptionKeys returns every data key that has not been retired.
 func (s *Store) EncryptionKeys(ctx context.Context) ([]WrappedKey, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT version, wrapped_dek FROM encryption_keys WHERE retired_at IS NULL ORDER BY version`)
 	if err != nil {
 		return nil, fmt.Errorf("read encryption keys: %w", err)
@@ -433,14 +433,14 @@ func (s *Store) InsertEncryptionKey(ctx context.Context, k WrappedKey, algorithm
 // stop the process, not quietly generate a replacement.
 func (s *Store) HasEncryptedData(ctx context.Context) (bool, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.ro.QueryRowContext(ctx,
 		`SELECT count(*) FROM users WHERE totp_secret IS NOT NULL`).Scan(&n); err != nil {
 		return false, err
 	}
 	if n > 0 {
 		return true, nil
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM encryption_keys`).Scan(&n); err != nil {
+	if err := s.ro.QueryRowContext(ctx, `SELECT count(*) FROM encryption_keys`).Scan(&n); err != nil {
 		return false, err
 	}
 	return n > 0, nil
@@ -467,7 +467,7 @@ type generalSettings struct {
 // InstanceName returns the operator-chosen name, or "" when unset.
 func (s *Store) InstanceName(ctx context.Context, orgID model.ID) (string, error) {
 	var raw string
-	if err := s.db.QueryRowContext(ctx, `SELECT general FROM settings WHERE org_id = ?`, orgID[:]).Scan(&raw); err != nil {
+	if err := s.ro.QueryRowContext(ctx, `SELECT general FROM settings WHERE org_id = ?`, orgID[:]).Scan(&raw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}

@@ -143,6 +143,21 @@ type EngineCounters struct {
 	ProbeBufferedItems uint64
 
 	WebhookEventsDropped uint64
+
+	// WriterWaits is how many times a statement had to queue for the store's
+	// write connection, and WriterWaitSeconds how long it spent queued.
+	//
+	// These are what separate "this is slow" from "this is behind something
+	// else", and the harness has needed that distinction since it first reported
+	// that creating monitors gets slower as the install grows. A creation rate
+	// that falls while the wait counter stays flat is work getting harder; the
+	// same rate with the counter climbing is a queue, and only one of those is
+	// fixed by moving reads off the write connection.
+	//
+	// Absent from a backend that has no pool, in which case they stay zero and
+	// the line reporting them is skipped rather than printed as a claim.
+	WriterWaits       uint64
+	WriterWaitSeconds float64
 }
 
 // Target is the seam between the scenarios and whatever is being measured.

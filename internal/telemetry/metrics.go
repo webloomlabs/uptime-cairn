@@ -163,3 +163,30 @@ func sortByID(out []ProbeHealth) {
 		}
 	}
 }
+
+// Pool is one database connection pool, reported in backend-neutral terms.
+//
+// The shape is database/sql's, flattened here so that neither the API layer nor
+// this package has to import it. That is not tidiness: ADR-002 puts a store
+// interface between the product and its backend, and a metrics path that took
+// sql.DBStats across it would reintroduce the dependency the interface exists to
+// remove — /metrics would compile against SQLite specifically, and the Postgres
+// backend Phase 4 wants would have to satisfy a type it has no reason to know.
+type Pool struct {
+	// Name distinguishes the pools of one store: "writer", "reader".
+	Name string
+
+	// Max is the configured ceiling, Open the connections that exist, InUse the
+	// ones currently executing.
+	Max, Open, InUse, Idle int
+
+	// WaitCount is the number of times a caller had to queue for a connection,
+	// and WaitSeconds the total time spent queued.
+	//
+	// These are the pair worth alerting on. A slow endpoint whose WaitCount is
+	// flat is slow because its query is slow; the same endpoint with WaitCount
+	// climbing is slow because it is behind somebody else's work, and those two
+	// have nothing in common except the symptom.
+	WaitCount   int64
+	WaitSeconds float64
+}

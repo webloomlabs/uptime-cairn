@@ -1401,8 +1401,8 @@ produce more. So the assertion differs: clear the floor on one, achieve the
 schedule on the other. At 5,000 monitors on the 20-second floor:
 
 ```
-5000 monitors: 239.6 heartbeats/sec against 250.0/sec implied by the schedule,
-               7620 requests seen by the checked endpoint
+5000 monitors: 248.2 heartbeats/sec against 250.0/sec implied by the schedule,
+               1262 requests seen by the checked endpoint over the 5-second window
 ```
 
 That last figure is the one the engine cannot fake — it is counted by the harness
@@ -1414,10 +1414,10 @@ until now that size was an argument in a comment:
 
 ```
 5000 monitors, total partition:
-  detected   5000/5000 down in 20.633s
-  recovered  4841/5000 up in 20.923s
-  alerts     9682 published, 0 shed
-  webhooks   9682 delivered, 0 shed
+  detected   5000/5000 down in 21.136s
+  recovered  4841/5000 up in 20.857s
+  alerts     9685 published, 0 shed
+  webhooks   9685 delivered, 0 shed
   probe      0 results shed, 0 checks skipped
 ```
 
@@ -1432,15 +1432,89 @@ rather than an empty set.
   which reloaded and re-diffed the whole set — 2,116 full recomputations for
   5,000 creations, and the run never finished. The publisher now settles for a
   second first, which is invisible against a 20-second interval.
-- **Creation still degrades with size**: 1,144/sec at 500 monitors, 38/sec at
-  5,000. The reload holds the store's single connection while it scans every
-  assignable monitor. That is the open reader-pool item, now with a number.
+- **Creation was queued behind the store's one connection.** The reload holds it
+  while it scans every assignable monitor, and every write queued behind that.
+  Three back-to-back pairs on the same machine, because the absolute numbers move
+  with whatever else the machine is doing and only the pair means anything: at
+  5,000 monitors, 73, 36 and 60 creations/sec on one connection against 105, 142
+  and 99 with the reader pool. Roughly double, every run. See
+  [the reader pool](#the-reader-pool) below.
 - **The harness's own first answer was wrong**, which is worth saying because the
   fix is the interesting part. It reported 499 heartbeats/sec against 250
   implied, and the engine was fine: it was draining the backlog built while
   seeding saturated the writer. Rows counted by check time said 250/sec; rows
   counted by write time said 500. Both were true. The warm-up now waits for the
   observed rate to settle instead of sleeping a fixed interval.
+- **Two of its own assertions were coin flips**, and both had to be fixed before
+  the reader pool's result could be read at all, because a gate that goes red at
+  random cannot tell you whether a change helped.
+
+  The recovery check compared against a down-count sampled once, before the
+  partition. But a monitor is `pending` until it has been checked, and at 5,000
+  monitors the first sweep is still running when the measurement window ends —
+  the probe reported 4,923 checks started against 5,000 monitors. A baseline one
+  too low makes the recovery target one too high: a number that can never be
+  reached, a wait that runs to its deadline, and a report that the engine failed
+  to recover a monitor that was never up. The baseline is now two agreeing
+  samples an interval apart.
+
+  The growth check compared the p95 of two runs without asking whether they had
+  done the same work. `history` reads whatever the engine produced during warm-up,
+  which lands on nought, one or two one-minute buckets depending on where the
+  clock fell; the same build produced 257µs and 1.618ms minutes apart. A ratio
+  is now only computed when the two scales returned the same number of rows, or
+  enough rows that one either way cannot be the signal. Otherwise both figures
+  are printed and no verdict is given.
+
+### The reader pool
+
+SQLite takes one write lock per database, so the write pool is one connection and
+stays that way. WAL's other half is that readers run against a committed snapshot
+without taking that lock at all — so reads get their own pool, opened `mode=ro`,
+and a scan of every assignable monitor no longer sits in front of the writes
+queued behind it.
+
+What makes the split safe is the writer staying at one. Every check-then-act in
+the store does its check inside a transaction on the write connection — a tag
+slug already taken, a status-page subscriber that already exists — and those are
+exact because there is one write connection and therefore one such transaction at
+a time. A check moved to the read pool would stop being exact and start being a
+race that produces a duplicate row once a month. Reads that return go on the read
+pool; reads a write depends on stay with the writer. Two of them do, and both say
+why in the code.
+
+`mode=ro` is enforcement rather than convention. Routing is decided per call site
+by hand, and the operating system refusing the write turns a mistake into a
+failure the first time it runs instead of a rare lock error under load.
+
+The gate now reports the queue directly, which is what makes the claim checkable
+rather than a story about why a number moved:
+
+```
+created 5000 monitors through the API in 28.683s (174/sec)
+  2676 statements queued for the write connection, 1.301s in total, 486µs each
+```
+
+Read that with `cairn_db_pool_wait_total`: a rate that falls while the wait
+counter stays flat is work getting harder, and the same rate with the counter
+climbing is a queue. They want opposite fixes, and until this pool existed the
+question could not be asked — every statement queued on the same connection, so
+the answer was always "both".
+
+**Creation still degrades with size** — 1,861/sec at 500 monitors against 173/sec
+at 5,000 — but the queue is no longer where the time goes. Eight workers spent a
+combined 1.3 seconds waiting for the write connection out of the 28.7
+seconds the creation took, so what remains is the reload itself: the same O(N) scan, now merely running
+somewhere it does not block anything. Reported and not failed, because there is
+no product commitment about how fast monitors can be created and inventing one in
+the harness would be the gate making policy.
+
+One new failure mode came with the pool and is worth knowing about. An unclosed
+result set now holds a read snapshot, which stops WAL checkpointing and grows the
+`-wal` file quietly; against a single shared connection the same mistake
+deadlocked the next statement, which is unpleasant but impossible to miss.
+`cairn_db_pool_in_use_connections{pool="reader"}` above zero on an idle instance
+is what that looks like.
 
 ## Self-metrics
 
@@ -1477,6 +1551,29 @@ most. A probe under overload sheds rather than queueing, and shedding is
 invisible from the monitor's side *by design* — the whole outcome taxonomy exists
 so that probe overload never looks like target downtime, which means it has to
 look like something here instead.
+
+**The connection pools**, labelled by pool, because they answer a question no
+latency number can:
+
+```
+cairn_db_pool_max_connections{pool="writer"} 1
+cairn_db_pool_max_connections{pool="reader"} 8
+cairn_db_pool_wait_total{pool="writer"} 2676
+cairn_db_pool_wait_seconds_total{pool="writer"} 1.301
+cairn_db_pool_in_use_connections{pool="reader"} 0
+```
+
+A slow endpoint whose wait counter is flat is slow because its query is slow; the
+same endpoint with the counter climbing is behind somebody else's write. Those
+want opposite fixes and look identical from outside. The reader pool is reported
+too, where the number to watch is a floor above zero on an idle instance — that
+is a result set nobody closed, holding a snapshot that stops the WAL being
+checkpointed.
+
+These are asked for rather than required. The store arrives at the API as the
+consumer-defined interface ADR-002 asks for, which describes what the API needs
+and says nothing about connections; a backend with a pool reports one, a backend
+without stays silent, and neither has to change to accommodate the other.
 
 Scraping is unauthenticated from loopback and needs an API key holding
 `metrics:read` from anywhere else. A Prometheus on the same host is the

@@ -79,7 +79,7 @@ func (s *Store) CreateMonitor(ctx context.Context, m model.Monitor) error {
 
 // GetMonitor returns one monitor with its state, or ErrNotFound.
 func (s *Store) GetMonitor(ctx context.Context, id model.ID) (MonitorWithState, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT `+monitorColumns+`
 		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
 		WHERE m.id = ?`, id[:])
@@ -137,7 +137,7 @@ func (s *Store) ListMonitors(ctx context.Context, after *Cursor, limit int, filt
 	query += ` ORDER BY m.updated_at DESC, m.id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list monitors: %w", err)
 	}
@@ -167,7 +167,7 @@ func (s *Store) ListMonitors(ctx context.Context, after *Cursor, limit int, filt
 // rather than filtered probe-side, because they are evaluated by the control
 // plane and are never assigned to anyone (ADR-005 decision 6).
 func (s *Store) ListAssignable(ctx context.Context) ([]model.Monitor, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+monitorColumns+`
 		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
 		WHERE m.enabled = 1 AND m.type != 'push'
@@ -194,7 +194,7 @@ func (s *Store) ListAssignable(ctx context.Context) ([]model.Monitor, error) {
 // the paused ones too: a monitor nobody is checking today still has its password
 // sitting in the database.
 func (s *Store) AllMonitors(ctx context.Context) ([]model.Monitor, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+monitorColumns+`
 		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
 		ORDER BY m.id`)
@@ -237,7 +237,7 @@ func (s *Store) SetMonitorConfig(ctx context.Context, id model.ID, config []byte
 // inverse of ListAssignable: these are the monitors no probe will ever run, so
 // the control plane's own sweep is the only thing that will ever move them.
 func (s *Store) ListPushMonitors(ctx context.Context) ([]MonitorWithState, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+monitorColumns+`
 		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
 		WHERE m.enabled = 1 AND m.type = 'push'
@@ -264,7 +264,7 @@ func (s *Store) ListPushMonitors(ctx context.Context) ([]MonitorWithState, error
 // whatever the install size — this endpoint is unauthenticated and anyone can
 // call it with anything, which makes a linear scan a denial-of-service tool.
 func (s *Store) MonitorByPushToken(ctx context.Context, hash []byte) (model.Monitor, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT `+monitorColumns+`
 		FROM monitors m JOIN monitor_state s ON s.monitor_id = m.id
 		WHERE m.push_token_hash = ? AND m.type = 'push'`, hash)
@@ -314,7 +314,7 @@ func (s *Store) DeleteMonitor(ctx context.Context, id model.ID) error {
 // GetState reads the current state, which ingest needs before it can decide
 // whether a result is a transition.
 func (s *Store) GetState(ctx context.Context, id model.ID) (model.MonitorState, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT monitor_id, org_id, status, last_check_at, next_check_at,
 		       last_status_change_at, consecutive_failures, last_response_time_ms,
 		       last_message, suppressed_by, state_version
@@ -569,7 +569,7 @@ func (s *Store) Membership(ctx context.Context, filter MonitorFilter) (store.Mem
 
 	var out store.Membership
 	var versions, updated int64
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&out.Count, &versions, &updated); err != nil {
+	if err := s.ro.QueryRowContext(ctx, query, args...).Scan(&out.Count, &versions, &updated); err != nil {
 		return store.Membership{}, fmt.Errorf("monitor membership: %w", err)
 	}
 	out.Version = versions + updated
@@ -684,7 +684,7 @@ func (s *Store) LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.I
 	}
 
 	list := placeholders(len(ids))
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT h.time, h.monitor_id, h.org_id, h.probe_id, h.status, h.response_time_ms,
 		       h.code, h.message, h.attempt, h.important, h.suppressed, h.suppression_reason
 		FROM heartbeats h
@@ -728,7 +728,7 @@ func (s *Store) UptimeRatios(ctx context.Context, ids []model.ID, window string)
 	for _, id := range ids {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT monitor_id, uptime_ratio FROM monitor_uptime_cache
 		WHERE window = ? AND uptime_ratio IS NOT NULL AND monitor_id IN (`+placeholders(len(ids))+`)`, args...)
 	if err != nil {
@@ -755,7 +755,7 @@ func (s *Store) UptimeRatios(ctx context.Context, ids []model.ID, window string)
 // StatusCounts is the overview's monitor tally, one grouped scan of the state
 // index rather than six counting queries.
 func (s *Store) StatusCounts(ctx context.Context) (map[string]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT status, COUNT(*) FROM monitor_state WHERE org_id = ? GROUP BY status`,
 		model.SentinelOrgID[:])
 	if err != nil {
@@ -779,7 +779,7 @@ func (s *Store) StatusCounts(ctx context.Context) (map[string]int, error) {
 
 // GetCertificate returns the certificate last observed on a monitor.
 func (s *Store) GetCertificate(ctx context.Context, id model.ID) (model.Certificate, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT monitor_id, org_id, subject, issuer, serial_number, valid_from, valid_to,
 		       fingerprint_sha256, sans, chain_valid, chain_error, observed_at
 		FROM monitor_certificates WHERE monitor_id = ?`, id[:])
@@ -825,7 +825,7 @@ func (s *Store) GetCertificate(ctx context.Context, id model.ID) (model.Certific
 // ExpiringSoon counts certificates and domain registrations falling due inside
 // the horizon, for the overview.
 func (s *Store) ExpiringSoon(ctx context.Context, before time.Time) (certificates, domains int, err error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT (SELECT COUNT(*) FROM monitor_certificates WHERE org_id = ?1 AND valid_to < ?2),
 		       (SELECT COUNT(*) FROM monitor_domain_expiry WHERE org_id = ?1 AND expires_at < ?2)`,
 		model.SentinelOrgID[:], millis(before))

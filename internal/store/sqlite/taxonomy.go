@@ -51,7 +51,7 @@ func (s *Store) UpdateGroup(ctx context.Context, g model.Group) error {
 
 // GetGroup returns one group with its counts.
 func (s *Store) GetGroup(ctx context.Context, id model.ID) (model.GroupSummary, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+groupColumns+` FROM groups g WHERE g.id = ?`, id[:])
+	row := s.ro.QueryRowContext(ctx, `SELECT `+groupColumns+` FROM groups g WHERE g.id = ?`, id[:])
 
 	g, err := scanGroup(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -84,7 +84,7 @@ func (s *Store) ListGroups(ctx context.Context, after *Cursor, limit int, search
 	query += ` ORDER BY g.updated_at DESC, g.id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list groups: %w", err)
 	}
@@ -134,7 +134,7 @@ func (s *Store) groupSummaries(ctx context.Context, groups []model.Group) ([]mod
 	for _, g := range groups {
 		args = append(args, g.ID[:])
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT g.id, COUNT(m.id), GROUP_CONCAT(DISTINCT st.status)
 		FROM groups g
 		LEFT JOIN monitors m
@@ -255,7 +255,7 @@ func (s *Store) UpdateTag(ctx context.Context, t model.Tag) error {
 
 // GetTag returns one tag with its monitor count.
 func (s *Store) GetTag(ctx context.Context, id model.ID) (model.TagSummary, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT `+tagColumns+`, (SELECT COUNT(*) FROM monitor_tags mt WHERE mt.tag_id = t.id)
 		FROM tags t WHERE t.id = ?`, id[:])
 
@@ -290,7 +290,7 @@ func (s *Store) ListTags(ctx context.Context, after *Cursor, limit int, search s
 	query += ` ORDER BY t.updated_at DESC, t.id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list tags: %w", err)
 	}
@@ -372,7 +372,7 @@ func (s *Store) TagIDsForMonitors(ctx context.Context, monitorIDs []model.ID) (m
 	for _, id := range monitorIDs {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT monitor_id, tag_id FROM monitor_tags
 		WHERE monitor_id IN (`+placeholders(len(monitorIDs))+`)
 		ORDER BY monitor_id, tag_id`, args...)
@@ -439,7 +439,7 @@ func scanTagSummary(row scanner) (model.TagSummary, error) {
 // answers the second.
 func (s *Store) GroupHasChildren(ctx context.Context, id model.ID) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx,
+	if err := s.ro.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM groups WHERE parent_group_id = ?`, id[:]).Scan(&count); err != nil {
 		return false, fmt.Errorf("check group children: %w", err)
 	}

@@ -105,7 +105,7 @@ func (s *Store) ListHeartbeats(ctx context.Context, monitorID model.ID, before *
 	query += ` ORDER BY time DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list heartbeats: %w", err)
 	}

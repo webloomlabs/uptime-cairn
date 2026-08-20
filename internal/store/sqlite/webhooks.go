@@ -68,7 +68,7 @@ func (s *Store) UpdateWebhook(ctx context.Context, h model.Webhook, headers []by
 
 // GetWebhook returns one subscription with its sealed headers.
 func (s *Store) GetWebhook(ctx context.Context, id model.ID) (model.Webhook, []byte, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+webhookColumns+` FROM webhooks WHERE id = ?`, id[:])
+	row := s.ro.QueryRowContext(ctx, `SELECT `+webhookColumns+` FROM webhooks WHERE id = ?`, id[:])
 
 	h, headers, err := scanWebhook(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -94,7 +94,7 @@ func (s *Store) ListWebhooks(ctx context.Context, after *Cursor, limit int) ([]m
 	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list webhooks: %w", err)
 	}
@@ -147,7 +147,7 @@ func (s *Store) loadLastDelivery(ctx context.Context, hooks []*model.Webhook) er
 	}
 
 	list := placeholders(len(hooks))
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT d.webhook_id, d.created_at, d.outcome
 		FROM webhook_deliveries d
 		JOIN (SELECT webhook_id, MAX(created_at) AS created_at FROM webhook_deliveries
@@ -196,7 +196,7 @@ func (s *Store) DeleteWebhook(ctx context.Context, id model.ID) error {
 // because the events column is a JSON array and the set is small enough that a
 // scan of it costs less than the index would.
 func (s *Store) EnabledWebhooks(ctx context.Context) ([]model.Webhook, [][]byte, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT `+webhookColumns+` FROM webhooks WHERE org_id = ? AND enabled = 1 AND disabled_at IS NULL`,
 		model.SentinelOrgID[:])
 	if err != nil {
@@ -284,7 +284,7 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, webhookID model.ID, b
 	query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list webhook deliveries: %w", err)
 	}
@@ -312,7 +312,7 @@ func (s *Store) ListWebhookDeliveries(ctx context.Context, webhookID model.ID, b
 // GetWebhookDelivery returns one attempt, which the redeliver endpoint needs so
 // it can resend the exact body the receiver was originally sent.
 func (s *Store) GetWebhookDelivery(ctx context.Context, id model.ID) (model.WebhookDelivery, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT id, webhook_id, org_id, event_id, event_type, outcome, attempt,
 		       request_body, response_status, response_body, error, duration_ms,
 		       next_retry_at, created_at

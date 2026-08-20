@@ -25,7 +25,7 @@ import (
 // value means the caller's defaults apply without a special case at the call
 // site.
 func (s *Store) GetSettings(ctx context.Context, orgID model.ID) (model.Settings, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT general, appearance, retention, smtp, monitoring, security, telemetry, updated_at
 		FROM settings WHERE org_id = ?`, orgID[:])
 
@@ -102,7 +102,7 @@ func (s *Store) SaveSettings(ctx context.Context, set model.Settings) error {
 // exists so a client written against it does not have to be rewritten when
 // Phase 3 adds the second.
 func (s *Store) ListUsers(ctx context.Context, orgID model.ID) ([]model.User, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT id, org_id, email, name, role, active, password_hash, totp_secret,
 		       totp_enabled_at, timezone, locale, last_login_at, created_at, updated_at
 		FROM users WHERE org_id = ? ORDER BY created_at, id`, orgID[:])

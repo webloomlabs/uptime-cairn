@@ -81,7 +81,7 @@ func (s *Store) UpdateChannel(ctx context.Context, c model.NotificationChannel) 
 
 // GetChannel returns one channel with its monitor count.
 func (s *Store) GetChannel(ctx context.Context, id model.ID) (ChannelWithCount, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT `+channelColumns+`, (
 			SELECT COUNT(*) FROM monitor_notification_channels mc WHERE mc.channel_id = c.id
 		)
@@ -130,7 +130,7 @@ func (s *Store) ListChannels(ctx context.Context, after *Cursor, limit int, filt
 	query += ` ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list notification channels: %w", err)
 	}
@@ -191,7 +191,7 @@ func (s *Store) MarkChannelResult(ctx context.Context, id model.ID, at time.Time
 // the same channels in the same order, which makes a delivery log comparable
 // against itself.
 func (s *Store) ChannelsForMonitor(ctx context.Context, monitorID model.ID) ([]model.NotificationChannel, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+channelColumns+`, 0
 		FROM notification_channels c
 		JOIN monitor_notification_channels mc ON mc.channel_id = c.id
@@ -215,7 +215,7 @@ func (s *Store) ChannelsForMonitor(ctx context.Context, monitorID model.ID) ([]m
 
 // ChannelIDsForMonitor is the assignment list a monitor read returns.
 func (s *Store) ChannelIDsForMonitor(ctx context.Context, monitorID model.ID) ([]model.ID, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT channel_id FROM monitor_notification_channels WHERE monitor_id = ? ORDER BY channel_id`,
 		monitorID[:])
 	if err != nil {
@@ -249,7 +249,7 @@ func (s *Store) ChannelIDsForMonitors(ctx context.Context, monitorIDs []model.ID
 	for _, id := range monitorIDs {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT monitor_id, channel_id FROM monitor_notification_channels
 		WHERE monitor_id IN (`+placeholders(len(monitorIDs))+`)
 		ORDER BY monitor_id, channel_id`, args...)
@@ -299,7 +299,7 @@ func (s *Store) SetMonitorChannels(ctx context.Context, monitorID, orgID model.I
 
 // DefaultChannelIDs are the channels attached to a newly created monitor.
 func (s *Store) DefaultChannelIDs(ctx context.Context, orgID model.ID) ([]model.ID, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT id FROM notification_channels WHERE org_id = ? AND is_default = 1 ORDER BY id`, orgID[:])
 	if err != nil {
 		return nil, fmt.Errorf("load default channels: %w", err)
@@ -331,7 +331,7 @@ func (s *Store) MissingChannels(ctx context.Context, orgID model.ID, ids []model
 	for _, id := range ids {
 		args = append(args, id[:])
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT id FROM notification_channels WHERE org_id = ? AND id IN (`+placeholders(len(ids))+`)`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("check channel ids: %w", err)

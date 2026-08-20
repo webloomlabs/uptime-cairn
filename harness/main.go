@@ -230,11 +230,11 @@ func measurePartition(ctx context.Context, target Target, d Disruptor, w *Worklo
 	// to that, not to zero. Waiting for zero would hang forever and then be
 	// reported as a failure to recover, which would be the harness's bug
 	// attributed to the engine.
-	baseline, err := target.Membership(ctx, ListQuery{Status: "down"})
+	baseline, err := settledBaseline(ctx, target)
 	if err != nil {
 		return out, err
 	}
-	out.BaselineDown = baseline.Count
+	out.BaselineDown = baseline
 
 	fmt.Printf("partitioning: every monitored endpoint starts failing at once (%d were already down)\n",
 		out.BaselineDown)
@@ -298,6 +298,57 @@ func measurePartition(ctx context.Context, target Target, d Disruptor, w *Worklo
 // the next scheduled round, and one for the ingest and state writes behind it.
 func partitionDeadline(w *Workload) time.Duration {
 	return time.Duration(monitorInterval)*time.Second*3 + 30*time.Second
+}
+
+// settledBaseline reads the pre-partition down count once it has stopped moving.
+//
+// One sample is not enough, and the failure it produces is the harness blaming
+// the engine for the harness's own timing. The workload keeps a fixed proportion
+// of endpoints permanently failing, but a monitor is `pending` until it has
+// actually been checked once, and pending is neither up nor down. At 5,000
+// monitors the first sweep is still working through the set when the write
+// measurement ends — the probe reported 4,923 checks started against 5,000
+// monitors — so a baseline taken there reads low by however many of the
+// permanently-failing ones had not been reached yet.
+//
+// What that costs is not a slightly wrong number. The recovery target is
+// total-minus-baseline, so a baseline one too low is a target one too high: a
+// count that can never be reached, a wait that runs to its deadline, and a gate
+// reporting that the engine failed to recover a monitor which was never up.
+// This exact failure took a passing gate to FAILED with nothing wrong.
+//
+// Two agreeing samples a full interval apart. Cheap — it is the membership
+// count, which exists to be asked repeatedly — and it converts a coin flip into
+// a measurement.
+func settledBaseline(ctx context.Context, target Target) (int64, error) {
+	const interval = time.Duration(monitorInterval) * time.Second
+
+	deadline := time.Now().Add(3 * interval)
+	last := int64(-1)
+	for {
+		res, err := target.Membership(ctx, ListQuery{Status: "down"})
+		if err != nil {
+			return 0, err
+		}
+		if res.Count == last {
+			return res.Count, nil
+		}
+		if time.Now().After(deadline) {
+			// Reported rather than errored, and it is worth saying out loud: a
+			// baseline that never settles means the workload is still churning,
+			// and every partition number below it is measured against a moving
+			// floor.
+			fmt.Printf("  baseline did not settle: %d down, was %d one interval ago\n", res.Count, last)
+			return res.Count, nil
+		}
+		last = res.Count
+
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
 }
 
 func waitForDown(ctx context.Context, target Target, total int64, within time.Duration) (int64, time.Duration, error) {

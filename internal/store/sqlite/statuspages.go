@@ -177,13 +177,13 @@ func writeSections(ctx context.Context, tx *sql.Tx, p model.StatusPage) error {
 
 // GetStatusPage returns one page with its sections.
 func (s *Store) GetStatusPage(ctx context.Context, id model.ID) (model.StatusPage, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+statusPageColumns+` FROM status_pages WHERE id = ?`, id[:])
+	row := s.ro.QueryRowContext(ctx, `SELECT `+statusPageColumns+` FROM status_pages WHERE id = ?`, id[:])
 	return s.pageFrom(ctx, row)
 }
 
 // StatusPageBySlug is the public read path's entry point.
 func (s *Store) StatusPageBySlug(ctx context.Context, slug string) (model.StatusPage, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.ro.QueryRowContext(ctx,
 		`SELECT `+statusPageColumns+` FROM status_pages WHERE org_id = ? AND slug = ?`,
 		model.SentinelOrgID[:], slug)
 	return s.pageFrom(ctx, row)
@@ -205,7 +205,7 @@ func (s *Store) pageFrom(ctx context.Context, row scanner) (model.StatusPage, er
 }
 
 func (s *Store) sectionsFor(ctx context.Context, pageID model.ID) ([]model.StatusPageSection, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT id, status_page_id, org_id, name, description, position
 		FROM status_page_sections WHERE status_page_id = ? ORDER BY position, id`, pageID[:])
 	if err != nil {
@@ -240,7 +240,7 @@ func (s *Store) sectionsFor(ctx context.Context, pageID model.ID) ([]model.Statu
 		return nil, nil
 	}
 
-	monitorRows, err := s.db.QueryContext(ctx, `
+	monitorRows, err := s.ro.QueryContext(ctx, `
 		SELECT section_id, monitor_id FROM status_page_section_monitors
 		WHERE status_page_id = ? ORDER BY position, monitor_id`, pageID[:])
 	if err != nil {
@@ -284,7 +284,7 @@ func (s *Store) ListStatusPages(ctx context.Context, after *Cursor, limit int, f
 	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list status pages: %w", err)
 	}
@@ -340,7 +340,7 @@ func (s *Store) DeleteStatusPage(ctx context.Context, id model.ID) error {
 // through a shape that has no place to put it — and this is the one endpoint
 // where a leak reaches strangers.
 func (s *Store) MonitorsOnStatusPage(ctx context.Context, pageID model.ID) (map[model.ID]store.PublicMonitor, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT m.id, m.name, m.description, st.status, st.last_response_time_ms
 		FROM status_page_section_monitors spm
 		JOIN monitors m ON m.id = spm.monitor_id
@@ -411,7 +411,7 @@ func (s *Store) CreateSubscriber(ctx context.Context, sub model.Subscriber, seal
 // comes back as stored; opening it is the caller's, because only the caller
 // holds a key.
 func (s *Store) ListSubscribers(ctx context.Context, pageID model.ID, limit int) ([]model.Subscriber, [][]byte, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT id, status_page_id, org_id, channel, target, target_hash,
 		       confirm_token_hash, confirmed_at, unsubscribe_token_hash, created_at
 		FROM subscribers WHERE status_page_id = ? ORDER BY created_at DESC, id DESC LIMIT ?`,
@@ -442,7 +442,7 @@ func (s *Store) ListSubscribers(ctx context.Context, pageID model.ID, limit int)
 // guessing tokens costs one index probe — this endpoint is unauthenticated, and
 // the token in the path is the whole credential.
 func (s *Store) SubscriberByToken(ctx context.Context, confirmHash, unsubscribeHash []byte) (model.Subscriber, []byte, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.ro.QueryRowContext(ctx, `
 		SELECT id, status_page_id, org_id, channel, target, target_hash,
 		       confirm_token_hash, confirmed_at, unsubscribe_token_hash, created_at
 		FROM subscribers WHERE confirm_token_hash = ? OR unsubscribe_token_hash = ?`,

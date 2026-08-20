@@ -412,6 +412,13 @@ func (t *HTTPTarget) createMonitors(ctx context.Context, w *Workload) error {
 		close(results)
 	}()
 
+	// Read before and after, because the creation rate on its own has never been
+	// enough to act on. The gate has reported for two revisions that creating
+	// monitors slows as the install grows, and "slow" and "queued" want opposite
+	// fixes: work that got harder wants a cheaper query, a queue wants the thing
+	// in front of it moved. The wait counter is the one that says which.
+	beforePool, _ := t.Counters(ctx)
+
 	start := time.Now()
 	done := 0
 	for res := range results {
@@ -429,6 +436,27 @@ func (t *HTTPTarget) createMonitors(ctx context.Context, w *Workload) error {
 	elapsed := time.Since(start)
 	fmt.Printf("created %d monitors through the API in %s (%.0f/sec)\n",
 		len(w.Monitors), elapsed.Round(time.Millisecond), float64(len(w.Monitors))/elapsed.Seconds())
+
+	if afterPool, err := t.Counters(ctx); err == nil {
+		waits := afterPool.WriterWaits - beforePool.WriterWaits
+		seconds := afterPool.WriterWaitSeconds - beforePool.WriterWaitSeconds
+		// Skipped rather than printed as zero when the engine reports no pool
+		// series at all: "nothing queued" and "nobody is counting" are different
+		// claims and only one of them is evidence.
+		if afterPool.WriterWaits > 0 || beforePool.WriterWaits > 0 || seconds > 0 {
+			// Summed across the writers, not wall clock, so it can exceed the
+			// elapsed time and that is not a bug: eight goroutines queueing for
+			// half a second each is four seconds of waiting inside one second of
+			// run. The per-statement mean is the figure to read.
+			var each time.Duration
+			if waits > 0 {
+				each = time.Duration(seconds / float64(waits) * float64(time.Second))
+			}
+			fmt.Printf("  %d statements queued for the write connection, %s in total, %s each\n",
+				waits, time.Duration(seconds*float64(time.Second)).Round(time.Millisecond),
+				each.Round(time.Microsecond))
+		}
+	}
 	return nil
 }
 
@@ -685,6 +713,13 @@ func parseMetrics(body string) EngineCounters {
 	wanted["cairn_probe_buffered_results"] = &out.ProbeBufferedItems
 	wanted["cairn_webhook_events_dropped_total"] = &out.WebhookEventsDropped
 
+	// Matched on the full series including its label, unlike everything above.
+	// The pool series exist once per pool and the writer's is the one that
+	// answers "was this queued"; stripping the label the way the rest of this
+	// function does would leave whichever pool was printed last.
+	wanted[`cairn_db_pool_wait_total{pool="writer"}`] = &out.WriterWaits
+
+	var waitSeconds float64
 	for _, line := range strings.Split(body, "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -693,17 +728,31 @@ func parseMetrics(body string) EngineCounters {
 		if !found {
 			continue
 		}
-		if brace := strings.IndexByte(name, '{'); brace >= 0 {
-			name = name[:brace]
+		n, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			continue
+		}
+		if name == `cairn_db_pool_wait_seconds_total{pool="writer"}` {
+			waitSeconds = n
 		}
 		into, ok := wanted[name]
 		if !ok {
-			continue
+			// Labels are otherwise ignored. In solo mode there is one probe and
+			// one of each series, so this is exact; with several probes it would
+			// keep whichever came last, which is why the gate's probe assertions
+			// are about shedding rather than about a per-probe total.
+			if brace := strings.IndexByte(name, '{'); brace >= 0 {
+				into, ok = wanted[name[:brace]]
+			}
+			if !ok {
+				continue
+			}
 		}
-		if n, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && n >= 0 {
+		if n >= 0 {
 			*into = uint64(n)
 		}
 	}
+	out.WriterWaitSeconds = waitSeconds
 	return out
 }
 

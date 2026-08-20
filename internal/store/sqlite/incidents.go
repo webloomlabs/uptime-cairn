@@ -105,7 +105,7 @@ func writeIncidentLinks(ctx context.Context, tx *sql.Tx, in model.Incident) erro
 
 // GetIncident returns one incident with its associations and its timeline.
 func (s *Store) GetIncident(ctx context.Context, id model.ID) (model.Incident, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+incidentColumns+` FROM incidents WHERE id = ?`, id[:])
+	row := s.ro.QueryRowContext(ctx, `SELECT `+incidentColumns+` FROM incidents WHERE id = ?`, id[:])
 
 	in, err := scanIncident(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -175,7 +175,7 @@ func (s *Store) ListIncidents(ctx context.Context, after *Cursor, limit int, fil
 	query += ` ORDER BY updated_at DESC, id DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, false, fmt.Errorf("list incidents: %w", err)
 	}
@@ -232,7 +232,7 @@ func (s *Store) loadIncidentLinks(ctx context.Context, incidents []*model.Incide
 		{`SELECT incident_id, status_page_id FROM incident_status_pages WHERE incident_id IN (` + list + `)`,
 			func(in *model.Incident, id model.ID) { in.StatusPageIDs = append(in.StatusPageIDs, id) }},
 	} {
-		rows, err := s.db.QueryContext(ctx, q.query, args...)
+		rows, err := s.ro.QueryContext(ctx, q.query, args...)
 		if err != nil {
 			return fmt.Errorf("load incident links: %w", err)
 		}
@@ -321,7 +321,7 @@ func (s *Store) AddIncidentUpdate(ctx context.Context, u model.IncidentUpdate, a
 // ListIncidentUpdates returns the timeline, oldest first — the order it is read
 // in, and the order a status page renders.
 func (s *Store) ListIncidentUpdates(ctx context.Context, incidentID model.ID) ([]model.IncidentUpdate, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT id, incident_id, org_id, state, body, author_id, notified_subscribers, created_at
 		FROM incident_updates WHERE incident_id = ? ORDER BY created_at, id`, incidentID[:])
 	if err != nil {
@@ -357,7 +357,7 @@ func (s *Store) ListIncidentUpdates(ctx context.Context, incidentID model.ID) ([
 // CountOpenIncidents is the overview's figure: anything not yet resolved.
 func (s *Store) CountOpenIncidents(ctx context.Context) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.ro.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM incidents WHERE org_id = ? AND resolved_at IS NULL`,
 		model.SentinelOrgID[:]).Scan(&count)
 	if err != nil {
@@ -372,7 +372,7 @@ func (s *Store) CountOpenIncidents(ctx context.Context) (int, error) {
 // Two calls would have been simpler to read and would have doubled the query
 // count on the one endpoint that is unauthenticated and public.
 func (s *Store) IncidentsForStatusPage(ctx context.Context, pageID model.ID, since time.Time, limit int) ([]model.Incident, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.ro.QueryContext(ctx, `
 		SELECT `+incidentColumns+`
 		FROM incidents
 		WHERE id IN (SELECT incident_id FROM incident_status_pages WHERE status_page_id = ?)
