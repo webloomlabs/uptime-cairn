@@ -31,6 +31,12 @@ type fakeStore struct {
 	// ones simple.
 	graph      map[model.ID]model.Monitor
 	graphState map[model.ID]*model.MonitorState
+
+	// certificate and domain are the observation rows, nil until something
+	// writes one — which is the state every monitor that never completes a
+	// handshake stays in.
+	certificate *model.Certificate
+	domain      *model.DomainExpiry
 }
 
 func (f *fakeStore) ListAssignable(context.Context) ([]model.Monitor, error) {
@@ -81,6 +87,30 @@ func (f *fakeStore) WriteBatch(_ context.Context, beats []model.Heartbeat) (int6
 	}
 	f.written = append(f.written, beats...)
 	return int64(len(beats)), nil
+}
+
+func (f *fakeStore) GetCertificate(_ context.Context, _ model.ID) (model.Certificate, error) {
+	if f.certificate == nil {
+		return model.Certificate{}, store.ErrNotFound
+	}
+	return *f.certificate, nil
+}
+
+func (f *fakeStore) SaveCertificate(_ context.Context, c model.Certificate) error {
+	f.certificate = &c
+	return nil
+}
+
+func (f *fakeStore) GetDomainExpiry(_ context.Context, _ model.ID) (model.DomainExpiry, error) {
+	if f.domain == nil {
+		return model.DomainExpiry{}, store.ErrNotFound
+	}
+	return *f.domain, nil
+}
+
+func (f *fakeStore) SaveDomainExpiry(_ context.Context, d model.DomainExpiry) error {
+	f.domain = &d
+	return nil
 }
 
 func newTestServer(retries int) (*Server, *fakeStore) {

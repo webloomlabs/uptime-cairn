@@ -44,11 +44,12 @@ func (s *Server) ingestResults(ctx context.Context, results []*probev1.Result) (
 	})
 
 	var (
-		beats    []model.Heartbeat
-		pending  []pendingAlert
-		rejected uint32
-		states   = make(map[model.ID]*model.MonitorState)
-		monitors = make(map[model.ID]model.Monitor)
+		beats       []model.Heartbeat
+		pending     []pendingAlert
+		observation []observed
+		rejected    uint32
+		states      = make(map[model.ID]*model.MonitorState)
+		monitors    = make(map[model.ID]model.Monitor)
 	)
 
 	for _, r := range ordered {
@@ -94,6 +95,14 @@ func (s *Server) ingestResults(ctx context.Context, results []*probev1.Result) (
 			return nil, nil, err
 		}
 		beats = append(beats, beat)
+		if r.GetCertificate() != nil || r.GetDomain() != nil {
+			// Held back with the alerts and for the same reason: a certificate
+			// row written for a heartbeat that then fails to persist would
+			// outlive the check that saw it.
+			observation = append(observation, observed{
+				monitor: monitor, beat: beat, status: state.Status, result: r,
+			})
+		}
 		if raised.fire {
 			// Collected rather than published here: an event must not be sent
 			// for a heartbeat that then fails to persist. Publishing happens
@@ -122,7 +131,12 @@ func (s *Server) ingestResults(ctx context.Context, results []*probev1.Result) (
 	// Only now, with the heartbeats and the states durable. An alert about a
 	// transition that was not recorded would be an alert nobody can corroborate
 	// afterwards, and the delivery log would disagree with the history.
-	s.raise(pending)
+	//
+	// The observations go in on the same terms, and their alerts join the
+	// transition ones rather than being published separately: a monitor that
+	// went down and whose certificate expired in the same batch should produce
+	// two events in one pass, not two passes.
+	s.raise(append(pending, s.record(ctx, observation)...))
 
 	// The high-water mark: every result at or below this id is durable. Results
 	// are ordered by result_id within a session, so the last one sent is the
@@ -150,6 +164,11 @@ type pendingAlert struct {
 	monitor model.Monitor
 	beat    model.Heartbeat
 	alert   alert
+
+	// status overrides the status derived from the event type, and is set only
+	// by the events that are not transitions — the expiry pair, where the
+	// monitor's status is whatever it already was.
+	status string
 }
 
 // suppression decides whether this result should be silent, and why.

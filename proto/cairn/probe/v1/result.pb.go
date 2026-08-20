@@ -240,7 +240,7 @@ func (x AssignmentRejection_Reason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use AssignmentRejection_Reason.Descriptor instead.
 func (AssignmentRejection_Reason) EnumDescriptor() ([]byte, []int) {
-	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{1, 0}
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{3, 0}
 }
 
 type Result struct {
@@ -289,8 +289,21 @@ type Result struct {
 	// computes the stored value at ingest and may disagree with this flag.
 	OutcomeChanged bool       `protobuf:"varint,9,opt,name=outcome_changed,json=outcomeChanged,proto3" json:"outcome_changed,omitempty"`
 	ErrorClass     ErrorClass `protobuf:"varint,10,opt,name=error_class,json=errorClass,proto3,enum=cairn.probe.v1.ErrorClass" json:"error_class,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// What the check saw on the wire, where the check performed a TLS handshake.
+	// Absent everywhere else, and absent on the failure paths too: a handshake
+	// that did not complete observed no certificate, and writing a stale one
+	// forward would make the expiry page say a certificate is fine when nothing
+	// has presented it for a week.
+	//
+	// This is an observation, not a verdict. The outcome above already carries
+	// the verdict, and the two are computed from different things on purpose —
+	// an http monitor is up with a certificate that expires on Thursday, and
+	// both of those facts have to survive to the control plane.
+	Certificate *CertificateObservation `protobuf:"bytes,11,opt,name=certificate,proto3" json:"certificate,omitempty"`
+	// The registration behind a domain_expiry check, on the same terms.
+	Domain        *DomainObservation `protobuf:"bytes,12,opt,name=domain,proto3" json:"domain,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Result) Reset() {
@@ -393,6 +406,246 @@ func (x *Result) GetErrorClass() ErrorClass {
 	return ErrorClass_ERROR_CLASS_UNSPECIFIED
 }
 
+func (x *Result) GetCertificate() *CertificateObservation {
+	if x != nil {
+		return x.Certificate
+	}
+	return nil
+}
+
+func (x *Result) GetDomain() *DomainObservation {
+	if x != nil {
+		return x.Domain
+	}
+	return nil
+}
+
+// CertificateObservation is the leaf certificate the check was presented with.
+//
+// It carries the certificate rather than a days-remaining number because the
+// number is a function of the clock, and a result replayed after a reconnect
+// would carry yesterday's arithmetic. The control plane counts the days itself,
+// from valid_to, at the moment it reads the row.
+type CertificateObservation struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Subject      string                 `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
+	Issuer       string                 `protobuf:"bytes,2,opt,name=issuer,proto3" json:"issuer,omitempty"`
+	SerialNumber string                 `protobuf:"bytes,3,opt,name=serial_number,json=serialNumber,proto3" json:"serial_number,omitempty"`
+	// Microseconds, as everywhere else on this protocol. 0 means unset: no
+	// certificate this monitor will ever see is valid from the Unix epoch.
+	ValidFromUnixMicros int64 `protobuf:"varint,4,opt,name=valid_from_unix_micros,json=validFromUnixMicros,proto3" json:"valid_from_unix_micros,omitempty"`
+	ValidToUnixMicros   int64 `protobuf:"varint,5,opt,name=valid_to_unix_micros,json=validToUnixMicros,proto3" json:"valid_to_unix_micros,omitempty"`
+	// Raw 32 bytes of the SHA-256 over the DER, not hex: the control plane
+	// compares it to decide whether the certificate changed, and the API hex-
+	// encodes it on the way out.
+	FingerprintSha256       []byte   `protobuf:"bytes,6,opt,name=fingerprint_sha256,json=fingerprintSha256,proto3" json:"fingerprint_sha256,omitempty"`
+	SubjectAlternativeNames []string `protobuf:"bytes,7,rep,name=subject_alternative_names,json=subjectAlternativeNames,proto3" json:"subject_alternative_names,omitempty"`
+	// Tri-state on purpose, and the reason is the whole point of the field:
+	// unset means the chain was not evaluated — verify_tls is off, or the type
+	// does not verify — and false is a finding. Collapsing them would report
+	// every unverified monitor as having a broken chain.
+	ChainValid *bool `protobuf:"varint,8,opt,name=chain_valid,json=chainValid,proto3,oneof" json:"chain_valid,omitempty"`
+	// Why the chain failed, when it did. Empty otherwise, and redacted like every
+	// other string on this protocol.
+	ChainError string `protobuf:"bytes,9,opt,name=chain_error,json=chainError,proto3" json:"chain_error,omitempty"`
+	// The line the operator drew, in days, from the monitor's own config.
+	//
+	// Present only where the type has such a setting — tls_expiry does, http does
+	// not — and it is what the control plane raises monitor.certificate_expiring
+	// against. Sent rather than assumed because the config is opaque to the
+	// control plane (ADR-005 decision 6): the probe is the only side that parsed
+	// it, and the control plane is the only side that decides who to tell. An
+	// observation with no threshold is recorded and never paged about.
+	DaysRemainingThreshold *int32 `protobuf:"varint,10,opt,name=days_remaining_threshold,json=daysRemainingThreshold,proto3,oneof" json:"days_remaining_threshold,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *CertificateObservation) Reset() {
+	*x = CertificateObservation{}
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CertificateObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CertificateObservation) ProtoMessage() {}
+
+func (x *CertificateObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CertificateObservation.ProtoReflect.Descriptor instead.
+func (*CertificateObservation) Descriptor() ([]byte, []int) {
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *CertificateObservation) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *CertificateObservation) GetIssuer() string {
+	if x != nil {
+		return x.Issuer
+	}
+	return ""
+}
+
+func (x *CertificateObservation) GetSerialNumber() string {
+	if x != nil {
+		return x.SerialNumber
+	}
+	return ""
+}
+
+func (x *CertificateObservation) GetValidFromUnixMicros() int64 {
+	if x != nil {
+		return x.ValidFromUnixMicros
+	}
+	return 0
+}
+
+func (x *CertificateObservation) GetValidToUnixMicros() int64 {
+	if x != nil {
+		return x.ValidToUnixMicros
+	}
+	return 0
+}
+
+func (x *CertificateObservation) GetFingerprintSha256() []byte {
+	if x != nil {
+		return x.FingerprintSha256
+	}
+	return nil
+}
+
+func (x *CertificateObservation) GetSubjectAlternativeNames() []string {
+	if x != nil {
+		return x.SubjectAlternativeNames
+	}
+	return nil
+}
+
+func (x *CertificateObservation) GetChainValid() bool {
+	if x != nil && x.ChainValid != nil {
+		return *x.ChainValid
+	}
+	return false
+}
+
+func (x *CertificateObservation) GetChainError() string {
+	if x != nil {
+		return x.ChainError
+	}
+	return ""
+}
+
+func (x *CertificateObservation) GetDaysRemainingThreshold() int32 {
+	if x != nil && x.DaysRemainingThreshold != nil {
+		return *x.DaysRemainingThreshold
+	}
+	return 0
+}
+
+// DomainObservation is the registration a domain_expiry check read, from
+// whichever of the two sources answered.
+type DomainObservation struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Domain              string                 `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
+	ExpiresAtUnixMicros int64                  `protobuf:"varint,2,opt,name=expires_at_unix_micros,json=expiresAtUnixMicros,proto3" json:"expires_at_unix_micros,omitempty"`
+	// Empty where the registry's answer did not name one, which WHOIS thin
+	// records regularly do not.
+	Registrar string `protobuf:"bytes,3,opt,name=registrar,proto3" json:"registrar,omitempty"`
+	// "rdap" or "whois", lowercase. Which one answered is worth storing: WHOIS is
+	// the fallback and its dates are the less trustworthy of the two, so an
+	// operator looking at a date that disagrees with their registrar's dashboard
+	// needs to know which path produced it.
+	Source string `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
+	// As on CertificateObservation, and for the same reason.
+	DaysRemainingThreshold *int32 `protobuf:"varint,5,opt,name=days_remaining_threshold,json=daysRemainingThreshold,proto3,oneof" json:"days_remaining_threshold,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *DomainObservation) Reset() {
+	*x = DomainObservation{}
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DomainObservation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DomainObservation) ProtoMessage() {}
+
+func (x *DomainObservation) ProtoReflect() protoreflect.Message {
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DomainObservation.ProtoReflect.Descriptor instead.
+func (*DomainObservation) Descriptor() ([]byte, []int) {
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *DomainObservation) GetDomain() string {
+	if x != nil {
+		return x.Domain
+	}
+	return ""
+}
+
+func (x *DomainObservation) GetExpiresAtUnixMicros() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMicros
+	}
+	return 0
+}
+
+func (x *DomainObservation) GetRegistrar() string {
+	if x != nil {
+		return x.Registrar
+	}
+	return ""
+}
+
+func (x *DomainObservation) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *DomainObservation) GetDaysRemainingThreshold() int32 {
+	if x != nil && x.DaysRemainingThreshold != nil {
+		return *x.DaysRemainingThreshold
+	}
+	return 0
+}
+
 // A monitor the probe will not run, reported once when the assignment arrives
 // rather than as a result stream that lies 250 times a second. The control
 // plane surfaces it as a configuration error against that monitor, and the
@@ -415,7 +668,7 @@ type AssignmentRejection struct {
 
 func (x *AssignmentRejection) Reset() {
 	*x = AssignmentRejection{}
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[1]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -427,7 +680,7 @@ func (x *AssignmentRejection) String() string {
 func (*AssignmentRejection) ProtoMessage() {}
 
 func (x *AssignmentRejection) ProtoReflect() protoreflect.Message {
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[1]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -440,7 +693,7 @@ func (x *AssignmentRejection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignmentRejection.ProtoReflect.Descriptor instead.
 func (*AssignmentRejection) Descriptor() ([]byte, []int) {
-	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{1}
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *AssignmentRejection) GetMonitorId() []byte {
@@ -507,7 +760,7 @@ type ProbeHealth struct {
 
 func (x *ProbeHealth) Reset() {
 	*x = ProbeHealth{}
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[2]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -519,7 +772,7 @@ func (x *ProbeHealth) String() string {
 func (*ProbeHealth) ProtoMessage() {}
 
 func (x *ProbeHealth) ProtoReflect() protoreflect.Message {
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[2]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -532,7 +785,7 @@ func (x *ProbeHealth) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeHealth.ProtoReflect.Descriptor instead.
 func (*ProbeHealth) Descriptor() ([]byte, []int) {
-	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{2}
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ProbeHealth) GetTimeUnixMicros() int64 {
@@ -668,7 +921,7 @@ type ResultBatch struct {
 
 func (x *ResultBatch) Reset() {
 	*x = ResultBatch{}
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[3]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -680,7 +933,7 @@ func (x *ResultBatch) String() string {
 func (*ResultBatch) ProtoMessage() {}
 
 func (x *ResultBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[3]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -693,7 +946,7 @@ func (x *ResultBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultBatch.ProtoReflect.Descriptor instead.
 func (*ResultBatch) Descriptor() ([]byte, []int) {
-	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{3}
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ResultBatch) GetResults() []*Result {
@@ -743,7 +996,7 @@ type ResultAck struct {
 
 func (x *ResultAck) Reset() {
 	*x = ResultAck{}
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[4]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +1008,7 @@ func (x *ResultAck) String() string {
 func (*ResultAck) ProtoMessage() {}
 
 func (x *ResultAck) ProtoReflect() protoreflect.Message {
-	mi := &file_cairn_probe_v1_result_proto_msgTypes[4]
+	mi := &file_cairn_probe_v1_result_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +1021,7 @@ func (x *ResultAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultAck.ProtoReflect.Descriptor instead.
 func (*ResultAck) Descriptor() ([]byte, []int) {
-	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{4}
+	return file_cairn_probe_v1_result_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ResultAck) GetAcknowledgedThroughResultId() []byte {
@@ -817,7 +1070,7 @@ var File_cairn_probe_v1_result_proto protoreflect.FileDescriptor
 
 const file_cairn_probe_v1_result_proto_rawDesc = "" +
 	"\n" +
-	"\x1bcairn/probe/v1/result.proto\x12\x0ecairn.probe.v1\"\xf9\x02\n" +
+	"\x1bcairn/probe/v1/result.proto\x12\x0ecairn.probe.v1\"\xfe\x03\n" +
 	"\x06Result\x12\x1b\n" +
 	"\tresult_id\x18\x01 \x01(\fR\bresultId\x12\x1d\n" +
 	"\n" +
@@ -831,7 +1084,32 @@ const file_cairn_probe_v1_result_proto_rawDesc = "" +
 	"\x0foutcome_changed\x18\t \x01(\bR\x0eoutcomeChanged\x12;\n" +
 	"\verror_class\x18\n" +
 	" \x01(\x0e2\x1a.cairn.probe.v1.ErrorClassR\n" +
-	"errorClass\"\xf2\x02\n" +
+	"errorClass\x12H\n" +
+	"\vcertificate\x18\v \x01(\v2&.cairn.probe.v1.CertificateObservationR\vcertificate\x129\n" +
+	"\x06domain\x18\f \x01(\v2!.cairn.probe.v1.DomainObservationR\x06domain\"\xf3\x03\n" +
+	"\x16CertificateObservation\x12\x18\n" +
+	"\asubject\x18\x01 \x01(\tR\asubject\x12\x16\n" +
+	"\x06issuer\x18\x02 \x01(\tR\x06issuer\x12#\n" +
+	"\rserial_number\x18\x03 \x01(\tR\fserialNumber\x123\n" +
+	"\x16valid_from_unix_micros\x18\x04 \x01(\x03R\x13validFromUnixMicros\x12/\n" +
+	"\x14valid_to_unix_micros\x18\x05 \x01(\x03R\x11validToUnixMicros\x12-\n" +
+	"\x12fingerprint_sha256\x18\x06 \x01(\fR\x11fingerprintSha256\x12:\n" +
+	"\x19subject_alternative_names\x18\a \x03(\tR\x17subjectAlternativeNames\x12$\n" +
+	"\vchain_valid\x18\b \x01(\bH\x00R\n" +
+	"chainValid\x88\x01\x01\x12\x1f\n" +
+	"\vchain_error\x18\t \x01(\tR\n" +
+	"chainError\x12=\n" +
+	"\x18days_remaining_threshold\x18\n" +
+	" \x01(\x05H\x01R\x16daysRemainingThreshold\x88\x01\x01B\x0e\n" +
+	"\f_chain_validB\x1b\n" +
+	"\x19_days_remaining_threshold\"\xf2\x01\n" +
+	"\x11DomainObservation\x12\x16\n" +
+	"\x06domain\x18\x01 \x01(\tR\x06domain\x123\n" +
+	"\x16expires_at_unix_micros\x18\x02 \x01(\x03R\x13expiresAtUnixMicros\x12\x1c\n" +
+	"\tregistrar\x18\x03 \x01(\tR\tregistrar\x12\x16\n" +
+	"\x06source\x18\x04 \x01(\tR\x06source\x12=\n" +
+	"\x18days_remaining_threshold\x18\x05 \x01(\x05H\x00R\x16daysRemainingThreshold\x88\x01\x01B\x1b\n" +
+	"\x19_days_remaining_threshold\"\xf2\x02\n" +
 	"\x13AssignmentRejection\x12\x1d\n" +
 	"\n" +
 	"monitor_id\x18\x01 \x01(\fR\tmonitorId\x12%\n" +
@@ -912,31 +1190,35 @@ func file_cairn_probe_v1_result_proto_rawDescGZIP() []byte {
 }
 
 var file_cairn_probe_v1_result_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_cairn_probe_v1_result_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_cairn_probe_v1_result_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_cairn_probe_v1_result_proto_goTypes = []any{
 	(Outcome)(0),                    // 0: cairn.probe.v1.Outcome
 	(ErrorClass)(0),                 // 1: cairn.probe.v1.ErrorClass
 	(AssignmentRejection_Reason)(0), // 2: cairn.probe.v1.AssignmentRejection.Reason
 	(*Result)(nil),                  // 3: cairn.probe.v1.Result
-	(*AssignmentRejection)(nil),     // 4: cairn.probe.v1.AssignmentRejection
-	(*ProbeHealth)(nil),             // 5: cairn.probe.v1.ProbeHealth
-	(*ResultBatch)(nil),             // 6: cairn.probe.v1.ResultBatch
-	(*ResultAck)(nil),               // 7: cairn.probe.v1.ResultAck
-	nil,                             // 8: cairn.probe.v1.ProbeHealth.ErrorCountByTypeEntry
+	(*CertificateObservation)(nil),  // 4: cairn.probe.v1.CertificateObservation
+	(*DomainObservation)(nil),       // 5: cairn.probe.v1.DomainObservation
+	(*AssignmentRejection)(nil),     // 6: cairn.probe.v1.AssignmentRejection
+	(*ProbeHealth)(nil),             // 7: cairn.probe.v1.ProbeHealth
+	(*ResultBatch)(nil),             // 8: cairn.probe.v1.ResultBatch
+	(*ResultAck)(nil),               // 9: cairn.probe.v1.ResultAck
+	nil,                             // 10: cairn.probe.v1.ProbeHealth.ErrorCountByTypeEntry
 }
 var file_cairn_probe_v1_result_proto_depIdxs = []int32{
-	0, // 0: cairn.probe.v1.Result.outcome:type_name -> cairn.probe.v1.Outcome
-	1, // 1: cairn.probe.v1.Result.error_class:type_name -> cairn.probe.v1.ErrorClass
-	2, // 2: cairn.probe.v1.AssignmentRejection.reason:type_name -> cairn.probe.v1.AssignmentRejection.Reason
-	8, // 3: cairn.probe.v1.ProbeHealth.error_count_by_type:type_name -> cairn.probe.v1.ProbeHealth.ErrorCountByTypeEntry
-	3, // 4: cairn.probe.v1.ResultBatch.results:type_name -> cairn.probe.v1.Result
-	5, // 5: cairn.probe.v1.ResultBatch.health:type_name -> cairn.probe.v1.ProbeHealth
-	4, // 6: cairn.probe.v1.ResultBatch.rejections:type_name -> cairn.probe.v1.AssignmentRejection
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	0,  // 0: cairn.probe.v1.Result.outcome:type_name -> cairn.probe.v1.Outcome
+	1,  // 1: cairn.probe.v1.Result.error_class:type_name -> cairn.probe.v1.ErrorClass
+	4,  // 2: cairn.probe.v1.Result.certificate:type_name -> cairn.probe.v1.CertificateObservation
+	5,  // 3: cairn.probe.v1.Result.domain:type_name -> cairn.probe.v1.DomainObservation
+	2,  // 4: cairn.probe.v1.AssignmentRejection.reason:type_name -> cairn.probe.v1.AssignmentRejection.Reason
+	10, // 5: cairn.probe.v1.ProbeHealth.error_count_by_type:type_name -> cairn.probe.v1.ProbeHealth.ErrorCountByTypeEntry
+	3,  // 6: cairn.probe.v1.ResultBatch.results:type_name -> cairn.probe.v1.Result
+	7,  // 7: cairn.probe.v1.ResultBatch.health:type_name -> cairn.probe.v1.ProbeHealth
+	6,  // 8: cairn.probe.v1.ResultBatch.rejections:type_name -> cairn.probe.v1.AssignmentRejection
+	9,  // [9:9] is the sub-list for method output_type
+	9,  // [9:9] is the sub-list for method input_type
+	9,  // [9:9] is the sub-list for extension type_name
+	9,  // [9:9] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_cairn_probe_v1_result_proto_init() }
@@ -944,13 +1226,15 @@ func file_cairn_probe_v1_result_proto_init() {
 	if File_cairn_probe_v1_result_proto != nil {
 		return
 	}
+	file_cairn_probe_v1_result_proto_msgTypes[1].OneofWrappers = []any{}
+	file_cairn_probe_v1_result_proto_msgTypes[2].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cairn_probe_v1_result_proto_rawDesc), len(file_cairn_probe_v1_result_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

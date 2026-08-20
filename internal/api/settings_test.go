@@ -311,8 +311,8 @@ func TestSystemInfoReportsWhatThisBuildCanActuallyRun(t *testing.T) {
 	if caps["kuma_import"] != false {
 		t.Error("capabilities claim a Kuma importer this build does not have")
 	}
-	if caps["certificate_detail"] != false {
-		t.Error("capabilities claim certificate detail nothing populates")
+	if caps["certificate_detail"] != true {
+		t.Error("capabilities hide certificate detail this build populates")
 	}
 	if caps["monitors"] != true {
 		t.Error("capabilities do not claim the thing this build is for")

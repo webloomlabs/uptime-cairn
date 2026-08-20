@@ -168,6 +168,7 @@ func (s *Session) removeAssignment(key string) {
 	defer s.mu.Unlock()
 	delete(s.assignments, key)
 	delete(s.lastOutcome, key)
+	delete(s.lastSeen, key)
 }
 
 func (s *Session) assignment(key string) (*probev1.Assignment, bool) {

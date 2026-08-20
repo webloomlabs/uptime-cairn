@@ -45,6 +45,77 @@ type Observation struct {
 	// on the timeout path, which is where a URL with embedded credentials
 	// usually escapes (ADR-005 decision 15).
 	Message string
+
+	// Certificate is what the far end presented, when this check completed a TLS
+	// handshake. Nil everywhere else, and nil on the failure paths too: a
+	// handshake that did not finish observed nothing, and reporting the previous
+	// certificate again would let the expiry page claim a certificate is being
+	// served when nothing has served it for a week.
+	//
+	// It is separate from Status because the two answer different questions. An
+	// http monitor is up and its certificate expires on Thursday, and only one
+	// of those fits in an outcome.
+	Certificate *Certificate
+
+	// Domain is the registration a domain_expiry check read. Nil for every other
+	// type, and nil when the registry could not be read.
+	Domain *Domain
+}
+
+// Certificate is the leaf certificate a check was presented with.
+//
+// It carries the certificate rather than a days-remaining figure on purpose:
+// the figure is a function of the clock, and a result buffered through a
+// twenty-minute outage would arrive carrying arithmetic from before it. The
+// control plane counts the days itself, from NotAfter, when it reads the row.
+type Certificate struct {
+	Subject      string
+	Issuer       string
+	SerialNumber string
+
+	NotBefore time.Time
+	NotAfter  time.Time
+
+	// FingerprintSHA256 is the raw digest over the DER, not hex. The control
+	// plane compares it to decide whether the certificate changed; the API
+	// hex-encodes it on the way out.
+	FingerprintSHA256 []byte
+
+	SANs []string
+
+	// ChainValid is nil when the chain was not evaluated — verify_tls off, or a
+	// type that does not verify. Distinct from false, which is a finding:
+	// collapsing the two would report every deliberately unverified monitor as
+	// having a broken chain.
+	ChainValid *bool
+	ChainError string
+
+	// DaysRemainingThreshold is the line the operator drew in this monitor's
+	// config, and nil where the type has no such setting — tls_expiry has one,
+	// http does not.
+	//
+	// It is reported rather than left for the control plane to look up because
+	// the config crosses the wire as opaque bytes (ADR-005 decision 6): the
+	// checker is the only side that parsed it. The control plane still decides
+	// what to do about it, which is the half that is not the probe's.
+	DaysRemainingThreshold *int
+}
+
+// Domain is the registration behind a domain_expiry check.
+type Domain struct {
+	Domain    string
+	ExpiresAt time.Time
+
+	// Registrar is empty where the registry's answer did not name one, which
+	// thin WHOIS records regularly do not.
+	Registrar string
+
+	// Source is "rdap" or "whois", lowercase, matching the values the schema
+	// accepts. Which one answered is worth keeping: WHOIS is the fallback and
+	// its dates are the less trustworthy of the two.
+	Source string
+
+	DaysRemainingThreshold *int
 }
 
 // Checker executes one monitor type. The interface is deliberately this small:

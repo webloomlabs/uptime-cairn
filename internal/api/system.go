@@ -70,7 +70,7 @@ func (s *Server) capabilities(r *http.Request) map[string]bool {
 		"manual_check":       true,
 		"bulk_operations":    true,
 		"kuma_import":        false,
-		"certificate_detail": false,
+		"certificate_detail": true,
 	}
 	if _, ok := s.registry.Lookup(model.TypeICMP); ok {
 		caps["icmp"] = true

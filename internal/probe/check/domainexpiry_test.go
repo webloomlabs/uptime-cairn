@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,6 +34,8 @@ func fakeRegistry(t *testing.T, expiry string, requests *int) *DomainExpiry {
 			_, _ = w.Write([]byte(`{"events":[
 				{"eventAction":"registration","eventDate":"2010-01-01T00:00:00Z"},
 				{"eventAction":"expiration","eventDate":"` + expiry + `"}
+			],"entities":[
+				{"roles":["registrar"],"vcardArray":["vcard",[["version",{},"text","4.0"],["fn",{},"text","Example Registrar, Inc."]]]}
 			]}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -269,5 +272,134 @@ func TestWHOISField(t *testing.T) {
 	// "whois:" with nothing after it for the TLDs that publish no server.
 	if got := whoisField("whois:\n", "whois"); got != "" {
 		t.Errorf("empty field = %q, want an empty string", got)
+	}
+}
+
+// The registrar arrives in the same response as the date, so reading it costs
+// nothing — but it arrives in jCard, which is an array of heterogeneous arrays
+// and the one part of RFC 9083 that is easy to get quietly wrong.
+func TestRDAPRegistrar(t *testing.T) {
+	t.Parallel()
+
+	var payload struct {
+		Entities []rdapEntity `json:"entities"`
+	}
+	body := `{"entities":[
+		{"roles":["technical"],"vcardArray":["vcard",[["version",{},"text","4.0"],["fn",{},"text","Someone Else"]]]},
+		{"roles":["registrar","abuse"],"vcardArray":["vcard",[["version",{},"text","4.0"],["fn",{},"text","Example Registrar, Inc."]]]}
+	]}`
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := rdapRegistrar(payload.Entities); got != "Example Registrar, Inc." {
+		t.Errorf("registrar = %q, want the entity holding the registrar role", got)
+	}
+
+	// A response that names no registrar leaves the field empty rather than
+	// picking whichever entity came first.
+	var none struct {
+		Entities []rdapEntity `json:"entities"`
+	}
+	if err := json.Unmarshal([]byte(`{"entities":[{"roles":["technical"],"vcardArray":["vcard",[["fn",{},"text","Nobody"]]]}]}`), &none); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := rdapRegistrar(none.Entities); got != "" {
+		t.Errorf("registrar = %q, want empty when no entity holds the role", got)
+	}
+
+	// jCard entries are arrays of mixed types. A malformed one is a field left
+	// blank, never a panic in the middle of a check.
+	var malformed struct {
+		Entities []rdapEntity `json:"entities"`
+	}
+	if err := json.Unmarshal([]byte(`{"entities":[{"roles":["registrar"],"vcardArray":["vcard",[["fn",{}]]]}]}`), &malformed); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := rdapRegistrar(malformed.Entities); got != "" {
+		t.Errorf("registrar = %q, want empty from a malformed vcard", got)
+	}
+}
+
+func TestWHOISRegistrar(t *testing.T) {
+	t.Parallel()
+
+	// "Registrar:" and "Registrar WHOIS Server:" both start with the same word,
+	// and matching on a prefix would file the referral server as the registrar's
+	// name on every thick registry there is.
+	body := "Domain Name: EXAMPLE.COM\r\nRegistrar WHOIS Server: whois.registrar.test\r\nRegistrar: Example Registrar, Inc.\r\n"
+	if got := whoisRegistrar(body); got != "Example Registrar, Inc." {
+		t.Errorf("registrar = %q, want the registrar name", got)
+	}
+	if got := whoisRegistrar("Sponsoring Registrar: Old Spelling Ltd\n"); got != "Old Spelling Ltd" {
+		t.Errorf("registrar = %q, want the sponsoring-registrar fallback", got)
+	}
+	if got := whoisRegistrar("Domain Name: EXAMPLE.COM\n"); got != "" {
+		t.Errorf("registrar = %q, want empty when the record names none", got)
+	}
+}
+
+// The registration is reported on every check, not only on the one that hit the
+// registry: the date has not changed in between, and the control plane decides
+// what is worth writing from the fact rather than from its absence.
+func TestDomainExpiryObservesTheRegistration(t *testing.T) {
+	t.Parallel()
+
+	requests := 0
+	expiry := time.Now().Add(400 * 24 * time.Hour).UTC().Truncate(time.Second)
+	checker := fakeRegistry(t, expiry.Format(time.RFC3339), &requests)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		obs := checker.Check(ctx, []byte(`{"domain":"good.test"}`))
+		if obs.Status != model.StatusUp {
+			t.Fatalf("attempt %d: status = %s (%s)", attempt, obs.Status, obs.Message)
+		}
+		if obs.Domain == nil {
+			t.Fatalf("attempt %d: no registration observed", attempt)
+		}
+		if !obs.Domain.ExpiresAt.Equal(expiry) {
+			t.Errorf("attempt %d: expires_at = %s, want %s", attempt, obs.Domain.ExpiresAt, expiry)
+		}
+		if obs.Domain.Registrar != "Example Registrar, Inc." {
+			t.Errorf("attempt %d: registrar = %q", attempt, obs.Domain.Registrar)
+		}
+		// Lowercase, because that is the only spelling the schema's CHECK
+		// constraint accepts — and the message next to it says "RDAP".
+		if obs.Domain.Source != "rdap" {
+			t.Errorf("attempt %d: source = %q, want rdap", attempt, obs.Domain.Source)
+		}
+		if obs.Domain.DaysRemainingThreshold == nil || *obs.Domain.DaysRemainingThreshold != defaultDomainThreshold {
+			t.Errorf("attempt %d: threshold = %v, want the default", attempt, obs.Domain.DaysRemainingThreshold)
+		}
+	}
+
+	// One registry lookup for both checks: the cache is the whole reason this
+	// type can report on every check without being rate-limited off the
+	// registry.
+	if requests != 1 {
+		t.Errorf("registry lookups = %d, want 1", requests)
+	}
+}
+
+// A registry that could not be read tells us nothing about the registration, so
+// there is nothing to record — and recording the previous date again would let
+// the expiry page claim a lapsed domain is fine.
+func TestDomainExpiryUnreadableObservesNothing(t *testing.T) {
+	t.Parallel()
+
+	checker := NewDomainExpiry()
+	checker.bootstrapURL = "http://127.0.0.1:1/bootstrap"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	obs := checker.Check(ctx, []byte(`{"domain":"unreachable.test","source":"rdap"}`))
+	if obs.Status != model.StatusUnknown {
+		t.Fatalf("status = %s, want unknown", obs.Status)
+	}
+	if obs.Domain != nil {
+		t.Error("an unreadable registry produced a registration observation")
 	}
 }

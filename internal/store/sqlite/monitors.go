@@ -822,6 +822,103 @@ func (s *Store) GetCertificate(ctx context.Context, id model.ID) (model.Certific
 	return out, nil
 }
 
+// SaveCertificate records the certificate last observed on a monitor.
+//
+// One row per monitor, replaced rather than appended to. Phase 1 answers "what
+// is on the wire now and when does it expire"; the history of a monitor's
+// certificates is a different question, and nothing yet asks it (data model
+// §4.6). Replacing keeps the read a primary-key lookup, which is what makes it
+// cheap enough to embed in a monitor detail view.
+//
+// org_id is taken from the monitor rather than from the caller, so a row can
+// never end up filed under an organisation that does not own the monitor it
+// names.
+func (s *Store) SaveCertificate(ctx context.Context, c model.Certificate) error {
+	var sans any
+	if len(c.SANs) > 0 {
+		encoded, err := json.Marshal(c.SANs)
+		if err != nil {
+			return fmt.Errorf("certificate sans: %w", err)
+		}
+		sans = string(encoded)
+	}
+
+	var chainValid any
+	if c.ChainValid != nil {
+		chainValid = boolToInt(*c.ChainValid)
+	}
+
+	var fingerprint any
+	if len(c.FingerprintSHA256) > 0 {
+		fingerprint = c.FingerprintSHA256
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO monitor_certificates (
+			monitor_id, org_id, subject, issuer, serial_number, valid_from, valid_to,
+			fingerprint_sha256, sans, chain_valid, chain_error, observed_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+		ON CONFLICT(monitor_id) DO UPDATE SET
+			subject = excluded.subject, issuer = excluded.issuer,
+			serial_number = excluded.serial_number, valid_from = excluded.valid_from,
+			valid_to = excluded.valid_to, fingerprint_sha256 = excluded.fingerprint_sha256,
+			sans = excluded.sans, chain_valid = excluded.chain_valid,
+			chain_error = excluded.chain_error, observed_at = excluded.observed_at`,
+		c.MonitorID[:], c.OrgID[:], nullString(c.Subject), nullString(c.Issuer),
+		nullString(c.SerialNumber), nullMillis(c.ValidFrom), millis(c.ValidTo),
+		fingerprint, sans, chainValid, nullString(c.ChainError), millis(c.ObservedAt))
+	if err != nil {
+		return fmt.Errorf("save monitor_certificates: %w", err)
+	}
+	return nil
+}
+
+// GetDomainExpiry returns the registration last observed for a monitor.
+func (s *Store) GetDomainExpiry(ctx context.Context, id model.ID) (model.DomainExpiry, error) {
+	row := s.ro.QueryRowContext(ctx, `
+		SELECT monitor_id, org_id, domain, expires_at, registrar, source, observed_at
+		FROM monitor_domain_expiry WHERE monitor_id = ?`, id[:])
+
+	var (
+		out                 model.DomainExpiry
+		monitorID, orgID    []byte
+		registrar, source   sql.NullString
+		expiresAt, observed int64
+	)
+	if err := row.Scan(&monitorID, &orgID, &out.Domain, &expiresAt, &registrar, &source, &observed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.DomainExpiry{}, ErrNotFound
+		}
+		return model.DomainExpiry{}, err
+	}
+	copy(out.MonitorID[:], monitorID)
+	copy(out.OrgID[:], orgID)
+	out.ExpiresAt = fromMillis(expiresAt)
+	out.Registrar = registrar.String
+	out.Source = source.String
+	out.ObservedAt = fromMillis(observed)
+	return out, nil
+}
+
+// SaveDomainExpiry records the registration last observed for a monitor, on the
+// same replace-in-place terms as SaveCertificate.
+func (s *Store) SaveDomainExpiry(ctx context.Context, d model.DomainExpiry) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO monitor_domain_expiry (
+			monitor_id, org_id, domain, expires_at, registrar, source, observed_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+		ON CONFLICT(monitor_id) DO UPDATE SET
+			domain = excluded.domain, expires_at = excluded.expires_at,
+			registrar = excluded.registrar, source = excluded.source,
+			observed_at = excluded.observed_at`,
+		d.MonitorID[:], d.OrgID[:], d.Domain, millis(d.ExpiresAt),
+		nullString(d.Registrar), nullString(d.Source), millis(d.ObservedAt))
+	if err != nil {
+		return fmt.Errorf("save monitor_domain_expiry: %w", err)
+	}
+	return nil
+}
+
 // ExpiringSoon counts certificates and domain registrations falling due inside
 // the horizon, for the overview.
 func (s *Store) ExpiringSoon(ctx context.Context, before time.Time) (certificates, domains int, err error) {

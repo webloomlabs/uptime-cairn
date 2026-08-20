@@ -2,6 +2,7 @@ package check
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -132,10 +133,18 @@ func (t *TLSExpiry) Check(ctx context.Context, config []byte) Observation {
 	remaining := leaf.NotAfter.Sub(now)
 	days := int(math.Floor(remaining.Hours() / 24))
 
+	// Observed before any of the verdicts below, and returned on every one of
+	// them. An expired certificate is still a certificate that was served, and
+	// the expiry page exists to show exactly that row — suppressing it on the
+	// failure path would blank the detail at the moment somebody opens it.
+	observed := observeCertificate(leaf)
+	observed.DaysRemainingThreshold = &threshold
+
 	obs := Observation{
 		Status:       model.StatusUp,
 		ResponseTime: &elapsed,
 		Code:         strconv.Itoa(days),
+		Certificate:  observed,
 	}
 
 	// Expiry first: it is what this monitor is for, and an expired certificate
@@ -156,8 +165,14 @@ func (t *TLSExpiry) Check(ctx context.Context, config []byte) Observation {
 		return obs
 	}
 
+	// Left nil when verify_chain is off: the chain was not evaluated, which is a
+	// different fact from a chain that failed, and only one of them is a finding.
 	if cfg.VerifyChain == nil || *cfg.VerifyChain {
-		if err := verifyChain(state, serverName, now); err != nil {
+		err := verifyChain(state, serverName, now)
+		valid := err == nil
+		observed.ChainValid = &valid
+		if err != nil {
+			observed.ChainError = err.Error()
 			obs.Status = model.StatusDown
 			obs.Class = ClassTLS
 			obs.Message = "certificate chain verification failed: " + err.Error()
@@ -183,6 +198,43 @@ func verifyChain(state tls.ConnectionState, serverName string, now time.Time) er
 		CurrentTime:   now,
 	})
 	return err
+}
+
+// observeCertificate copies out of x509 the fields the expiry surfaces need, and
+// nothing else. Shared with the http checker, which sees the same certificate on
+// the way past and has no reason to describe it differently.
+//
+// Not stored: the public key, the extensions, the DER itself. Every one of them
+// is a thing somebody could want and none of them is a thing anything asks for
+// yet, and a monitor_certificates row is written for every https monitor on the
+// install.
+func observeCertificate(leaf *x509.Certificate) *Certificate {
+	fingerprint := sha256.Sum256(leaf.Raw)
+
+	// DNS names and IP SANs together, in that order: a certificate issued to a
+	// bare address is unusual and is exactly the case where an operator looking
+	// at this list wants to see why their hostname is not on it.
+	sans := make([]string, 0, len(leaf.DNSNames)+len(leaf.IPAddresses))
+	sans = append(sans, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		sans = append(sans, ip.String())
+	}
+	if len(sans) == 0 {
+		sans = nil
+	}
+
+	return &Certificate{
+		Subject: leaf.Subject.String(),
+		Issuer:  leaf.Issuer.String(),
+		// Hex, because that is how every other tool prints a serial and an
+		// operator comparing this against their CA's dashboard should not have
+		// to convert.
+		SerialNumber:      leaf.SerialNumber.Text(16),
+		NotBefore:         leaf.NotBefore.UTC(),
+		NotAfter:          leaf.NotAfter.UTC(),
+		FingerprintSHA256: fingerprint[:],
+		SANs:              sans,
+	}
 }
 
 // humaniseDays keeps the message readable at both ends of the range: "0 days"

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -203,3 +204,95 @@ func TestHumaniseDays(t *testing.T) {
 		}
 	}
 }
+
+// The observation is what the expiry surfaces read, and it has to survive the
+// paths where the check itself failed: an expired certificate is exactly the row
+// somebody opens the detail view to look at.
+func TestTLSExpiryObservesTheCertificate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	tests := map[string]struct {
+		notAfter    time.Time
+		verifyChain string
+		wantStatus  model.Status
+		wantChain   *bool
+	}{
+		"valid, chain not evaluated": {
+			notAfter:    now.Add(365 * 24 * time.Hour),
+			verifyChain: `,"verify_chain":false`,
+			wantStatus:  model.StatusUp,
+			wantChain:   nil,
+		},
+		"expired": {
+			notAfter:    now.Add(-24 * time.Hour),
+			verifyChain: `,"verify_chain":false`,
+			wantStatus:  model.StatusDown,
+			wantChain:   nil,
+		},
+		"self-signed, chain evaluated and false": {
+			notAfter:   now.Add(365 * 24 * time.Hour),
+			wantStatus: model.StatusDown,
+			wantChain:  boolPtr(false),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			port := serveTLS(t, now.Add(-24*time.Hour), tc.notAfter)
+			config := `{"hostname":"127.0.0.1","port":` + strconv.Itoa(port) +
+				`,"server_name":"localhost"` + tc.verifyChain + `}`
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			obs := NewTLSExpiry().Check(ctx, []byte(config))
+			if obs.Status != tc.wantStatus {
+				t.Fatalf("status = %s, want %s (%s)", obs.Status, tc.wantStatus, obs.Message)
+			}
+			if obs.Certificate == nil {
+				t.Fatal("no certificate observed; the expiry surfaces read this and nothing else writes it")
+			}
+
+			got := obs.Certificate
+			if !got.NotAfter.Equal(tc.notAfter.UTC().Truncate(time.Second)) {
+				t.Errorf("not_after = %s, want %s", got.NotAfter, tc.notAfter.UTC())
+			}
+			if len(got.FingerprintSHA256) != sha256.Size {
+				t.Errorf("fingerprint is %d bytes, want %d", len(got.FingerprintSHA256), sha256.Size)
+			}
+			// DNS name and IP SAN both, in that order: an operator whose
+			// hostname is missing from the list needs to see what is there
+			// instead.
+			if len(got.SANs) != 2 || got.SANs[0] != "localhost" || got.SANs[1] != "127.0.0.1" {
+				t.Errorf("sans = %v, want [localhost 127.0.0.1]", got.SANs)
+			}
+			if got.Subject == "" || got.Issuer == "" || got.SerialNumber == "" {
+				t.Errorf("subject/issuer/serial = %q/%q/%q, want all populated",
+					got.Subject, got.Issuer, got.SerialNumber)
+			}
+			if got.DaysRemainingThreshold == nil {
+				t.Error("no threshold reported; this is the type that has one, and nothing pages without it")
+			}
+
+			// The tri-state is the point: nil means the chain was not
+			// evaluated, and collapsing it to false would report every
+			// deliberately unverified monitor as broken.
+			switch {
+			case tc.wantChain == nil && got.ChainValid != nil:
+				t.Errorf("chain_valid = %v, want unset when the chain was not evaluated", *got.ChainValid)
+			case tc.wantChain != nil && got.ChainValid == nil:
+				t.Error("chain_valid unset, want a verdict when the chain was evaluated")
+			case tc.wantChain != nil && *got.ChainValid != *tc.wantChain:
+				t.Errorf("chain_valid = %v, want %v", *got.ChainValid, *tc.wantChain)
+			}
+			if tc.wantChain != nil && !*tc.wantChain && got.ChainError == "" {
+				t.Error("a failed chain reported no reason")
+			}
+		})
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

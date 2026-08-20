@@ -163,7 +163,8 @@ carried forward.
 - [x] Tags — the slug is derived from the name rather than supplied, so two tags that render identically in a list cannot both exist; a name colliding on slug is a `409` naming the slug
 - [x] Dependency-aware suppression — transitive up the chain, and a parent under maintenance suppresses its children as surely as a parent that is down: taking the router down for a firmware upgrade is the most known problem there is. The child's own heartbeat still records the real outage, so its uptime figure is unaffected; only the page is withheld
 - [x] Maintenance windows: single, daily, weekly, monthly, and cron, evaluated in the window's own IANA zone with the zone database embedded in the binary — "02:00 every Sunday" survives a daylight-saving transition still meaning 02:00. Targets resolve by query through monitors, groups, and tags, so a window covering a tag keeps covering monitors added later. **Groups and tags have tables and no API**, so only monitor targets can be created today; referencing a group or tag is a validation error naming the field rather than a foreign-key failure
-- [ ] Certificate and domain expiry surfaced as upcoming-expiry data — `/monitors/{id}/certificate`, `include=certificate`, and the overview's expiring-soon counts are built and read the tables migration `0003` created. **Nothing writes those tables:** the TLS and HTTP checkers see the certificate and report only an expiry verdict, and carrying the observation to the control plane is a new field on the probe protocol's result frame. So the endpoint answers `404` for every monitor, which is the honest answer to "what certificate was observed" when none has been
+- [x] Certificate and domain expiry surfaced as upcoming-expiry data — `/monitors/{id}/certificate`, `include=certificate`, and the overview's expiring-soon counts read tables the ingest path now writes. The TLS and HTTP checkers report what the handshake presented and the domain checker reports the registration behind the name, both on `Result.certificate` / `Result.domain` ([protocol §7.4](../probe/protocol.md#74-observations)); ingest stores one row per monitor, replaced in place. The observation rides the result frame on change and once an hour otherwise, because it is several hundred bytes against a hundred for the result carrying it and sending it on every check would cut the probe buffer's outage coverage to a fifth — so `observed_at` means "last confirmed on the wire" to within an hour, and a renewal lands on the next check. `monitor.certificate_expiring` and `monitor.domain_expiring` fire when the countdown crosses the monitor's own `days_remaining_threshold`, again when the certificate is replaced by one still inside it, and once a day after that; deduplicated against the stored row rather than memory, so a restart does not re-page. An `http` monitor has no such threshold and is deliberately recorded without being alerted on — the operator who wants the page adds a `tls_expiry` monitor, which is the type that asks for the line
+- [ ] Check-now refreshes the certificate as well as the verdict — **it refreshes the verdict only.** The inline checker sees the certificate and drops it, because carrying it means mapping `check.Observation` onto the protocol's types and that mapping lives in `internal/probe`, which neither the API nor the control plane may import (ADR-001). The scheduled check picks it up within one interval, so the gap self-heals; closing it properly is a seam decision about where that mapping belongs rather than a patch
 - [x] Uptime history browsing over arbitrary past ranges via rollups
 
 ## Alerting & webhooks
@@ -282,22 +283,21 @@ carried forward.
 
 ## What to do next, and why in this order
 
-1. **Certificate and domain observations.** `/monitors/{id}/certificate`,
-   `include=certificate`, and the overview's expiring-soon counts are built and
-   read tables nothing writes. Closing that needs the observation carried from the
-   checker to the control plane — a field on the probe protocol's result frame,
-   which is the one change in this list that is not API work.
-   `monitor.certificate_expiring` is an event type with nothing raising it, and it
-   is the alert people actually want from a TLS monitor.
-2. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
+1. **Delivery to status page subscribers.** Subscriptions are recorded, encrypted,
    and double opt-in, and nothing sends the confirmation mail. The instance relay
    now exists to send it through.
-3. **The assignment reload itself.** The reader pool moved it off the write
+2. **The assignment reload itself.** The reader pool moved it off the write
    connection; it is still an O(N) scan of every assignable monitor, and creation
    still slows as the install grows — it is simply no longer blocking anything
    while it does. What is left is the cost of the scan rather than the queue in
    front of it, and `cairn_db_pool_wait_total` is now the number that tells the
    two apart.
+3. **The load test against the observation path.** The 5,000-monitor gate has
+   never run with certificates on the wire. The arithmetic says it is on the order
+   of one row a second and a few hundred extra bytes on one result an hour per
+   monitor, and the harness is what turns that from arithmetic into a number —
+   the figure to watch is `cairn_db_pool_wait_total`, because the observation is
+   the first thing on the ingest path that reads before it writes.
 
 The UI comes after those deliberately: the plan puts it in Month 3, and every
 surface it needs now exists — which was the point of finishing the API first. The

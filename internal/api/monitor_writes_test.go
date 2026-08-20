@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
@@ -581,4 +582,79 @@ func mustParseID(t *testing.T, raw string) model.ID {
 		t.Fatalf("parse id %q", raw)
 	}
 	return id
+}
+
+// Once something has been observed, the endpoint and the include both answer
+// with it. This is the read side of the observation path: the checker sees the
+// certificate, the result frame carries it, ingest stores it, and these two
+// surfaces are what anybody actually looks at.
+func TestCertificateEndpointRendersWhatWasObserved(t *testing.T) {
+	t.Parallel()
+
+	server, store := testServerWithStore(t)
+	c := newClient(t, server)
+	c.setup()
+	id := createHTTPMonitor(t, c, "Checkout")
+
+	monitorID, ok := model.ParseID(id)
+	if !ok {
+		t.Fatalf("parse id %q", id)
+	}
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	valid := true
+	if err := store.SaveCertificate(t.Context(), model.Certificate{
+		MonitorID:         monitorID,
+		OrgID:             model.SentinelOrgID,
+		Subject:           "CN=api.example.com",
+		Issuer:            "CN=Example CA R3",
+		SerialNumber:      "04a1b2c3",
+		ValidTo:           now.Add(45 * 24 * time.Hour),
+		FingerprintSHA256: []byte{0xde, 0xad, 0xbe, 0xef},
+		SANs:              []string{"api.example.com"},
+		ChainValid:        &valid,
+		ObservedAt:        now,
+	}); err != nil {
+		t.Fatalf("save certificate: %v", err)
+	}
+
+	resp, body := c.do(http.MethodGet, "/api/v1/monitors/"+id+"/certificate", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("certificate = %d, want 200 (%v)", resp.StatusCode, body)
+	}
+	if body["subject"] != "CN=api.example.com" || body["issuer"] != "CN=Example CA R3" {
+		t.Errorf("certificate = %v, want the observed subject and issuer", body)
+	}
+	// Hex on the way out: the wire carries raw bytes, and JSON has nowhere to
+	// put them.
+	if body["fingerprint_sha256"] != "deadbeef" {
+		t.Errorf("fingerprint_sha256 = %v, want the hex encoding", body["fingerprint_sha256"])
+	}
+	if body["chain_valid"] != true {
+		t.Errorf("chain_valid = %v, want true", body["chain_valid"])
+	}
+	// Counted from now rather than stored, so it counts down between
+	// observations instead of going stale for an hour at a time.
+	if remaining, ok := body["days_remaining"].(float64); !ok || remaining < 44 || remaining > 45 {
+		t.Errorf("days_remaining = %v, want about 45", body["days_remaining"])
+	}
+
+	resp, body = c.do(http.MethodGet, "/api/v1/monitors/"+id+"?include=certificate", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("include=certificate = %d (%v)", resp.StatusCode, body)
+	}
+	embedded, isObject := body["certificate"].(map[string]any)
+	if !isObject {
+		t.Fatalf("certificate = %v, want the embedded object", body["certificate"])
+	}
+	if embedded["serial_number"] != "04a1b2c3" {
+		t.Errorf("embedded certificate = %v, want the same row the endpoint returned", embedded)
+	}
+
+	// And it lands in the overview's expiring-soon count, which is the same
+	// index read from the other end.
+	_, overview := c.do(http.MethodGet, "/api/v1/overview", nil)
+	if overview["certificates_expiring_soon"] != float64(0) {
+		t.Errorf("certificates_expiring_soon = %v, want 0 at 45 days out", overview["certificates_expiring_soon"])
+	}
 }

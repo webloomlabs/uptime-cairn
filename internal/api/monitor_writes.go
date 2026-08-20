@@ -447,6 +447,17 @@ func (s *Server) runMonitorCheck(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	observation := checker.Check(ctx, config)
 
+	// The certificate this check may have observed is deliberately not recorded
+	// here, and it is worth saying why rather than leaving it looking like an
+	// oversight. Carrying it would mean mapping check.Observation onto the
+	// protocol's types, and that mapping lives in internal/probe by convention —
+	// which this package must not import, and which the control plane must not
+	// import either (ADR-001). Duplicating a twenty-line mapper that would then
+	// drift silently is the worse of the two, so a manual check refreshes the
+	// verdict and leaves the certificate row to the scheduled check, which
+	// updates it within one interval. Resolving that properly is a seam decision
+	// rather than a patch.
+
 	telemetry.Engine.ChecksRunInline.Add(1)
 	beat, err := s.push.RecordCheck(r.Context(), monitor, observation.Status,
 		observation.Code, observation.Message, observation.ResponseTime)
@@ -758,15 +769,19 @@ func (s *Server) writeMonitor(w http.ResponseWriter, r *http.Request, id model.I
 }
 
 // getMonitorCertificate returns the certificate observed on the most recent
-// check.
+// check that completed a handshake.
 //
-// **Nothing writes monitor_certificates in this build.** The TLS and HTTP
-// checkers see the certificate and report only an expiry verdict, because
-// carrying the observation to the control plane means a field on the probe
-// protocol's result frame — a protocol change, which is deliberately not part of
-// finishing the REST API. So this endpoint is correct and currently answers 404
-// for every monitor, which is the honest answer to "what certificate was
-// observed" when none has been.
+// 404 is the ordinary answer for most monitors and not an error: a tcp, icmp,
+// dns, or push monitor never sees a certificate, and an https monitor that has
+// not been checked yet has not seen one either. The types that do — tls_expiry,
+// and http against an https URL — carry what they saw to the control plane on
+// the result frame, which stores it.
+//
+// `observed_at` means "last confirmed on the wire", and is accurate to within an
+// hour rather than to the last check: an unchanged certificate is re-reported
+// hourly rather than on every check, because it is several hundred bytes against
+// a hundred for the result carrying it and it changes twice a year. A renewal is
+// reported on the next check, not on the next hour.
 func (s *Server) getMonitorCertificate(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.monitorID(w, r)
 	if !ok {

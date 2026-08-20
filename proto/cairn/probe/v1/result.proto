@@ -136,6 +136,86 @@ message Result {
   bool outcome_changed = 9;
 
   ErrorClass error_class = 10;
+
+  // What the check saw on the wire, where the check performed a TLS handshake.
+  // Absent everywhere else, and absent on the failure paths too: a handshake
+  // that did not complete observed no certificate, and writing a stale one
+  // forward would make the expiry page say a certificate is fine when nothing
+  // has presented it for a week.
+  //
+  // This is an observation, not a verdict. The outcome above already carries
+  // the verdict, and the two are computed from different things on purpose —
+  // an http monitor is up with a certificate that expires on Thursday, and
+  // both of those facts have to survive to the control plane.
+  CertificateObservation certificate = 11;
+
+  // The registration behind a domain_expiry check, on the same terms.
+  DomainObservation domain = 12;
+}
+
+// CertificateObservation is the leaf certificate the check was presented with.
+//
+// It carries the certificate rather than a days-remaining number because the
+// number is a function of the clock, and a result replayed after a reconnect
+// would carry yesterday's arithmetic. The control plane counts the days itself,
+// from valid_to, at the moment it reads the row.
+message CertificateObservation {
+  string subject = 1;
+  string issuer = 2;
+  string serial_number = 3;
+
+  // Microseconds, as everywhere else on this protocol. 0 means unset: no
+  // certificate this monitor will ever see is valid from the Unix epoch.
+  int64 valid_from_unix_micros = 4;
+  int64 valid_to_unix_micros = 5;
+
+  // Raw 32 bytes of the SHA-256 over the DER, not hex: the control plane
+  // compares it to decide whether the certificate changed, and the API hex-
+  // encodes it on the way out.
+  bytes fingerprint_sha256 = 6;
+
+  repeated string subject_alternative_names = 7;
+
+  // Tri-state on purpose, and the reason is the whole point of the field:
+  // unset means the chain was not evaluated — verify_tls is off, or the type
+  // does not verify — and false is a finding. Collapsing them would report
+  // every unverified monitor as having a broken chain.
+  optional bool chain_valid = 8;
+
+  // Why the chain failed, when it did. Empty otherwise, and redacted like every
+  // other string on this protocol.
+  string chain_error = 9;
+
+  // The line the operator drew, in days, from the monitor's own config.
+  //
+  // Present only where the type has such a setting — tls_expiry does, http does
+  // not — and it is what the control plane raises monitor.certificate_expiring
+  // against. Sent rather than assumed because the config is opaque to the
+  // control plane (ADR-005 decision 6): the probe is the only side that parsed
+  // it, and the control plane is the only side that decides who to tell. An
+  // observation with no threshold is recorded and never paged about.
+  optional int32 days_remaining_threshold = 10;
+}
+
+// DomainObservation is the registration a domain_expiry check read, from
+// whichever of the two sources answered.
+message DomainObservation {
+  string domain = 1;
+
+  int64 expires_at_unix_micros = 2;
+
+  // Empty where the registry's answer did not name one, which WHOIS thin
+  // records regularly do not.
+  string registrar = 3;
+
+  // "rdap" or "whois", lowercase. Which one answered is worth storing: WHOIS is
+  // the fallback and its dates are the less trustworthy of the two, so an
+  // operator looking at a date that disagrees with their registrar's dashboard
+  // needs to know which path produced it.
+  string source = 4;
+
+  // As on CertificateObservation, and for the same reason.
+  optional int32 days_remaining_threshold = 5;
 }
 
 // A monitor the probe will not run, reported once when the assignment arrives

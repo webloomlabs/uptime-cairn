@@ -28,6 +28,15 @@ type Store interface {
 	GetState(ctx context.Context, id model.ID) (model.MonitorState, error)
 	SaveState(ctx context.Context, state model.MonitorState) error
 	WriteBatch(ctx context.Context, beats []model.Heartbeat) (int64, error)
+
+	// The certificate and registration a check observed, read before they are
+	// replaced because the expiry alert is deduplicated against the row it
+	// overwrites. ErrNotFound on either is the ordinary case, not a fault: most
+	// monitors never complete a handshake and never will.
+	GetCertificate(ctx context.Context, id model.ID) (model.Certificate, error)
+	SaveCertificate(ctx context.Context, c model.Certificate) error
+	GetDomainExpiry(ctx context.Context, id model.ID) (model.DomainExpiry, error)
+	SaveDomainExpiry(ctx context.Context, d model.DomainExpiry) error
 }
 
 // ConfigOpener decrypts the credential half of a monitor's configuration.
@@ -122,15 +131,24 @@ func (s *Server) raise(pending []pendingAlert) {
 	instance := s.alerts.Instance()
 	for _, p := range pending {
 		beat := p.beat
-		status := statusFor(p.alert.eventType)
+		status := p.status
+		if status == "" {
+			status = statusFor(p.alert.eventType)
+		}
 		s.alerts.Publish(notify.NewEvent(
 			p.alert.eventType, instance, p.monitor, p.alert.previous, &beat, status, beat.Time))
 	}
 }
 
-// statusFor is the monitor status the event describes. Taken from the event type
-// rather than from the state, which by the time this runs has already been
-// written and could have moved on within the same batch.
+// statusFor is the monitor status the event describes, for the events that are
+// transitions. Taken from the event type rather than from the state, which by
+// the time this runs has already been written and could have moved on within the
+// same batch.
+//
+// The expiry events set pendingAlert.status instead, because they are not
+// transitions: an http monitor with a certificate expiring on Thursday is up,
+// and reporting it as pending would be wrong in the one field a receiver
+// branches on.
 func statusFor(eventType string) string {
 	switch eventType {
 	case model.EventMonitorUp:

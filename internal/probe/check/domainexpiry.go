@@ -49,6 +49,13 @@ type domainRecord struct {
 	source string
 	err    string
 
+	// registrar is empty where the registry's answer did not name one, which
+	// thin WHOIS records regularly do not. Recorded rather than looked up
+	// separately: it arrives in the same response as the date, and asking a
+	// registry a second question for it would double a lookup this type is
+	// rate-limited into doing once a day.
+	registrar string
+
 	// notRegistered is the one registry answer that is a verdict rather than a
 	// failure to read: the name is not registered at all. It is the exact thing
 	// this monitor exists to catch, and reporting a lapsed domain as "cannot
@@ -56,6 +63,13 @@ type domainRecord struct {
 	notRegistered bool
 
 	fetchedAt time.Time
+}
+
+// registration is what one registry answer yielded. Both lookup paths return it
+// so the caller does not have to know which of the two it asked.
+type registration struct {
+	expiry    time.Time
+	registrar string
 }
 
 // errNotRegistered is returned by both lookup paths when the registry answers
@@ -167,7 +181,21 @@ func (d *DomainExpiry) Check(ctx context.Context, config []byte) Observation {
 	}
 
 	days := int(math.Floor(time.Until(record.expiry).Hours() / 24))
-	obs := Observation{Status: model.StatusUp, Code: strconv.Itoa(days)}
+	obs := Observation{
+		Status: model.StatusUp,
+		Code:   strconv.Itoa(days),
+		// Reported on every check, not only on the ones that hit the registry.
+		// The date is what was observed and it has not changed since; the
+		// control plane decides what is worth writing, and giving it the fact
+		// only once a day would leave it deciding from nothing in between.
+		Domain: &Domain{
+			Domain:                 domain,
+			ExpiresAt:              record.expiry.UTC(),
+			Registrar:              record.registrar,
+			Source:                 strings.ToLower(record.source),
+			DaysRemainingThreshold: &threshold,
+		},
+	}
 	expiresOn := record.expiry.UTC().Format(time.RFC3339)
 
 	switch {
@@ -220,10 +248,10 @@ func (d *DomainExpiry) fetch(ctx context.Context, domain, source string) domainR
 	var reasons []string
 
 	if source != "whois" {
-		expiry, err := d.viaRDAP(ctx, domain)
+		found, err := d.viaRDAP(ctx, domain)
 		switch {
 		case err == nil:
-			return domainRecord{expiry: expiry, source: "RDAP"}
+			return domainRecord{expiry: found.expiry, registrar: found.registrar, source: "RDAP"}
 		case errors.Is(err, errNotRegistered):
 			return domainRecord{notRegistered: true, source: "RDAP"}
 		}
@@ -233,10 +261,10 @@ func (d *DomainExpiry) fetch(ctx context.Context, domain, source string) domainR
 		}
 	}
 
-	expiry, err := viaWHOIS(ctx, domain)
+	found, err := viaWHOIS(ctx, domain)
 	switch {
 	case err == nil:
-		return domainRecord{expiry: expiry, source: "WHOIS"}
+		return domainRecord{expiry: found.expiry, registrar: found.registrar, source: "WHOIS"}
 	case errors.Is(err, errNotRegistered):
 		return domainRecord{notRegistered: true, source: "WHOIS"}
 	}
@@ -252,46 +280,46 @@ func (d *DomainExpiry) fetch(ctx context.Context, domain, source string) domainR
 // reads the expiration event. Going through the bootstrap file rather than a
 // public redirector keeps the lookup on the path RFC 9224 defines and takes a
 // third party out of the middle of every check.
-func (d *DomainExpiry) viaRDAP(ctx context.Context, domain string) (time.Time, error) {
+func (d *DomainExpiry) viaRDAP(ctx context.Context, domain string) (registration, error) {
 	tld, err := tldOf(domain)
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 
 	services, err := d.rdapServices(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 	base, ok := services[tld]
 	if !ok {
-		return time.Time{}, fmt.Errorf(".%s publishes no RDAP service", tld)
+		return registration{}, fmt.Errorf(".%s publishes no RDAP service", tld)
 	}
 
 	endpoint := strings.TrimSuffix(base, "/") + "/domain/" + domain
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 	req.Header.Set("Accept", "application/rdap+json")
 	req.Header.Set("User-Agent", "uptime-cairn")
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return time.Time{}, errors.New(redact(err))
+		return registration{}, errors.New(redact(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		// RFC 9083: the registry answered, and the answer is that this name is
 		// not in the registry.
-		return time.Time{}, errNotRegistered
+		return registration{}, errNotRegistered
 	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, fmt.Errorf("%s answered %s", endpoint, resp.Status)
+		return registration{}, fmt.Errorf("%s answered %s", endpoint, resp.Status)
 	}
 
 	var payload struct {
@@ -299,9 +327,10 @@ func (d *DomainExpiry) viaRDAP(ctx context.Context, domain string) (time.Time, e
 			Action string `json:"eventAction"`
 			Date   string `json:"eventDate"`
 		} `json:"events"`
+		Entities []rdapEntity `json:"entities"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return time.Time{}, fmt.Errorf("decoding response: %w", err)
+		return registration{}, fmt.Errorf("decoding response: %w", err)
 	}
 	for _, event := range payload.Events {
 		if event.Action != "expiration" {
@@ -309,11 +338,68 @@ func (d *DomainExpiry) viaRDAP(ctx context.Context, domain string) (time.Time, e
 		}
 		when, err := parseRegistryDate(event.Date)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("expiration event date %q: %w", event.Date, err)
+			return registration{}, fmt.Errorf("expiration event date %q: %w", event.Date, err)
 		}
-		return when, nil
+		return registration{expiry: when, registrar: rdapRegistrar(payload.Entities)}, nil
 	}
-	return time.Time{}, errors.New("response carries no expiration event")
+	return registration{}, errors.New("response carries no expiration event")
+}
+
+// rdapEntity is the sliver of RFC 9083's entity object this needs: who they are
+// and what they are called. Everything else in there — handles, addresses,
+// status, nested entities — belongs to a WHOIS-replacement client, which this
+// is not.
+type rdapEntity struct {
+	Roles []string `json:"roles"`
+
+	// VCardArray is ["vcard", [[name, params, type, value], ...]] — a JSON
+	// encoding of jCard (RFC 7095) whose entries are heterogeneous arrays, so it
+	// is decoded loosely and read defensively rather than modelled.
+	VCardArray []json.RawMessage `json:"vcardArray"`
+}
+
+// rdapRegistrar returns the display name of the entity holding the registrar
+// role, or empty when the response names none.
+func rdapRegistrar(entities []rdapEntity) string {
+	for _, entity := range entities {
+		registrar := false
+		for _, role := range entity.Roles {
+			if strings.EqualFold(role, "registrar") {
+				registrar = true
+				break
+			}
+		}
+		if !registrar || len(entity.VCardArray) < 2 {
+			continue
+		}
+		if name := vcardValue(entity.VCardArray[1], "fn"); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// vcardValue reads one property out of a jCard property array. The shape is
+// [[name, params, type, value], ...] and every element is a different type,
+// which is why this walks `any` instead of unmarshalling into a struct.
+func vcardValue(properties json.RawMessage, want string) string {
+	var entries [][]any
+	if err := json.Unmarshal(properties, &entries); err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if len(entry) < 4 {
+			continue
+		}
+		name, ok := entry[0].(string)
+		if !ok || !strings.EqualFold(name, want) {
+			continue
+		}
+		if value, ok := entry[3].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // rdapServices returns the bootstrap table, fetched at most once a day.
@@ -388,24 +474,24 @@ func (d *DomainExpiry) rdapServices(ctx context.Context) (map[string]string, err
 // viaWHOIS asks IANA which server is authoritative for the TLD, then asks that
 // server about the domain. Two hops rather than a hard-coded server list, which
 // would be wrong within a year.
-func viaWHOIS(ctx context.Context, domain string) (time.Time, error) {
+func viaWHOIS(ctx context.Context, domain string) (registration, error) {
 	tld, err := tldOf(domain)
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 
 	root, err := whoisQuery(ctx, "whois.iana.org", tld)
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 	server := whoisField(root, "whois")
 	if server == "" {
-		return time.Time{}, fmt.Errorf(".%s publishes no WHOIS server", tld)
+		return registration{}, fmt.Errorf(".%s publishes no WHOIS server", tld)
 	}
 
 	body, err := whoisQuery(ctx, server, domain)
 	if err != nil {
-		return time.Time{}, err
+		return registration{}, err
 	}
 
 	// Some registries answer with a thin record naming the registrar's own
@@ -414,11 +500,23 @@ func viaWHOIS(ctx context.Context, domain string) (time.Time, error) {
 	if referral := whoisField(body, "registrar whois server"); referral != "" && referral != server {
 		if deep, err := whoisQuery(ctx, referral, domain); err == nil {
 			if when, err := whoisExpiry(deep); err == nil {
-				return when, nil
+				// The thin record is the fallback for the name, not for the
+				// date: a registry that referred us elsewhere for the dates
+				// usually still named the registrar itself.
+				registrar := whoisRegistrar(deep)
+				if registrar == "" {
+					registrar = whoisRegistrar(body)
+				}
+				return registration{expiry: when, registrar: registrar}, nil
 			}
 		}
 	}
-	return whoisExpiry(body)
+
+	when, err := whoisExpiry(body)
+	if err != nil {
+		return registration{}, err
+	}
+	return registration{expiry: when, registrar: whoisRegistrar(body)}, nil
 }
 
 func whoisQuery(ctx context.Context, server, query string) (string, error) {
@@ -473,6 +571,26 @@ var whoisNoMatch = []string{
 	"domain not found",
 	"status: free",
 	"status: available",
+}
+
+// whoisRegistrarKeys are the field names registries use for the sponsoring
+// registrar, lower-cased and in preference order. Shorter than the expiry list
+// because a missing registrar costs a blank field rather than a monitor that
+// never works, so this stops at what the large registries emit.
+var whoisRegistrarKeys = []string{
+	"registrar",
+	"sponsoring registrar",
+	"registrar name",
+	"registrar organization",
+}
+
+func whoisRegistrar(body string) string {
+	for _, key := range whoisRegistrarKeys {
+		if value := whoisField(body, key); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func whoisExpiry(body string) (time.Time, error) {

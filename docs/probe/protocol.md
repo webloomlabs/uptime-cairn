@@ -426,6 +426,42 @@ called `important`; the storage column is unchanged and its meaning is unchanged
 here rather than assumed, because the name in the ADR sketch implies an authority the
 probe does not have.)
 
+### 7.4 Observations
+
+A check produces two independent facts: whether the target answered, and what was on
+the wire while it did. `Result.certificate` and `Result.domain` carry the second one.
+
+- **Not a verdict.** `outcome` already carries the verdict, and the two are computed
+  from different things on purpose — an https monitor is `UP` with a certificate that
+  expires on Thursday, and both facts have to reach the control plane. A checker MUST
+  NOT change its outcome because of what it reported here.
+- **Only what was actually seen.** A handshake that did not complete observed nothing,
+  and the fields stay unset. A probe MUST NOT carry a previous observation forward: the
+  expiry page claiming a certificate is being served when nothing has served one for a
+  week is worse than an empty page.
+- **Sent on change, and once an hour otherwise.** An observation is several hundred
+  bytes against roughly a hundred for the result carrying it, so sending one on every
+  check would cut the buffer's outage coverage to a fifth. A probe MUST send it when it
+  is new and when it has changed — a renewal reaches the control plane on the next
+  check — and SHOULD resend an unchanged one every **3600 s**. `observed_at` on the
+  stored row therefore means "last confirmed on the wire" to within that interval.
+- **`days_remaining_threshold` is presence-typed.** Set only where the monitor's own
+  config has such a field: `tls_expiry` and `domain_expiry` set it, `http` does not.
+  Absent means the operator drew no line, and the control plane records the observation
+  without raising `monitor.certificate_expiring` for it. Explicitly `0` is a different
+  thing — "tell me once it has actually expired" — and is a choice the config allows.
+  The threshold crosses the wire rather than being read control-plane side because the
+  config is opaque there (§5.4, ADR-005 decision 6): the probe is the only side that
+  parsed it, and the control plane is still the only side that decides who to tell.
+- **`chain_valid` is tri-state.** Unset means the chain was not evaluated —
+  `verify_tls` off, or a type that does not verify — and `false` is a finding.
+  Collapsing them would report every deliberately unverified monitor as broken.
+
+The control plane stores these in `monitor_certificates` and `monitor_domain_expiry`,
+one row per monitor replaced in place (data model §4.6), and deduplicates the expiry
+events against the row it is replacing rather than against memory, so a restart does
+not re-page.
+
 ## 8. Probe health and clock skew
 
 The probe has no inbound port, so self-metrics ride the result stream and the control
@@ -587,6 +623,8 @@ A third-party probe is conforming when all of the following hold. This list is t
 - [ ] Reports `UNKNOWN` — never `DOWN` — when the probe itself is the failure.
 - [ ] Applies `upside_down` to `up`/`down` only.
 - [ ] Emits one result per attempt, with `attempt` 1-based.
+- [ ] Reports the certificate or registration it observed, on change and hourly, and
+      reports none at all where the check observed none.
 - [ ] Generates monotonic `result_id`s once per result, and never regenerates on replay.
 - [ ] Frees buffer only at or below the acknowledged high-water mark.
 - [ ] Sheds oldest non-`outcome_changed` results first, and counts every one.

@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // Certificate is the TLS certificate last seen on a monitor's target.
 //
@@ -34,8 +37,14 @@ type Certificate struct {
 // DaysRemaining is the figure the API reports and an expiry alert fires on,
 // counted from now. Negative for a certificate that has already expired, which
 // is a fact worth rendering rather than clamping to zero.
+//
+// Floored rather than truncated, because truncation rounds towards zero and
+// would report a certificate that expired eleven hours ago as having zero days
+// left — which reads as "expires today" at the moment it has already gone. The
+// same reason the checker floors: on the negative side the two disagree by a
+// whole day, and it is the day that matters.
 func (c Certificate) DaysRemaining(now time.Time) int {
-	return int(c.ValidTo.Sub(now).Hours() / 24)
+	return flooredDays(c.ValidTo.Sub(now))
 }
 
 // DomainExpiry is the registration behind a domain-expiry monitor. It gets its
@@ -54,4 +63,15 @@ type DomainExpiry struct {
 	Source string
 
 	ObservedAt time.Time
+}
+
+// DaysRemaining counts from now, on the same terms as Certificate's: negative
+// for a registration that has already lapsed, which is a fact worth rendering
+// rather than clamping to zero.
+func (d DomainExpiry) DaysRemaining(now time.Time) int {
+	return flooredDays(d.ExpiresAt.Sub(now))
+}
+
+func flooredDays(remaining time.Duration) int {
+	return int(math.Floor(remaining.Hours() / 24))
 }

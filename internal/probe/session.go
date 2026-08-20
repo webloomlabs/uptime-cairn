@@ -39,6 +39,7 @@ type Session struct {
 	mu          sync.Mutex
 	assignments map[string]*probev1.Assignment
 	lastOutcome map[string]probev1.Outcome
+	lastSeen    map[string]observationMark
 	rejections  []*probev1.AssignmentRejection
 
 	tuning atomic.Pointer[tuning]
@@ -96,6 +97,7 @@ func NewSession(client probev1.ProbeServiceClient, cfg Config) *Session {
 		workers:       make(chan struct{}, cfg.MaxConcurrent),
 		assignments:   make(map[string]*probev1.Assignment),
 		lastOutcome:   make(map[string]probev1.Outcome),
+		lastSeen:      make(map[string]observationMark),
 		startedAt:     time.Now(),
 	}
 	s.tuning.Store(defaultTuning())

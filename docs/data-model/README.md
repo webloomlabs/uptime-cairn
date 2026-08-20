@@ -337,6 +337,14 @@ range scan, and so Phase 2's expiry calendar is cheap. Domain expiry observation
 use the same shape in `monitor_domain_expiry` (`expires_at`, `registrar`,
 `source`, `observed_at`) rather than being forced into a certificate-shaped row.
 
+"Each observation" is not each check, and the difference is deliberate. The probe
+carries the certificate on a result when it is new, when it has changed, and once
+an hour otherwise ([probe protocol §7.4](../probe/protocol.md#74-observations)) —
+so at 5,000 https monitors this is on the order of one write a second rather than
+one per check, against a row whose contents change about four times a year.
+`observed_at` therefore means "last confirmed on the wire", accurate to within an
+hour rather than to the last check. A renewal is written on the next check.
+
 ### 4.7 `maintenance_windows` and `maintenance_targets`
 
 `maintenance_windows`: `id`, `org_id`, `title`, `description`, `strategy`,

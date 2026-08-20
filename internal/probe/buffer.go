@@ -39,7 +39,25 @@ func NewBuffer() *Buffer {
 // approxSize is a cheap stand-in for the encoded size. Marshalling every result
 // twice to bound a buffer would cost more than the bound saves.
 func approxSize(r *probev1.Result) int {
-	return 64 + len(r.GetResultId()) + len(r.GetMonitorId()) + len(r.GetCode()) + len(r.GetMessage())
+	size := 64 + len(r.GetResultId()) + len(r.GetMonitorId()) + len(r.GetCode()) + len(r.GetMessage())
+
+	// An observation is several hundred bytes against a hundred for the result
+	// carrying it, so leaving it out would make the buffer hold multiples of the
+	// 64 MB it promises to. It is only on a minority of results — the probe
+	// resends one an hour per monitor, not one per check — which is exactly why
+	// counting it matters: an undercount that only shows up during a long outage
+	// is one nobody sees until it is doing damage.
+	if c := r.GetCertificate(); c != nil {
+		size += 64 + len(c.GetSubject()) + len(c.GetIssuer()) + len(c.GetSerialNumber()) +
+			len(c.GetFingerprintSha256()) + len(c.GetChainError())
+		for _, san := range c.GetSubjectAlternativeNames() {
+			size += len(san) + 2
+		}
+	}
+	if d := r.GetDomain(); d != nil {
+		size += 32 + len(d.GetDomain()) + len(d.GetRegistrar()) + len(d.GetSource())
+	}
+	return size
 }
 
 // Add appends a result, shedding if the buffer is full.

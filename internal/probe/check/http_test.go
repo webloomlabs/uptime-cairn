@@ -216,3 +216,72 @@ func TestHTTPValidate(t *testing.T) {
 		}
 	}
 }
+
+// Most installs have far more https monitors than tls_expiry ones, so this is
+// where a certificate is usually seen at all — and it is seen for free, because
+// the handshake has already happened.
+func TestHTTPObservesTheCertificate(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// verify_tls off, because httptest signs with its own CA. That is also the
+	// case worth asserting: nothing evaluated the chain, so chain_valid must
+	// stay unset rather than claiming a verdict nobody reached.
+	obs := NewHTTP().Check(ctx, []byte(`{"url":"`+server.URL+`","verify_tls":false}`))
+	if obs.Status != model.StatusUp {
+		t.Fatalf("status = %s, want up (%s)", obs.Status, obs.Message)
+	}
+	if obs.Certificate == nil {
+		t.Fatal("an https check observed no certificate")
+	}
+	if obs.Certificate.NotAfter.IsZero() {
+		t.Error("certificate observed with no expiry date; valid_to is the one field that cannot be null")
+	}
+	if obs.Certificate.ChainValid != nil {
+		t.Errorf("chain_valid = %v, want unset when verify_tls is off", *obs.Certificate.ChainValid)
+	}
+	if obs.Certificate.DaysRemainingThreshold != nil {
+		t.Error("http reported an expiry threshold; the type has no such field, and an observation with one pages people who did not ask")
+	}
+
+	// Plain http observes nothing, and must not carry the previous handshake
+	// forward: an expiry page claiming a certificate is being served when
+	// nothing serves one is worse than an empty one.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer plain.Close()
+
+	if obs := NewHTTP().Check(ctx, []byte(`{"url":"`+plain.URL+`"}`)); obs.Certificate != nil {
+		t.Error("a plain http check observed a certificate")
+	}
+}
+
+// An assertion that failed says nothing about what was on the wire, and the
+// expiry detail has to answer while the monitor is down.
+func TestHTTPObservationSurvivesAFailedAssertion(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	obs := NewHTTP().Check(ctx, []byte(`{"url":"`+server.URL+`","verify_tls":false}`))
+	if obs.Status != model.StatusDown {
+		t.Fatalf("status = %s, want down", obs.Status)
+	}
+	if obs.Certificate == nil {
+		t.Error("a failing assertion dropped the certificate the handshake still presented")
+	}
+}

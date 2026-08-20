@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"encoding/hex"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
@@ -154,8 +155,120 @@ func (s *Session) emit(a *probev1.Assignment, t task, obs check.Observation, at 
 	if obs.ResponseTime != nil {
 		r.ResponseTimeMs = float64(obs.ResponseTime.Microseconds()) / 1000.0
 	}
+	if s.shouldReport(key, obs, at) {
+		r.Certificate = toCertificateObservation(obs.Certificate)
+		r.Domain = toDomainObservation(obs.Domain)
+	}
 
 	s.buf.Add(r)
+}
+
+// observationInterval is how often an unchanged certificate or registration is
+// resent.
+//
+// The observation is available on every check and is deliberately not sent on
+// every check: it is several hundred bytes against a hundred for the result
+// carrying it, and at 5,000 https monitors on the twenty-second floor that is
+// the difference between the buffer covering forty minutes of a control-plane
+// outage and covering eight. Certificates change roughly four times a year.
+//
+// An hour is what the freshness claim costs. `observed_at` on the certificate
+// endpoint means "last confirmed on the wire", accurate to within an hour rather
+// than to the last check — which is the honest reading of a field on a row that
+// changes twice a year, and is why the endpoint reports observed_at at all
+// rather than implying the certificate was re-read this minute.
+const observationInterval = time.Hour
+
+// observationMark is the last observation sent for one assignment: what it was,
+// and when it went. Fingerprint for certificates, expiry date for registrations
+// — enough to notice a renewal, and nothing that has to be kept in sync with the
+// stored row.
+type observationMark struct {
+	key  string
+	sent time.Time
+}
+
+// shouldReport decides whether this result carries its observation.
+//
+// Sent when it is new, when it has changed, and once an hour otherwise. A
+// renewal therefore reaches the control plane on the next check rather than on
+// the next hour, which is the case that matters: the alert an operator is
+// waiting for is "the new certificate is installed", and making them wait an
+// hour for it would be the one delay they notice.
+func (s *Session) shouldReport(key string, obs check.Observation, at time.Time) bool {
+	mark, ok := observationKey(obs)
+	if !ok {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	previous, seen := s.lastSeen[key]
+	if seen && previous.key == mark && at.Sub(previous.sent) < observationInterval {
+		return false
+	}
+	s.lastSeen[key] = observationMark{key: mark, sent: at}
+	return true
+}
+
+// observationKey identifies what was observed, so an unchanged observation can
+// be recognised without keeping a copy of it.
+func observationKey(obs check.Observation) (string, bool) {
+	switch {
+	case obs.Certificate != nil:
+		// The fingerprint alone: it covers every field of the certificate,
+		// which is the point of a fingerprint.
+		return "cert:" + hex.EncodeToString(obs.Certificate.FingerprintSHA256), true
+	case obs.Domain != nil:
+		// A registration has no fingerprint, and the date is the field anything
+		// downstream reacts to. A renewal that does not move the date is a
+		// renewal nothing has to be told about.
+		return "domain:" + obs.Domain.ExpiresAt.UTC().Format(time.RFC3339), true
+	default:
+		return "", false
+	}
+}
+
+func toCertificateObservation(c *check.Certificate) *probev1.CertificateObservation {
+	if c == nil {
+		return nil
+	}
+	out := &probev1.CertificateObservation{
+		Subject:                 c.Subject,
+		Issuer:                  c.Issuer,
+		SerialNumber:            c.SerialNumber,
+		ValidToUnixMicros:       c.NotAfter.UnixMicro(),
+		FingerprintSha256:       c.FingerprintSHA256,
+		SubjectAlternativeNames: c.SANs,
+		ChainValid:              c.ChainValid,
+		ChainError:              c.ChainError,
+	}
+	if !c.NotBefore.IsZero() {
+		out.ValidFromUnixMicros = c.NotBefore.UnixMicro()
+	}
+	if c.DaysRemainingThreshold != nil {
+		threshold := int32(*c.DaysRemainingThreshold)
+		out.DaysRemainingThreshold = &threshold
+	}
+	return out
+}
+
+func toDomainObservation(d *check.Domain) *probev1.DomainObservation {
+	if d == nil {
+		return nil
+	}
+	out := &probev1.DomainObservation{
+		Domain:              d.Domain,
+		ExpiresAtUnixMicros: d.ExpiresAt.UnixMicro(),
+		Registrar:           d.Registrar,
+		Source:              d.Source,
+	}
+	if d.DaysRemainingThreshold != nil {
+		threshold := int32(*d.DaysRemainingThreshold)
+		out.DaysRemainingThreshold = &threshold
+	}
+	return out
 }
 
 // reschedule puts the monitor back on the heap.

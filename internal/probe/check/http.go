@@ -196,6 +196,16 @@ func (h *HTTP) Check(ctx context.Context, config []byte) Observation {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// The certificate the far end presented, when the scheme meant there was
+	// one. This is where most installs see a certificate at all — there are
+	// always more https monitors than tls_expiry ones — and observing it costs
+	// nothing, because the handshake has already happened.
+	//
+	// Carried on the failure paths below as well as the success one. The
+	// assertion that failed says nothing about what was on the wire, and the
+	// expiry page has to answer while the monitor is down.
+	observed := observeTLS(resp.TLS, cfg)
+
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	elapsed := time.Since(start)
 	if err != nil {
@@ -205,6 +215,7 @@ func (h *HTTP) Check(ctx context.Context, config []byte) Observation {
 			ResponseTime: &elapsed,
 			Code:         strconv.Itoa(resp.StatusCode),
 			Message:      "reading response body: " + err.Error(),
+			Certificate:  observed,
 		}
 	}
 
@@ -212,6 +223,7 @@ func (h *HTTP) Check(ctx context.Context, config []byte) Observation {
 		Status:       model.StatusUp,
 		ResponseTime: &elapsed,
 		Code:         strconv.Itoa(resp.StatusCode),
+		Certificate:  observed,
 	}
 
 	// Assertions in the order the spec fixes — status, then keyword, then JSON
@@ -259,6 +271,31 @@ func (h *HTTP) Check(ctx context.Context, config []byte) Observation {
 		}
 	}
 	return obs
+}
+
+// observeTLS pulls the leaf certificate out of a completed handshake, or returns
+// nil when the request was plain http.
+//
+// No days_remaining_threshold, and that is the whole difference between this and
+// the tls_expiry checker: HttpConfig has no such field, because an http monitor
+// was not created to watch a certificate. The observation is recorded so the
+// expiry surfaces can show it, and nothing pages anybody about it — an operator
+// who wants to be told adds a tls_expiry monitor, which is the type that asks
+// for the threshold.
+func observeTLS(state *tls.ConnectionState, cfg httpConfig) *Certificate {
+	if state == nil || len(state.PeerCertificates) == 0 {
+		return nil
+	}
+	observed := observeCertificate(state.PeerCertificates[0])
+
+	// Verification is the transport's here rather than ours: with verify_tls on,
+	// a handshake that completed is a chain that verified, and with it off
+	// nothing was evaluated at all — which is nil, not false.
+	if cfg.VerifyTLS == nil || *cfg.VerifyTLS {
+		valid := true
+		observed.ChainValid = &valid
+	}
+	return observed
 }
 
 // hasJSONPath distinguishes an absent json_path from an explicit null, both of
