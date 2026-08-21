@@ -1,0 +1,81 @@
+# Reference compose file for a solo install.
+#
+# This is the whole product: one container, one volume, SQLite inside it. There
+# is no database service to add, no Redis, and no worker — if you are looking
+# for those, they are not missing, they were never required (README.md).
+#
+#   docker compose up -d
+#
+# Then open http://localhost:3000 and create the administrator account.
+
+services:
+  cairn:
+    image: ghcr.io/webloomlabs/uptime-cairn:latest
+    container_name: uptime-cairn
+    restart: unless-stopped
+
+    ports:
+      # Bind to loopback and terminate TLS in a reverse proxy in front of it.
+      # The binary speaks plain HTTP and has no TLS flags at all, so publishing
+      # 0.0.0.0:3000 puts session cookies and API keys on the wire in the clear.
+      # See docs/operations/reverse-proxy.md.
+      - "127.0.0.1:3000:3000"
+
+    volumes:
+      - cairn-data:/data
+
+    command:
+      - "--data-dir=/data"
+      - "--listen=:3000"
+      # The one setting worth changing before first start. It is what turns an
+      # alert into something clickable, and it is empty by default because
+      # guessing it from the listen address would put http://0.0.0.0:3000 in
+      # somebody's pager.
+      - "--base-url=https://status.example.com"
+      - "--instance-name=Uptime Cairn"
+
+    # ICMP monitors try the unprivileged datagram socket before the raw one, and
+    # the unprivileged one works when the container's GID falls inside this
+    # range. The image runs as UID/GID 10001, so the range has to reach it.
+    # Without this, ping monitors report `unknown` rather than `down` — the
+    # probe cannot ask, which is a different fact from the target being dead
+    # (internal/probe/check/icmp.go). Drop this block if you run no ICMP
+    # monitors; add cap_add: [NET_RAW] instead if your kernel ignores it.
+    sysctls:
+      net.ipv4.ping_group_range: "10001 10001"
+
+    # The image carries its own HEALTHCHECK against /healthz; it is repeated
+    # here only so `docker compose ps` reports health for a pulled tag whose
+    # metadata you have not inspected.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+
+    # Nothing in the check path needs to write outside /data, and a monitoring
+    # process that fetches attacker-controlled URLs is exactly the process worth
+    # confining. tmpfs covers /tmp because a read-only root filesystem otherwise
+    # leaves nowhere for the Go runtime to spill.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+    # For Docker container monitors, add this line to the `volumes:` list above:
+    #
+    #   - /var/run/docker.sock:/var/run/docker.sock:ro
+    #
+    # It is a real privilege grant — read access to that socket is control of the
+    # daemon, and the daemon is root — so it is written here rather than left in
+    # the volume list as a default somebody inherits without deciding to.
+
+volumes:
+  cairn-data:
+    # Everything that cannot be recreated lives here: cairn.db and cairn.key.
+    # Losing the key while encrypted data exists is unrecoverable by design, and
+    # it is 45 bytes, so back it up somewhere other than beside the database it
+    # protects (docs/operations/backup-restore.md).
+    name: uptime-cairn-data

@@ -1,0 +1,198 @@
+# Tagged release → binaries, checksums, SBOM, multi-arch images.
+#
+# Nothing here runs on a branch push: the trigger is a semver tag, and the tag
+# is what stamps the artefacts. A build with none of the ldflags set reports
+# "dev" (internal/version), which is what a developer's own build should say and
+# what a release must never say.
+#
+# BUILD_DATE comes from the commit rather than the clock. Reproducible builds
+# are a Phase 0 §3.6 deliverable and a wall-clock timestamp defeats them on its
+# own — re-running this workflow on the same tag must produce the same bytes.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # The frontend is built once and shared. Building it inside each binary job
+  # would embed a separately-compiled dashboard in each artefact, and "the
+  # amd64 build has a different UI than the arm64 build" is not a bug anybody
+  # would find quickly.
+  web:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: internal/ui/dist
+          retention-days: 1
+
+  binaries:
+    name: Binaries
+    needs: web
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - {goos: linux,   goarch: amd64}
+          - {goos: linux,   goarch: arm64}
+          # 32-bit Pi. "Runs on a Raspberry Pi" is a claim in README.md, and a
+          # Pi that predates the 64-bit images is the one that needs a binary.
+          - {goos: linux,   goarch: arm,   goarm: "7"}
+          - {goos: darwin,  goarch: amd64}
+          - {goos: darwin,  goarch: arm64}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: internal/ui/dist
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          commit="${GITHUB_SHA}"
+          build_date="$(git log -1 --format=%cI "${GITHUB_SHA}")"
+          pkg=github.com/webloomlabs/uptime-cairn/internal/version
+          go build -trimpath \
+            -ldflags="-s -w -X ${pkg}.Version=${version} -X ${pkg}.Commit=${commit} -X ${pkg}.BuildDate=${build_date}" \
+            -o cairn ./cmd/cairn
+
+          name="cairn_${version}_${GOOS}_${GOARCH}${GOARM:+v$GOARM}"
+          mkdir -p "dist/${name}"
+          mv cairn "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          rm -rf "dist/${name}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  image:
+    name: Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # No QEMU. The Dockerfile pins its build stages to BUILDPLATFORM and
+      # cross-compiles — modernc.org/sqlite needs no cgo, so GOARCH is a flag
+      # rather than a toolchain, and emulating arm64 to produce identical bytes
+      # would cost roughly an order of magnitude in wall-clock.
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # SPDX over CycloneDX only because it is what most downstream consumers
+      # ingest without conversion; the source of truth either way is go.sum and
+      # web/package-lock.json.
+      - uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          artifact-name: cairn-${{ github.ref_name }}.spdx.json
+          output-file: cairn-${{ github.ref_name }}.spdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: cairn-${{ github.ref_name }}.spdx.json
+          retention-days: 1
+
+  release:
+    name: Publish
+    needs: [binaries, image, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          pattern: "{binary-*,sbom}"
+
+      - name: Collect and checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find staged -type f \( -name '*.tar.gz' -o -name '*.spdx.json' \) -exec mv {} dist/ \;
+          cd dist
+          # One file, sorted, so the same tag produces the same checksum list.
+          sha256sum $(ls | sort) > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          # A tag carrying a prerelease suffix is not "latest" and must not be
+          # what an unpinned installer picks up.
+          prerelease: ${{ contains(github.ref_name, '-') }}

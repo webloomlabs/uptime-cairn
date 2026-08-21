@@ -1,0 +1,83 @@
+# Example unit for a binary install. Copy to /etc/systemd/system/, adjust the
+# paths, then:
+#
+#   useradd --system --home /var/lib/uptime-cairn --shell /usr/sbin/nologin cairn
+#   install -d -o cairn -g cairn -m 0750 /var/lib/uptime-cairn
+#   systemctl daemon-reload && systemctl enable --now uptime-cairn
+#
+# Verify with `systemd-analyze security uptime-cairn.service` after any edit to
+# the hardening block — that command is the reason the block is worth having.
+
+[Unit]
+Description=Uptime Cairn
+Documentation=https://github.com/webloomlabs/uptime-cairn
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=cairn
+Group=cairn
+
+ExecStart=/usr/local/bin/cairn \
+  --data-dir=/var/lib/uptime-cairn \
+  --listen=127.0.0.1:3000 \
+  --base-url=https://status.example.com \
+  --instance-name=Uptime Cairn
+
+# SIGTERM, and enough time to act on it. The process cancels its context on the
+# signal so the scheduler can finish in-flight checks and the SQLite connection
+# can checkpoint and truncate the WAL on the way out. Killing it sooner does not
+# corrupt the database — WAL recovers — but it does leave a -wal file behind and
+# lose whatever the scheduler had not flushed. "Never lose a heartbeat" starts
+# with shutting down properly (cmd/cairn/main.go).
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5s
+
+# Hardening. Everything here is a default-deny that the process does not need,
+# which is the only kind worth adding: a monitoring daemon spends its life
+# fetching URLs somebody else controls.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# ProtectSystem=strict makes everything read-only, so the one directory that
+# must not be has to be named. cairn.db, its WAL, and cairn.key live here.
+ReadWritePaths=/var/lib/uptime-cairn
+
+# The probe needs outbound everything — that is the product — but it never
+# listens on anything except the API port and never speaks anything more exotic
+# than TCP, UDP, and ICMP.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+IPAddressAllow=any
+
+# ICMP monitors, and the same choice as the container: the unprivileged datagram
+# socket is tried first and needs no capability, but the kernel only allows it
+# for GIDs inside net.ipv4.ping_group_range. Either widen that range for the
+# cairn group in sysctl.d, or grant the capability here and let the probe fall
+# back to a raw socket. Neither is required if you run no ICMP monitors — they
+# report `unknown` without one, not `down`.
+#AmbientCapabilities=CAP_NET_RAW
+#CapabilityBoundingSet=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

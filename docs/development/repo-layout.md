@@ -30,8 +30,16 @@ migrations/           numbered SQL, embedded; sqlite/ now, postgres/ in Phase 4
 proto/                the probe protocol (docs/probe/protocol.md is its semantics)
 web/                  SvelteKit frontend; builds into internal/ui/dist
 harness/              the 5,000-monitor load gate — its own Go module, built first
-docs/                 ADRs, plans, API spec, data model, probe protocol
+deploy/               systemd unit and other host-level deployment examples
+docs/                 ADRs, plans, API spec, data model, probe protocol, operations
 ```
+
+`Dockerfile`, `.dockerignore`, and `docker-compose.yml` sit at the root because
+that is where every tool that consumes them looks by default. The Dockerfile is
+the build order written down and enforced: the frontend stage produces
+`internal/ui/dist`, and only then does the Go stage run — reversing them embeds
+the placeholder and ships a dashboard that is not there. See
+[docs/operations/](../operations/).
 
 ## Import rules
 
@@ -109,9 +117,8 @@ dashboard route says so rather than 404ing. See [web/README.md](../../web/README
   `buf lint`, `buf format`, and `buf breaking` run in CI, and `buf generate`
   produces `proto/cairn/probe/v1/*.pb.go` when someone needs them. Nothing
   imports them yet, so nothing is committed ([proto/README.md](../../proto/README.md)).
-- **No Dockerfile, Makefile, or release workflow.** Deployment artefacts are
-  [PHASE-1-PLAN.md](../plans/PHASE-1-PLAN.md) §4.2, and a Dockerfile written
-  before the build it packages is a Dockerfile that will be rewritten.
+- **No Makefile.** The build is four commands and they are above; a Makefile
+  that wraps them would be a second place for them to disagree.
 - **No notifications, rollups, status pages, UI, or importer**, and eight of the
   nine monitor types. Phase 1 Months 2–4.
 - **No user management beyond the first account.** One owner, created at setup.
