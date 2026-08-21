@@ -198,6 +198,64 @@ export type NotificationChannel = {
 	updated_at: string;
 };
 
+/* ---- Status pages: the authenticated management shape ---- */
+
+export type StatusPageSection = {
+	name: string;
+	description: string | null;
+	monitor_ids: string[];
+};
+
+/**
+ * A status page as its operator configures it.
+ *
+ * `password` is absent on purpose. The spec marks it writeOnly and the column
+ * holds an argon2id hash, so there is nothing the read path could return — which
+ * is why the form treats an empty password box as "leave it alone" rather than
+ * as "clear it".
+ */
+export type StatusPage = {
+	id: string;
+	slug: string;
+	title: string;
+	description: string | null;
+	published: boolean;
+	custom_domain: string | null;
+	visibility: 'public' | 'password';
+	theme: 'light' | 'dark' | 'auto';
+	logo_url: string | null;
+	favicon_url: string | null;
+	primary_color: string | null;
+	footer_text: string | null;
+	custom_css: string | null;
+	timezone: string | null;
+	show_uptime_percentage: boolean;
+	show_response_time_chart: boolean;
+	uptime_bar_days: number;
+	show_powered_by: boolean;
+	subscriptions_enabled: boolean;
+	google_analytics_id: string | null;
+	sections: StatusPageSection[];
+	created_at: string;
+	updated_at: string;
+};
+
+/**
+ * Somebody who asked a status page to tell them about outages.
+ *
+ * `target` arrives masked from the server — a page's subscriber list is an
+ * export of somebody else's customers, and the dashboard has no business
+ * needing the full address to show that a row exists.
+ */
+export type Subscriber = {
+	id: string;
+	channel: string;
+	target: string;
+	confirmed: boolean;
+	confirmed_at: string | null;
+	created_at: string;
+};
+
 /* ---- The public status page projection ---- */
 
 export type PublicBarEntry = {

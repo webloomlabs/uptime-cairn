@@ -145,12 +145,12 @@ by which "90% done" lasts three months.
 | Status pages | 4 | 6 |
 | REST API | 22 | 23 |
 | Kuma migration | 0 | 5 |
-| UI | 10 | 14 |
+| UI | 11 | 15 |
 | Security | 8 | 9 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 4 | 8 |
-| **Total** | **95** | **130** |
+| **Total** | **96** | **131** |
 
 Three rows were stale again and are corrected here rather than carried forward.
 Engine & storage read 18/19 with all nineteen ticked; Core monitoring features and
@@ -277,7 +277,8 @@ thing this file exists to prevent.
 - [x] i18n scaffolding, English complete, translation pipeline documented — every user-facing string in one flat catalogue with dotted identifier keys, a missing key rendering *as the key* rather than silently falling back to English, and locale negotiated by language subtag so `en-AU` resolves to `en`. Adding a language is a JSON file and one line in a map; it never touches a component. No plural machinery yet, deliberately, and the keys are shaped so adding `Intl.PluralRules` later renames nothing. The pipeline is in [web/README.md](../../web/README.md#internationalisation)
 - [x] The dashboard is styled after the reference the product is measured against — a fixed left rail, the accent-dotted page titles, a near-black navy ground with one saturated green carrying "up" and an indigo reserved for the single primary action per screen. Status is never colour alone: the round marker carries a glyph, because roughly one in twelve men cannot reliably tell the up green from the down red and it is the most repeated element in the product. The monitor list and the summary rail are one screen rather than two, which is what the reference does and what removes a dashboard that only restated the list. Light mode is a full second palette, not an afterthought — the three-state toggle still means light, dark, and follow the system
 - [x] Read screens for incidents and status pages — the incident table with state, impact, duration and the pages each incident names; the status-page list with its visibility, published state, monitor count and a link to the public view. Both are client-filtered on purpose and unlike the monitor list: incidents are bounded by how often things break rather than by how much is monitored, so a hundred is a busy quarter
-- [ ] Write screens for incidents, status pages, and settings — **read works, create and edit do not.** Opening an incident, composing an update, building a status page and its sections, and editing instance settings are all `curl` today. Status pages are the sharp end: subscriber delivery works end to end and nobody can create a page to use it from the dashboard
+- [x] The status page editor — create, edit, and delete a page, its ordered sections, and the monitors inside them, plus visibility and password, custom domain, theme and accent, the display toggles, subscriptions, custom CSS and the analytics id. The monitor picker is a server-side search rather than a `<select>` of everything, because a control that ships the whole collection to the browser is the exact mechanism [ADR-004](../adr/004-ui-state-synchronisation.md) exists to prevent; monitors already placed are filtered out of it, since the server's one-section-per-monitor rule is easier to obey than to recover from. An empty password box means *keep the stored one* and never *clear it*, because the read path cannot return a hash — but turning a page public does clear it, rather than leaving a credential behind for a mode that is switched off. The page's subscriber list is on the same screen, with addresses left masked exactly as the server sends them
+- [ ] Write screens for incidents and settings — **read works, create and edit do not.** Opening an incident, composing an update, and editing instance settings are all `curl` today
 - [ ] A run of recent checks under each monitor in the list — the reference draws one and this does not, and the reason is in the API rather than in the styling: the list endpoint embeds the *last* heartbeat and there is no embed for a run of them, so a real strip would be one request per row, which is the precise fan-out both ADR-004 and the `include=` design exist to prevent. Drawing one from a single beat, or from an uptime ratio, would be inventing a history the client has not been told — so the row shows the two figures it genuinely has and the strip lives on the detail page. Closing this properly means an `include=heartbeats` that resolves a bounded run for the whole page in one query, which is spec surface and therefore not a frontend decision
 - [ ] The real-time half of ADR-004 — **reconciliation is built; scoped diffs are not.** The ADR specifies push over NATS, or an in-process bus in solo mode, for the monitor IDs on screen, and this build has no browser-facing channel for one. Staleness is therefore bounded by the poll interval rather than being near-zero for on-screen rows. The list controller is written against "subscribe to visible IDs, reconcile on interval" as its model, which the ADR notes is the thing that must be true from the start for the upgrade to be additive rather than a rewrite
 - [ ] The UI benchmark the load-test gate is supposed to hold — [ADR-004](../adr/004-ui-state-synchronisation.md) asserts two invariants on every release, and only the server-side one is measured today. Client payload size and render cost bounded by *viewport* rather than by total monitor count is the half a frontend can break on its own, and nothing yet checks it
@@ -355,8 +356,8 @@ thing this file exists to prevent.
    the gate does not exercise at all.
 
 The dashboard now exists and consumes the API like any other client, which was the
-point of finishing the API first. What it does not have is screens for incidents,
-status pages, and settings — the API is complete for all three — and the real-time
-half of ADR-004, which needs a browser-facing channel this build has no endpoint
-for. Status pages are the one that stings: subscriber delivery works end to end and
-nobody can create a page to use it without `curl`.
+point of finishing the API first. Status pages are editable from it, which closes
+the gap that stung most — subscriber delivery worked end to end while nobody could
+create a page to use it. What it still does not have is screens for incidents and
+settings — the API is complete for both — and the real-time half of ADR-004, which
+needs a browser-facing channel this build has no endpoint for.

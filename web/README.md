@@ -95,6 +95,12 @@ ADR-004 that the server currently supports:
   ADR-004's second load-test invariant — client cost bounded by viewport, not by
   monitor count — and it is the one a frontend can break on its own.
 
+The same rule decides a control that looks unrelated. The status page editor has
+to pick monitors, and the obvious control — a `<select>` of every monitor — is the
+one ADR-004 rules out, because it ships the whole collection to the browser. So
+`MonitorPicker.svelte` searches server-side and shows a bounded handful; an
+install with five thousand monitors pays what one with five pays.
+
 **Not yet built: the real-time scoped diffs.** ADR-004 also specifies push over
 NATS (or an in-process bus in solo mode) for the monitors on screen. This build
 has no browser-facing channel for that, so reconciliation is the whole mechanism
@@ -205,9 +211,10 @@ src/
     monitortypes.ts      per-type monitor config fields
     channeltypes.ts      per-type notification channel config fields
     i18n/                runtime and catalogues
-    components/          buttons, fields, badges, charts
+    components/          buttons, fields, badges, charts, the two forms
   routes/
     (app)/               the authenticated dashboard
+      status-pages/      list, create, edit — and the page's subscriber list
     login/  setup/       unauthenticated entry
     status/[slug]/       the public status page
     subscriptions/       the two links subscriber mail carries
