@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { api } from '$lib/api';
-	import type { Page as ApiPage } from '$lib/types';
+	import type { Incident, Page as ApiPage } from '$lib/types';
 	import { t } from '$lib/i18n/index.svelte';
 	import { formatAbsolute, formatDuration } from '$lib/format';
 	import Spinner from '$lib/components/Spinner.svelte';
@@ -9,18 +9,7 @@
 	import Button from '$lib/components/Button.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import PageTitle from '$lib/components/PageTitle.svelte';
-
-	type Incident = {
-		id: string;
-		title: string;
-		state: string;
-		impact: string;
-		started_at: string;
-		resolved_at: string | null;
-		monitor_ids: string[];
-		status_page_ids: string[];
-		auto_opened: boolean;
-	};
+	import { session } from '$lib/session.svelte';
 
 	let incidents = $state<Incident[]>([]);
 	let loading = $state(true);
@@ -69,7 +58,16 @@
 	};
 </script>
 
-<PageTitle title={t('nav.incidents')} />
+<PageTitle title={t('nav.incidents')}>
+	{#snippet actions()}
+		{#if session.allows('incidents:write')}
+			<Button href="/incidents/new" variant="primary">
+				<Icon name="plus" size={16} />
+				{t('incidents.new')}
+			</Button>
+		{/if}
+	{/snippet}
+</PageTitle>
 
 <div class="mb-4 flex flex-wrap items-center gap-2">
 	<label class="relative min-w-48 flex-1">
@@ -99,6 +97,11 @@
 	<div class="card px-4 py-14 text-center">
 		<p class="font-medium">{t('incidents.empty')}</p>
 		<p class="muted mt-1 text-sm">{t('incidents.emptyHint')}</p>
+		{#if session.allows('incidents:write')}
+			<div class="mt-5">
+				<Button href="/incidents/new" variant="primary">{t('incidents.new')}</Button>
+			</div>
+		{/if}
 	</div>
 {:else}
 	<div class="card overflow-x-auto">
@@ -124,7 +127,11 @@
 							</span>
 						</td>
 						<td class="max-w-xs px-4 py-3.5">
-							<span class="block truncate" title={incident.title}>{incident.title}</span>
+							<a
+								href="/incidents/{incident.id}"
+								class="block truncate hover:underline"
+								title={incident.title}>{incident.title}</a
+							>
 							{#if incident.auto_opened}
 								<span class="muted text-xs">{t('incidents.autoOpened')}</span>
 							{/if}

@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -135,6 +136,10 @@ func Apply(ctx context.Context, db *sql.DB, fsys fs.FS, dir string) ([]Migration
 		return nil, err
 	}
 
+	if err := checkNotAhead(migrations, applied); err != nil {
+		return nil, err
+	}
+
 	var ran []Migration
 	for _, m := range migrations {
 		if have, ok := applied[m.Version]; ok {
@@ -172,6 +177,55 @@ func appliedChecksums(ctx context.Context, db *sql.DB) (map[int]string, error) {
 		out[version] = checksum
 	}
 	return out, rows.Err()
+}
+
+// ErrSchemaAhead is reported when the database carries a migration this binary
+// does not know about. It is a distinct error because the operator's answer is
+// specific: run the newer binary, or restore the backup taken before the
+// upgrade. There is no third option, because there are no down migrations.
+var ErrSchemaAhead = errors.New("database schema is newer than this binary")
+
+// checkNotAhead refuses a database that has been migrated by a newer build.
+//
+// The loop in Apply only ever looks at the migrations the binary carries: it
+// finds each one already applied with a matching checksum and starts cleanly,
+// having never noticed the rows beyond them. Whether that is harmless depends
+// entirely on what the newer migration did — a column added is survivable, a
+// column renamed or a NOT NULL added is not, and the failure it produces is
+// per-row write errors scattered through the log hours later.
+//
+// So the comparison is against max(version) rather than against the set: a gap
+// in the middle is a different fault (a migration file deleted from the binary)
+// and Apply's checksum pass is what catches that. What this catches is the
+// downgrade, which is the one an operator performs deliberately and at speed.
+func checkNotAhead(carried []Migration, applied map[int]string) error {
+	var head int
+	for _, m := range carried {
+		if m.Version > head {
+			head = m.Version
+		}
+	}
+
+	var ahead []int
+	for version := range applied {
+		if version > head {
+			ahead = append(ahead, version)
+		}
+	}
+	if len(ahead) == 0 {
+		return nil
+	}
+	sort.Ints(ahead)
+
+	names := make([]string, len(ahead))
+	for i, v := range ahead {
+		names[i] = fmt.Sprintf("%04d", v)
+	}
+	return fmt.Errorf(
+		"%w: it has migration(s) %s applied and this binary carries up to %04d. "+
+			"Downgrading is not supported — there are no down migrations. "+
+			"Start the newer binary, or restore the backup taken before the upgrade",
+		ErrSchemaAhead, strings.Join(names, ", "), head)
 }
 
 // apply runs one migration. The record of it is written inside the same

@@ -2,7 +2,14 @@
 	import { untrack } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { api, ApiError } from '$lib/api';
-	import type { Group, Monitor, NotificationChannel, Page as ApiPage, Tag } from '$lib/types';
+	import type {
+		Group,
+		Monitor,
+		NotificationChannel,
+		Page as ApiPage,
+		Probe,
+		Tag
+	} from '$lib/types';
 	import { t } from '$lib/i18n/index.svelte';
 	import { session } from '$lib/session.svelte';
 	import { specFor, type FieldSpec } from '$lib/monitortypes';
@@ -54,6 +61,7 @@
 		upsideDown: monitor?.upside_down ?? false,
 		notifyOnRecovery: monitor?.notify_on_recovery ?? true,
 		groupId: monitor?.group_id ?? '',
+		probeId: monitor?.probe_id ?? '',
 		tagIds: monitor?.tag_ids ?? [],
 		channelIds: monitor ? (monitor.notification_channel_ids ?? []) : null,
 		config: { ...(monitor?.config ?? {}) }
@@ -71,12 +79,22 @@
 	let upsideDown = $state(seed.upsideDown);
 	let notifyOnRecovery = $state(seed.notifyOnRecovery);
 	let groupId = $state(seed.groupId);
+	let probeId = $state(seed.probeId);
 	let tagIds = $state<string[]>(seed.tagIds);
 	let channelIds = $state<string[] | null>(seed.channelIds);
 	let config = $state<Record<string, unknown>>(seed.config);
 	let rawConfig = $state(JSON.stringify(seed.config, null, 2));
 
 	let groups = $state<Group[]>([]);
+	/**
+	 * The probes a monitor can be pinned to.
+	 *
+	 * The picker only appears with more than one, which is every install except
+	 * solo — where the server fills the pin in itself and offering a control with
+	 * one option would be a decision nobody has to make. It is not hidden for
+	 * `docker` in that case either: there is genuinely nothing to choose.
+	 */
+	let probes = $state<Probe[]>([]);
 	let tags = $state<Tag[]>([]);
 	let channels = $state<NotificationChannel[]>([]);
 
@@ -94,6 +112,9 @@
 			try {
 				if (session.allows('groups:read')) {
 					groups = (await api.get<ApiPage<Group>>('/groups?limit=200')).data;
+				}
+				if (session.allows('monitors:read')) {
+					probes = (await api.get<{ data: Probe[] }>('/probes')).data;
 				}
 				if (session.allows('tags:read')) {
 					tags = (await api.get<ApiPage<Tag>>('/tags?limit=200')).data;
@@ -193,6 +214,12 @@
 		// silent"; the two are different and the server distinguishes them. So the
 		// key is only sent once somebody has actually chosen.
 		if (channelIds !== null) body.notification_channel_ids = channelIds;
+
+		// Only sent when the picker was shown. With one probe the server pins a
+		// docker monitor itself, and sending an explicit null would be a request
+		// to *unpin* it — which the server then refuses, on a field nobody
+		// touched.
+		if (probes.length > 1) body.probe_id = probeId || null;
 
 		try {
 			const saved = editing
@@ -430,8 +457,28 @@
 		</div>
 	</section>
 
-	{#if groups.length || tags.length || channels.length}
+	{#if groups.length || tags.length || channels.length || probes.length > 1}
 		<section class="card space-y-4 p-5">
+			{#if probes.length > 1}
+				<Field
+					label={t('monitor.probe')}
+					id="probe"
+					hint={t('monitor.probeHint')}
+					error={errorFor('/probe_id')}
+				>
+					{#snippet children({ id })}
+						<select {id} class={inputClass} style={inputStyle} bind:value={probeId}>
+							<option value="">{t('monitor.probeAny')}</option>
+							{#each probes as probe (probe.id)}
+								<option value={probe.id}
+									>{probe.name}{probe.region ? ` · ${probe.region}` : ''}</option
+								>
+							{/each}
+						</select>
+					{/snippet}
+				</Field>
+			{/if}
+
 			{#if groups.length}
 				<Field label={t('form.group')} id="group" optional error={errorFor('/group_id')}>
 					{#snippet children({ id })}

@@ -146,39 +146,161 @@ publishing it is one fewer way to reach the API without TLS.
 
 ## Custom-domain status pages
 
-Read this before promising a customer their own domain, because the support
-today is partial and the gap is in the application rather than in your config.
+A status page can answer on a customer's own hostname —
+`https://status.acme.example/` — showing their page at the bare root, with no
+`/status/acme` in the address bar.
 
-A status page carries a `custom_domain`, it is unique across the install, and
-subscriber mail already prefers it when building links. What does **not** exist
-is host-based routing: nothing in the server resolves a request to a page by its
-`Host` header. Every page is served from `/status/{slug}`, and the dashboard is a
-client-side application that reads the slug out of the browser's path.
+That works because the *server* resolves it, not the proxy. A request arriving
+with a `Host` matching a page's `custom_domain` is served the application shell
+with that page's slug in it, and the frontend renders it. The proxy's job is
+what it always is: terminate TLS and pass the request through with the original
+`Host` intact.
 
-That last detail decides the recipe. An internal rewrite does not work — the
-browser's path stays `/`, the router finds no slug, and the page cannot load. It
-has to be a redirect, which means the slug ends up visible in the address bar:
+**An internal rewrite in the proxy does not work and never will.** The dashboard
+reads its slug out of the browser's path, and a rewrite leaves that path as `/`.
+This was previously documented as a redirect to `/status/{slug}` for that
+reason; that workaround is no longer needed, and if you have one configured you
+can remove it.
+
+### What the proxy has to do
+
+Exactly two things, and both are defaults in Caddy and Traefik:
+
+1. **Pass the original `Host` through.** This is the whole mechanism. nginx does
+   *not* do it by default — `proxy_set_header Host $host;` is required, and
+   without it every custom domain shows the dashboard.
+2. **Hold a certificate for the hostname.**
+
+### Caddy
 
 ```caddyfile
 status.acme.example {
-	redir / /status/acme
 	reverse_proxy 127.0.0.1:3000
 }
 ```
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name status.acme.example;
-    # ... TLS, headers, and the /metrics denial as above ...
+Caddy passes `Host` through and obtains the certificate itself. That is the
+whole configuration.
 
-    location = / { return 302 /status/acme; }
-    location   / { proxy_pass http://127.0.0.1:3000; }
+**For many customer domains, use on-demand TLS** rather than listing each one:
+
+```caddyfile
+{
+	on_demand_tls {
+		# Caddy asks this before issuing. Answer 200 to allow, anything else to
+		# refuse. Without an ask endpoint, anyone who points DNS at your server
+		# can make you request a certificate for their hostname — which is a
+		# rate-limit exhaustion attack against your Let's Encrypt account, not a
+		# theoretical one.
+		ask http://127.0.0.1:3000/api/v1/public/status-pages/domain-check
+		interval 2m
+		burst 5
+	}
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:3000
 }
 ```
 
-Point the customer's DNS at the proxy, issue a certificate for their hostname,
-and the page works. `https://status.acme.example/` lands on
-`https://status.acme.example/status/acme`, which is a working custom-domain
-status page with a path on the end of it. Serving it at the bare root needs
-`Host`-based resolution in the server, and that is not built.
+> **The `ask` endpoint does not exist yet.** Caddy calls it with `?domain=`, and
+> Uptime Cairn has no endpoint that answers "is this a configured custom
+> domain". Until it does, either list your domains explicitly in the Caddyfile,
+> or point `ask` at a two-line script of your own that greps your own list. Do
+> not run on-demand TLS without an ask endpoint: it is the difference between
+> issuing certificates for domains you configured and issuing them for anything
+> anyone points at you.
+
+### nginx
+
+`Host` is the thing to get right:
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name status.acme.example;
+
+    ssl_certificate     /etc/letsencrypt/live/status.acme.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/status.acme.example/privkey.pem;
+
+    # Without this nginx sends `Host: 127.0.0.1:3000` and the custom domain
+    # resolves to nothing. This is the single most common way this feature
+    # appears broken.
+    proxy_set_header Host $host;
+
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+    }
+
+    # A status page is public; /metrics is not, and it is reachable through any
+    # server block that proxies everything.
+    location /metrics { return 404; }
+}
+```
+
+Certificates with certbot, one hostname at a time:
+
+```sh
+sudo certbot certonly --nginx -d status.acme.example
+```
+
+Or, for a lot of them, `acme.sh` in a loop against a list you keep — nginx has
+no on-demand equivalent, so issuance is something you run rather than something
+that happens.
+
+### Traefik
+
+Traefik passes `Host` through and resolves certificates per router:
+
+```yaml
+labels:
+  - "traefik.enable=true"
+  - "traefik.http.routers.cairn.rule=Host(`cairn.example.com`) || Host(`status.acme.example`)"
+  - "traefik.http.routers.cairn.tls.certresolver=le"
+  - "traefik.http.services.cairn.loadbalancer.server.port=3000"
+  # /metrics is denied at the edge — see above.
+  - "traefik.http.routers.cairn-metrics.rule=PathPrefix(`/metrics`)"
+  - "traefik.http.routers.cairn-metrics.priority=100"
+  - "traefik.http.routers.cairn-metrics.middlewares=deny@file"
+```
+
+Adding a customer means adding a `Host()` to the rule and reloading. Traefik has
+no on-demand issuance either.
+
+### Setting it up, end to end
+
+1. **Create the status page** and set its custom domain in the editor. It has to
+   be **published** — an unpublished page is a draft, and a draft answering on a
+   customer's hostname is the one thing you must not get by accident.
+2. **Point the customer's DNS** at your proxy. A `CNAME` to your own hostname is
+   easier for them to maintain than an `A` record to your IP.
+3. **Issue the certificate.** Caddy does it; nginx and Traefik need telling.
+4. **Load `https://status.acme.example/`.**
+
+A newly published domain starts routing within thirty seconds — the hostname map
+is cached with that TTL, and it is dropped immediately on any status page write,
+so saving from the dashboard takes effect at once. Adding one directly in the
+database waits for the TTL.
+
+### The failure modes, in the order you will hit them
+
+| Symptom | Cause |
+|---|---|
+| The dashboard appears on the customer's domain | The proxy is not passing `Host` through. On nginx, `proxy_set_header Host $host;`. |
+| A certificate error | No certificate for that hostname yet. Caddy: check the ask endpoint is not refusing. |
+| The page loads but says not found | The slug is right and the page is **not published**. |
+| It worked and then stopped | The `custom_domain` was changed or cleared on the page. It is unique across the install, so it may have moved to another page. |
+
+### One domain, one page
+
+`custom_domain` is unique across every status page and across every
+organisation, enforced by the schema rather than by the handler. Two pages
+cannot claim one hostname, because a request arrives with nothing but a `Host`
+header to route on and there would be no way to choose.

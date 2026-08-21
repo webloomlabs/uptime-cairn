@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
@@ -27,7 +29,7 @@ const monitorColumns = `
 	m.id, m.org_id, m.name, m.description, m.type, m.config, m.config_secrets, m.target,
 	m.push_token_hash, m.enabled, m.interval_seconds, m.timeout_seconds, m.retries,
 	m.retry_interval_seconds, m.resend_after, m.upside_down, m.notify_on_recovery,
-	m.group_id, m.parent_monitor_id, m.created_at, m.updated_at,
+	m.group_id, m.parent_monitor_id, m.probe_id, m.created_at, m.updated_at,
 	s.status, s.last_check_at, s.next_check_at, s.last_status_change_at,
 	s.consecutive_failures, s.last_response_time_ms, s.last_message, s.state_version`
 
@@ -47,15 +49,15 @@ func (s *Store) CreateMonitor(ctx context.Context, m model.Monitor) error {
 			id, org_id, name, description, type, config, config_secrets, target, push_token_hash,
 			enabled, interval_seconds, timeout_seconds, retries, retry_interval_seconds,
 			resend_after, upside_down, notify_on_recovery, group_id,
-			parent_monitor_id, created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			parent_monitor_id, probe_id, created_at, updated_at
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.ID[:], m.OrgID[:], m.Name, nullString(m.Description), m.Type, string(m.Config),
 		nullBytes(m.ConfigSecrets),
 		nullString(m.Target), nullBytes(m.PushTokenHash), boolToInt(m.Enabled),
 		int64(m.Interval.Seconds()), int64(m.Timeout.Seconds()), m.Retries,
 		nullSeconds(m.RetryInterval), m.ResendAfter, boolToInt(m.UpsideDown),
 		boolToInt(m.NotifyOnRecovery), nullID(m.GroupID), nullID(m.ParentMonitorID),
-		millis(m.CreatedAt), millis(m.UpdatedAt),
+		nullID(m.ProbeID), millis(m.CreatedAt), millis(m.UpdatedAt),
 	); err != nil {
 		return fmt.Errorf("insert monitor: %w", err)
 	}
@@ -385,6 +387,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 		out                                 MonitorWithState
 		id, orgID, config, configSecrets    []byte
 		groupID, parentID, pushTokenHash    []byte
+		probeID                             []byte
 		description, target, message        sql.NullString
 		retryInterval                       sql.NullInt64
 		lastCheck, nextCheck, lastChange    sql.NullInt64
@@ -398,7 +401,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 		&id, &orgID, &out.Monitor.Name, &description, &out.Monitor.Type, &config, &configSecrets, &target,
 		&pushTokenHash, &enabled, &intervalSeconds, &timeoutSeconds, &out.Monitor.Retries,
 		&retryInterval, &out.Monitor.ResendAfter, &upsideDown, &notifyRecovery,
-		&groupID, &parentID, &createdAt, &updatedAt,
+		&groupID, &parentID, &probeID, &createdAt, &updatedAt,
 		&out.State.Status, &lastCheck, &nextCheck, &lastChange,
 		&out.State.ConsecutiveFailures, &responseTime, &message, &out.State.StateVersion,
 	); err != nil {
@@ -422,6 +425,7 @@ func scanMonitor(row scanner) (MonitorWithState, error) {
 	out.Monitor.NotifyOnRecovery = notifyRecovery == 1
 	out.Monitor.GroupID = idFromBytes(groupID)
 	out.Monitor.ParentMonitorID = idFromBytes(parentID)
+	out.Monitor.ProbeID = idFromBytes(probeID)
 	out.Monitor.CreatedAt = fromMillis(createdAt)
 	out.Monitor.UpdatedAt = fromMillis(updatedAt)
 
@@ -592,13 +596,15 @@ func (s *Store) UpdateMonitor(ctx context.Context, m model.Monitor) error {
 		SET name = ?, description = ?, config = ?, config_secrets = ?, target = ?,
 		    enabled = ?, interval_seconds = ?, timeout_seconds = ?, retries = ?,
 		    retry_interval_seconds = ?, resend_after = ?, upside_down = ?,
-		    notify_on_recovery = ?, group_id = ?, parent_monitor_id = ?, updated_at = ?
+		    notify_on_recovery = ?, group_id = ?, parent_monitor_id = ?, probe_id = ?,
+		    updated_at = ?
 		WHERE id = ?`,
 		m.Name, nullString(m.Description), string(m.Config), nullBytes(m.ConfigSecrets),
 		nullString(m.Target), boolToInt(m.Enabled), int64(m.Interval.Seconds()),
 		int64(m.Timeout.Seconds()), m.Retries, nullSeconds(m.RetryInterval),
 		m.ResendAfter, boolToInt(m.UpsideDown), boolToInt(m.NotifyOnRecovery),
-		nullID(m.GroupID), nullID(m.ParentMonitorID), millis(m.UpdatedAt), m.ID[:])
+		nullID(m.GroupID), nullID(m.ParentMonitorID), nullID(m.ProbeID),
+		millis(m.UpdatedAt), m.ID[:])
 	if err != nil {
 		return fmt.Errorf("update monitor: %w", err)
 	}
@@ -711,6 +717,73 @@ func (s *Store) LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.I
 		}
 	}
 	return out, rows.Err()
+}
+
+// RecentHeartbeats returns a bounded run of the most recent heartbeats per
+// monitor, for the list view's include=heartbeats.
+//
+// The shape of this query is the whole point, so it is worth saying why it is
+// not the obvious one. A window function — ROW_NUMBER() OVER (PARTITION BY
+// monitor_id ORDER BY time DESC) filtered to rn <= limit — reads as the textbook
+// answer and is quietly the wrong one here: SQLite has to produce every row in
+// each partition before it can number them, and a monitor on a 60-second
+// interval holding a week of raw history has ten thousand of them. Twenty-five
+// of those on one page is a quarter of a million rows read to return five
+// hundred.
+//
+// So each monitor gets its own bounded seek, and they are stitched together
+// with UNION ALL into a single statement. Every arm is an index seek on
+// (org_id, monitor_id, time DESC) that stops after limit rows, which is the
+// cost this embed should have. It is one round trip and one query plan — not
+// the per-row fan-out the include= design exists to prevent — and the row count
+// it reads is bounded by the page size times the limit rather than by how long
+// the install has been running.
+//
+// The arm count is bounded by the page limit, well under SQLite's compound-select
+// ceiling, and by Postgres's parameter limit when that backend arrives.
+func (s *Store) RecentHeartbeats(ctx context.Context, ids []model.ID, limit int) (map[model.ID][]model.Heartbeat, error) {
+	if len(ids) == 0 || limit <= 0 {
+		return map[model.ID][]model.Heartbeat{}, nil
+	}
+
+	const columns = `time, monitor_id, org_id, probe_id, status, response_time_ms,
+	                 code, message, attempt, important, suppressed, suppression_reason`
+
+	arms := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids)*3)
+	for _, id := range ids {
+		arms = append(arms, `SELECT * FROM (SELECT `+columns+` FROM heartbeats
+			WHERE org_id = ? AND monitor_id = ? ORDER BY time DESC LIMIT ?)`)
+		args = append(args, model.SentinelOrgID[:], id[:], limit)
+	}
+
+	rows, err := s.ro.QueryContext(ctx, strings.Join(arms, " UNION ALL "), args...)
+	if err != nil {
+		return nil, fmt.Errorf("recent heartbeats: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[model.ID][]model.Heartbeat, len(ids))
+	for rows.Next() {
+		beat, err := scanHeartbeat(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[beat.MonitorID] = append(out[beat.MonitorID], beat)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Newest first within each monitor, which is the order each arm produced and
+	// the order the strip is drawn in. Sorted rather than assumed, because
+	// UNION ALL makes no promise about the order rows arrive in and a strip
+	// drawn backwards is a bug nobody would look for.
+	for id := range out {
+		beats := out[id]
+		sort.Slice(beats, func(i, j int) bool { return beats[i].Time.After(beats[j].Time) })
+	}
+	return out, nil
 }
 
 // UptimeRatios reads the precomputed uptime cache for a window.
@@ -930,4 +1003,35 @@ func (s *Store) ExpiringSoon(ctx context.Context, before time.Time) (certificate
 		return 0, 0, fmt.Errorf("expiring soon: %w", err)
 	}
 	return certificates, domains, nil
+}
+
+// MonitorNames returns every monitor's name and id.
+//
+// For the importer, which has to recognise a name collision before it is a
+// duplicate row rather than after. Names only: the alternative is AllMonitors,
+// which decodes a config and a sealed envelope per row for a question that
+// needs neither, and at 5,000 monitors that difference is the whole cost of the
+// pass.
+func (s *Store) MonitorNames(ctx context.Context) (map[model.ID]string, error) {
+	rows, err := s.ro.QueryContext(ctx,
+		`SELECT id, name FROM monitors WHERE org_id = ?`, model.SentinelOrgID[:])
+	if err != nil {
+		return nil, fmt.Errorf("read monitor names: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[model.ID]string{}
+	for rows.Next() {
+		var (
+			id   []byte
+			name string
+		)
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		var key model.ID
+		copy(key[:], id)
+		out[key] = name
+	}
+	return out, rows.Err()
 }

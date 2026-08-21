@@ -658,3 +658,113 @@ func TestCertificateEndpointRendersWhatWasObserved(t *testing.T) {
 		t.Errorf("certificates_expiring_soon = %v, want 0 at 45 days out", overview["certificates_expiring_soon"])
 	}
 }
+
+// The strip a list view draws under each row. The reason it is an embed rather
+// than a request per row is the whole point: at a hundred rows a page, one
+// request each is exactly the fan-out ADR-004 and the include= design exist to
+// prevent.
+func TestIncludeHeartbeatsResolvesARunForTheWholePage(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t)
+	c := newClient(t, server)
+	c.setup()
+
+	// Two monitors, so a run landing under the wrong row would show.
+	firstToken, first := createPushMonitor(t, c, map[string]any{
+		"name": "Nightly backup", "type": "push", "config": map[string]any{},
+	})
+	secondToken, second := createPushMonitor(t, c, map[string]any{
+		"name": "Reporting job", "type": "push", "config": map[string]any{},
+	})
+
+	pusher := newClient(t, server)
+	for i := 0; i < 4; i++ {
+		pusher.do(http.MethodGet, "/api/v1/push/"+firstToken, nil)
+	}
+	pusher.do(http.MethodGet, "/api/v1/push/"+secondToken+"?status=down", nil)
+
+	_, body := c.do(http.MethodGet, "/api/v1/monitors?include=heartbeats", nil)
+	runs := map[string][]any{}
+	for _, row := range body["data"].([]any) {
+		monitor := row.(map[string]any)
+		beats, ok := monitor["heartbeats"].([]any)
+		if !ok {
+			t.Fatalf("monitor %v carries no heartbeats array", monitor["name"])
+		}
+		runs[monitor["id"].(string)] = beats
+	}
+
+	if got := len(runs[first]); got != 4 {
+		t.Errorf("first monitor's run has %d beats, want 4", got)
+	}
+	if got := len(runs[second]); got != 1 {
+		t.Errorf("second monitor's run has %d beats, want 1", got)
+	}
+
+	// Most recent first, and each beat belongs to the row it arrived under.
+	// UNION ALL promises nothing about row order, so this is asserted rather
+	// than assumed — a strip drawn backwards is a bug nobody would look for.
+	var previous string
+	for i, entry := range runs[first] {
+		beat := entry.(map[string]any)
+		if beat["monitor_id"] != first {
+			t.Fatalf("beat %d belongs to %v, not to the row it was returned under", i, beat["monitor_id"])
+		}
+		at := beat["time"].(string)
+		if previous != "" && at > previous {
+			t.Errorf("beat %d is newer than the one before it: %s after %s", i, at, previous)
+		}
+		previous = at
+	}
+}
+
+// The embed's cost has to track the viewport rather than whatever a caller
+// types, which is the ADR-004 invariant it is on the wrong side of the moment
+// the ceiling comes off. Clamped rather than refused, like the page limit.
+func TestHeartbeatsLimitIsClampedAndValidated(t *testing.T) {
+	t.Parallel()
+
+	server := testServer(t)
+	c := newClient(t, server)
+	c.setup()
+
+	token, id := createPushMonitor(t, c, map[string]any{
+		"name": "Nightly backup", "type": "push", "config": map[string]any{},
+	})
+	pusher := newClient(t, server)
+	for i := 0; i < 3; i++ {
+		pusher.do(http.MethodGet, "/api/v1/push/"+token, nil)
+	}
+
+	_, body := c.do(http.MethodGet, "/api/v1/monitors/"+id+"?include=heartbeats&heartbeats_limit=2", nil)
+	if beats := body["heartbeats"].([]any); len(beats) != 2 {
+		t.Errorf("heartbeats_limit=2 returned %d beats", len(beats))
+	}
+
+	// Above the ceiling is clamped, not rejected: only three beats exist, so
+	// what this proves is that the request succeeded rather than 400ing.
+	resp, body := c.do(http.MethodGet, "/api/v1/monitors/"+id+"?include=heartbeats&heartbeats_limit=100000", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("heartbeats_limit above the ceiling = %d, want 200 with a clamp", resp.StatusCode)
+	}
+	if beats := body["heartbeats"].([]any); len(beats) != 3 {
+		t.Errorf("clamped request returned %d beats, want the 3 that exist", len(beats))
+	}
+
+	// Nonsense is a 400, because a client asking for something it will not get
+	// should find out at development time.
+	for _, value := range []string{"0", "-1", "twenty"} {
+		resp, _ := c.do(http.MethodGet, "/api/v1/monitors/"+id+"?include=heartbeats&heartbeats_limit="+value, nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("heartbeats_limit=%s = %d, want 400", value, resp.StatusCode)
+		}
+	}
+
+	// Not asked for is still absent, which is what makes adding the embed a
+	// non-breaking change.
+	_, plain := c.do(http.MethodGet, "/api/v1/monitors/"+id, nil)
+	if _, present := plain["heartbeats"]; present {
+		t.Error("heartbeats present without being asked for")
+	}
+}

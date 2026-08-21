@@ -71,6 +71,19 @@ type Monitor struct {
 	GroupID          *ID
 	ParentMonitorID  *ID
 
+	// ProbeID pins this monitor to one named probe. Nil means unpinned: any
+	// probe may run it, which is what every type except docker wants and what
+	// solo mode does for all of them.
+	//
+	// It exists because `docker` is not like the others. An http monitor checked
+	// from two continents is two opinions about one target; "is this container
+	// running" is a question about one host's daemon and there is no second
+	// opinion to be had (protocol §6.4). A pin is placement rather than
+	// checking, so it lives on the monitor rather than inside the checker — and
+	// the next type that needs it, a grpc monitor reachable only from one
+	// network segment, needs no second mechanism.
+	ProbeID *ID
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

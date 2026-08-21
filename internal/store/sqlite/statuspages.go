@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
@@ -602,4 +603,37 @@ func scanStatusPage(row scanner) (model.StatusPage, error) {
 	p.CreatedAt = fromMillis(createdAt)
 	p.UpdatedAt = fromMillis(updatedAt)
 	return p, nil
+}
+
+// CustomDomains returns every published page's custom domain, lower-cased.
+//
+// The whole map rather than a lookup per request: it is read on document
+// requests to decide whether this hostname is a status page, and a database hit
+// on every page load of the dashboard would be a query per navigation for an
+// answer that changes when somebody edits a status page. The caller caches it
+// with a short TTL.
+//
+// Published only. An unpublished page is a draft, and a draft answering on a
+// customer's hostname is the one thing an operator setting one up must not get
+// by accident.
+func (s *Store) CustomDomains(ctx context.Context) (map[string]string, error) {
+	rows, err := s.ro.QueryContext(ctx, `
+		SELECT custom_domain, slug FROM status_pages
+		WHERE org_id = ? AND published = 1
+		  AND custom_domain IS NOT NULL AND custom_domain != ''`,
+		model.SentinelOrgID[:])
+	if err != nil {
+		return nil, fmt.Errorf("read custom domains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var domain, slug string
+		if err := rows.Scan(&domain, &slug); err != nil {
+			return nil, err
+		}
+		out[strings.ToLower(strings.TrimSpace(domain))] = slug
+	}
+	return out, rows.Err()
 }

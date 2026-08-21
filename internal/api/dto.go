@@ -29,6 +29,7 @@ type monitorJSON struct {
 	UpsideDown             bool            `json:"upside_down"`
 	GroupID                *string         `json:"group_id"`
 	ParentMonitorID        *string         `json:"parent_monitor_id"`
+	ProbeID                *string         `json:"probe_id"`
 	TagIDs                 []string        `json:"tag_ids"`
 	NotificationChannelIDs []string        `json:"notification_channel_ids"`
 	NotifyOnRecovery       bool            `json:"notify_on_recovery"`
@@ -47,6 +48,7 @@ type monitorJSON struct {
 	// 5,000 monitors that difference is the difference between a page that loads
 	// and one that times out.
 	LastHeartbeat *heartbeatJSON   `json:"last_heartbeat,omitempty"`
+	Heartbeats    []heartbeatJSON  `json:"heartbeats,omitempty"`
 	Uptime        *uptimeEmbed     `json:"uptime,omitempty"`
 	Group         *groupJSON       `json:"group,omitempty"`
 	Tags          []tagJSON        `json:"tags,omitempty"`
@@ -141,6 +143,12 @@ type monitorWrite struct {
 
 	ParentMonitorID *string `json:"parent_monitor_id"`
 
+	// ProbeID pins the monitor to one named probe. Absent leaves it wherever it
+	// already is; an explicit null unpins it. A `docker` monitor is the type
+	// that needs this — the pin is placement rather than checking, so it is a
+	// field on the monitor rather than a key inside a type-specific config.
+	ProbeID *string `json:"probe_id"`
+
 	// Absent or null leaves the monitor ungrouped and untagged. There is no
 	// PATCH on monitors yet, so the "unset an existing value" case these fields
 	// will eventually need does not arise.
@@ -153,6 +161,104 @@ type monitorWrite struct {
 	// exactly those. Collapsing the first two would make it impossible to create
 	// a deliberately silent monitor.
 	NotificationChannelIDs *[]string `json:"notification_channel_ids"`
+}
+
+// importJobJSON is ImportJob in docs/api/openapi.yaml.
+type importJobJSON struct {
+	ID         string                         `json:"id"`
+	State      string                         `json:"state"`
+	DryRun     bool                           `json:"dry_run"`
+	Sources    []model.ImportSource           `json:"sources"`
+	Summary    map[string]model.ImportSummary `json:"summary"`
+	Entries    []importEntryJSON              `json:"entries"`
+	Error      *string                        `json:"error"`
+	StartedAt  *time.Time                     `json:"started_at"`
+	FinishedAt *time.Time                     `json:"finished_at"`
+	CreatedAt  time.Time                      `json:"created_at"`
+}
+
+// importEntryJSON is one source entity and what became of it. Every source
+// entity appears exactly once, which is the guarantee the whole report rests on.
+type importEntryJSON struct {
+	SourceFile string  `json:"source_file"`
+	EntityType string  `json:"entity_type"`
+	SourceID   *string `json:"source_id"`
+	SourceName string  `json:"source_name"`
+	Result     string  `json:"result"`
+	TargetID   *string `json:"target_id"`
+	Detail     *string `json:"detail"`
+}
+
+func toImportJobJSON(j model.ImportJob, entries []model.ImportEntry) importJobJSON {
+	out := importJobJSON{
+		ID: j.ID.String(), State: j.State, DryRun: j.DryRun,
+		Sources:    j.Sources,
+		Summary:    model.Tally(entries),
+		Entries:    make([]importEntryJSON, 0, len(entries)),
+		StartedAt:  j.StartedAt,
+		FinishedAt: j.FinishedAt,
+		CreatedAt:  j.CreatedAt,
+	}
+	if out.Sources == nil {
+		out.Sources = []model.ImportSource{}
+	}
+	if j.Error != "" {
+		out.Error = &j.Error
+	}
+	for _, e := range entries {
+		entry := importEntryJSON{
+			SourceFile: e.SourceFile, EntityType: e.EntityType,
+			SourceName: e.SourceName, Result: e.Result,
+		}
+		if e.SourceID != "" {
+			id := e.SourceID
+			entry.SourceID = &id
+		}
+		if e.TargetID != nil {
+			id := e.TargetID.String()
+			entry.TargetID = &id
+		}
+		if e.Detail != "" {
+			detail := e.Detail
+			entry.Detail = &detail
+		}
+		out.Entries = append(out.Entries, entry)
+	}
+	return out
+}
+
+// probeJSON is Probe in docs/api/openapi.yaml.
+//
+// token_hash has no field here and no field in model.Probe either. A credential
+// that does not exist in the struct cannot be serialised by a handler that
+// forgot, which is a stronger guarantee than remembering to omit it.
+type probeJSON struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Region     *string    `json:"region"`
+	Mode       string     `json:"mode"`
+	Version    *string    `json:"version"`
+	LastSeenAt *time.Time `json:"last_seen_at"`
+	Enabled    bool       `json:"enabled"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+func toProbeJSON(p model.Probe) probeJSON {
+	out := probeJSON{
+		ID:         p.ID.String(),
+		Name:       p.Name,
+		Mode:       p.Mode,
+		LastSeenAt: p.LastSeenAt,
+		Enabled:    p.Enabled,
+		CreatedAt:  p.CreatedAt,
+	}
+	if p.Region != "" {
+		out.Region = &p.Region
+	}
+	if p.Version != "" {
+		out.Version = &p.Version
+	}
+	return out
 }
 
 type heartbeatJSON struct {
@@ -212,6 +318,10 @@ func toMonitorJSON(m store.MonitorWithState) monitorJSON {
 	if m.Monitor.ParentMonitorID != nil {
 		id := m.Monitor.ParentMonitorID.String()
 		out.ParentMonitorID = &id
+	}
+	if m.Monitor.ProbeID != nil {
+		id := m.Monitor.ProbeID.String()
+		out.ProbeID = &id
 	}
 	out.NotificationChannelIDs = []string{}
 	out.TagIDs = []string{}
@@ -704,6 +814,11 @@ type monitorUpdate struct {
 
 	GroupID         json.RawMessage `json:"group_id"`
 	ParentMonitorID json.RawMessage `json:"parent_monitor_id"`
+
+	// ProbeID is raw for the same reason as the two above: absent, null, and a
+	// value are three different instructions — leave the pin, unpin, and repin —
+	// and a *string collapses the first two.
+	ProbeID json.RawMessage `json:"probe_id"`
 
 	TagIDs                 *[]string `json:"tag_ids"`
 	NotificationChannelIDs *[]string `json:"notification_channel_ids"`

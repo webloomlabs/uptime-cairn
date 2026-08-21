@@ -70,6 +70,22 @@
 					label: t('nav.taxonomy'),
 					icon: 'tag',
 					scope: 'groups:read'
+				},
+				// Import sits under settings:write rather than imports:write on
+				// purpose: it is a one-off migration screen, and a key scoped to
+				// imports alone is a machine credential rather than somebody
+				// browsing. The endpoint still checks imports:write.
+				{
+					href: '/import',
+					label: t('nav.import'),
+					icon: 'refresh',
+					scope: 'imports:write'
+				},
+				{
+					href: '/settings',
+					label: t('nav.settings'),
+					icon: 'settings',
+					scope: 'settings:read'
 				}
 			] satisfies Link[]
 		).filter(

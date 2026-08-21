@@ -23,6 +23,18 @@ import (
 	"time"
 )
 
+// The live phase's shape.
+//
+// Ten streams rather than one, because the cost this measures scales with
+// connected clients and a single stream cannot show that. Ten seconds because
+// at the twenty-second interval floor a client watching twenty-five rows should
+// see roughly a dozen diffs in that window — enough to have a rate, short
+// enough not to dominate a run.
+const (
+	liveClients = 10
+	liveSeconds = 10
+)
+
 func main() {
 	var (
 		targetName   = flag.String("target", "sqlite", "target to measure: sqlite | http")
@@ -68,6 +80,7 @@ func main() {
 			writeSeconds: *writeSeconds,
 			rollupHours:  *rollupHours,
 			seed:         *seed,
+			pageSize:     *pageSize,
 			scenarios:    scenarios,
 		})
 		if err != nil {
@@ -108,6 +121,7 @@ type runConfig struct {
 	writeSeconds int
 	rollupHours  int
 	seed         int64
+	pageSize     int
 	scenarios    []Scenario
 }
 
@@ -174,6 +188,24 @@ func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
 		}
 	}
 
+	// The live channel, before the read scenarios rather than after: it needs
+	// the engine in steady state and the partition phase above has just put it
+	// through a burst, so measuring here catches the recovery rather than a
+	// quiet system. Two hundred and fifty results a second at the largest scale
+	// is the load; what is being asserted is that a client watching twenty-five
+	// rows sees a fraction of it.
+	if streamer, ok := target.(Streamer); ok {
+		live, err := streamer.MeasureLive(ctx, workload, liveClients, cfg.pageSize, liveSeconds)
+		if err != nil {
+			return res, fmt.Errorf("live channel at %d monitors: %w", cfg.scale, err)
+		}
+		res.Live = &live
+		fmt.Printf("live: %d streams of %d rows saw %d updates in %.1fs (%.1f/sec/stream, %d foreign)\n",
+			live.Clients, live.Scoped, live.Updates, live.Seconds, live.PerClientRate(), live.Foreign)
+	} else {
+		fmt.Println("live phase skipped: this target has no browser-facing update channel")
+	}
+
 	r := rand.New(rand.NewSource(cfg.seed))
 	for _, sc := range cfg.scenarios {
 		stat := &Stat{Name: sc.Name, Durations: make([]time.Duration, 0, cfg.iterations)}
@@ -185,13 +217,14 @@ func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
 		}
 		for i := 0; i < cfg.iterations; i++ {
 			t0 := time.Now()
-			rows, err := sc.Run(ctx, target, workload, r)
+			measured, err := sc.Run(ctx, target, workload, r)
 			elapsed := time.Since(t0)
 			if err != nil {
 				return res, fmt.Errorf("scenario %q: %w", sc.Name, err)
 			}
 			stat.Durations = append(stat.Durations, elapsed)
-			stat.Rows = rows
+			stat.Rows = measured.Rows
+			stat.Bytes = measured.Bytes
 		}
 		res.Stats[sc.Name] = stat
 	}
@@ -404,21 +437,21 @@ func waitForRecovery(ctx context.Context, target Target, baseline int64, within 
 func report(scenarios []Scenario, results []ScaleResult, findings []Finding) {
 	fmt.Println("\n=== Results ===")
 
-	header := fmt.Sprintf("%-38s", "scenario")
+	header := fmt.Sprintf("%-42s", "scenario")
 	for _, res := range results {
 		header += fmt.Sprintf(" %14s", fmt.Sprintf("%d mon p95", res.Scale))
 	}
 	if len(results) > 1 {
 		header += fmt.Sprintf(" %8s", "growth")
 	}
-	header += "  rows"
+	header += "  rows   payload"
 	fmt.Println(header)
 	fmt.Println(strings.Repeat("-", len(header)+4))
 
 	for _, sc := range scenarios {
-		line := fmt.Sprintf("%-38s", sc.Name)
+		line := fmt.Sprintf("%-42s", sc.Name)
 		var first, last time.Duration
-		rows := 0
+		rows, bytesFirst, bytesLast := 0, 0, 0
 		for i, res := range results {
 			st, ok := res.Stats[sc.Name]
 			if !ok {
@@ -431,11 +464,27 @@ func report(scenarios []Scenario, results []ScaleResult, findings []Finding) {
 			}
 			last = st.P95()
 			rows = st.Rows
+			if i == 0 {
+				bytesFirst = st.Bytes
+			}
+			bytesLast = st.Bytes
 		}
 		if len(results) > 1 && first > 0 {
 			line += fmt.Sprintf(" %7.1fx", float64(last)/float64(first))
 		}
-		line += fmt.Sprintf("  %d", rows)
+		line += fmt.Sprintf("  %-6d", rows)
+		if bytesLast > 0 {
+			// The payload column is the half of ADR-004's second invariant that
+			// no timing figure covers. Printed even where it is not asserted,
+			// because the number is the point: somebody reading this should be
+			// able to see a page double in size.
+			line += humanBytes(bytesLast)
+			if bytesFirst > 0 && bytesFirst != bytesLast {
+				line += fmt.Sprintf(" (%.1fx)", float64(bytesLast)/float64(bytesFirst))
+			}
+		} else {
+			line += "-"
+		}
 		fmt.Println(line)
 	}
 
@@ -456,6 +505,10 @@ func report(scenarios []Scenario, results []ScaleResult, findings []Finding) {
 		}
 		if res.SeedRate > 0 {
 			line += fmt.Sprintf("; seeded at %.0f monitors/sec", res.SeedRate)
+		}
+		if res.Live != nil {
+			line += fmt.Sprintf("; live %.1f updates/sec/stream across %d streams of %d rows",
+				res.Live.PerClientRate(), res.Live.Clients, res.Live.Scoped)
 		}
 		// The method travels with the number. Two rates measured different ways
 		// printed in the same column without saying so is how a report becomes

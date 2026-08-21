@@ -5,21 +5,40 @@ name: Load test
 # claim, and a claim measured only after the code is written is a claim
 # discovered to be false too late to act on.
 #
-# In Phase 0 it measures the schema directly, because there is no server yet.
-# Phase 1 points it at the real API by switching -target, and the assertions do
-# not change.
+# Two targets, and they measure genuinely different things.
+#
+# The `sqlite` target exercises the schema directly and answers "is the data
+# model right". It drives batches as fast as the write path will take them,
+# which is a ceiling.
+#
+# The `http` target starts a real `cairn`, creates the workload through the real
+# API, and measures what the engine *achieves* — a rate bounded by arithmetic,
+# because N monitors on an I-second interval cannot produce more than N/I
+# results a second. It also breaks every monitored endpoint at once, which is
+# what the delivery queues were sized against, and it measures the browser
+# update channel, which is the one cost that scales with connected clients
+# rather than with monitor count.
+#
+# Both run. Conflating them would be reporting 49,000 writes a second for an
+# engine quietly ten minutes behind schedule.
 
 on:
   pull_request:
     paths:
       - "harness/**"
       - "migrations/**"
+      - "internal/**"
+      - "cmd/**"
+      - "web/**"
       - ".github/workflows/load-test.yml"
   push:
     branches: [main]
     paths:
       - "harness/**"
       - "migrations/**"
+      - "internal/**"
+      - "cmd/**"
+      - "web/**"
       - ".github/workflows/load-test.yml"
   workflow_dispatch:
 
@@ -31,8 +50,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gate:
-    name: 5,000-monitor gate
+  storage:
+    name: 5,000-monitor gate (storage)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -82,6 +101,70 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: load-test-results
+          name: load-test-storage
           path: /tmp/load-test.json
+          if-no-files-found: warn
+
+  engine:
+    name: 5,000-monitor gate (engine and UI)
+    runs-on: ubuntu-latest
+    # Longer than the storage gate: this one runs a real engine at both scales,
+    # waits for each to reach steady state, breaks every endpoint at once, and
+    # measures the browser channel. Roughly eight minutes of work, with headroom
+    # for a slow runner.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # The frontend first, because //go:embed reads internal/ui/dist at compile
+      # time. A Go build that runs first embeds the committed placeholder — the
+      # binary starts, serves a shell referencing a bundle it does not contain,
+      # and every scenario here still passes, which is the worst version of this
+      # mistake.
+      - name: Build the frontend
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: Build cairn
+        run: go build -o /tmp/cairn ./cmd/cairn
+
+      - name: Build the harness
+        working-directory: harness
+        run: go build -o /tmp/cairn-harness .
+
+      # The harness starts and stops the engine itself, so the run is
+      # reproducible and there is no server left behind on a failure.
+      #
+      # -write-seconds 30 rather than the storage gate's 5: this measures an
+      # observed rate against what the schedule implies, and a five-second window
+      # at 5,000 monitors is 1,250 heartbeats — few enough that the scheduler's
+      # dispersal lands unevenly inside it and the ratio measures the window
+      # rather than the engine.
+      - name: Run gate
+        run: |
+          /tmp/cairn-harness \
+            -target http \
+            -cairn /tmp/cairn \
+            -scales 500,5000 \
+            -iterations 100 \
+            -write-seconds 30 \
+            -json /tmp/load-test-engine.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-engine
+          path: /tmp/load-test-engine.json
           if-no-files-found: warn

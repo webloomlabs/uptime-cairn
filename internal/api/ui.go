@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"io"
 	"io/fs"
 	"net/http"
@@ -32,10 +33,15 @@ const indexFile = "index.html"
 type spaHandler struct {
 	assets fs.FS
 	files  http.Handler
+
+	// domains resolves a request's Host to a status page slug, for
+	// custom-domain pages. Nil when the server has no store to ask, which is
+	// every use of this handler outside the composed server.
+	domains *domainCache
 }
 
-func newSPAHandler(assets fs.FS) http.Handler {
-	return &spaHandler{assets: assets, files: http.FileServerFS(assets)}
+func newSPAHandler(assets fs.FS, domains *domainCache) http.Handler {
+	return &spaHandler{assets: assets, files: http.FileServerFS(assets), domains: domains}
 }
 
 func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +87,13 @@ func (h *spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // client-side route look broken to anything reading status codes, monitoring
 // included — which would be a particularly poor joke in this product.
 func (h *spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
+	// A custom-domain status page is resolved here, where the answer can reach
+	// the client. See domains.go for why it cannot be a proxy rewrite.
+	if slug, ok := h.statusPageFor(r); ok {
+		h.serveStatusShell(w, r, slug)
+		return
+	}
+
 	file, err := h.assets.Open(indexFile)
 	if err != nil {
 		// A binary built without running the frontend toolchain. That is a
@@ -107,6 +120,60 @@ func (h *spaHandler) serveIndex(w http.ResponseWriter, r *http.Request) {
 	// embedded file would be the build machine's clock rather than a fact about
 	// the content.
 	http.ServeContent(w, r, indexFile, time.Time{}, content)
+}
+
+// statusPageFor resolves the request's Host to a status page slug.
+func (h *spaHandler) statusPageFor(r *http.Request) (string, bool) {
+	if h.domains == nil {
+		return "", false
+	}
+	return h.domains.slugFor(r.Context(), r.Host)
+}
+
+// serveStatusShell writes the application shell with the page's slug in it.
+//
+// One script tag, inserted after <head>, carrying a JSON-encoded slug. The
+// frontend reads it and renders that status page at whatever path it was asked
+// for, so the customer's hostname shows the customer's page at its bare root
+// rather than redirecting to a path with an internal slug in it.
+//
+// The slug is JSON-encoded rather than interpolated. Slugs are constrained to
+// lower-case alphanumerics and hyphens at write time, so nothing dangerous can
+// reach here today — and a value written into a <script> body by string
+// concatenation is one schema change away from being an injection, which is not
+// a bet worth taking to save a function call.
+func (h *spaHandler) serveStatusShell(w http.ResponseWriter, r *http.Request, slug string) {
+	raw, err := fs.ReadFile(h.assets, indexFile)
+	if err != nil {
+		notBuilt(w)
+		return
+	}
+
+	encoded, err := json.Marshal(slug)
+	if err != nil {
+		notBuilt(w)
+		return
+	}
+	tag := "<head>\n<script>window.__cairnStatusPage=" + string(encoded) + "</script>"
+
+	shell := strings.Replace(string(raw), "<head>", tag, 1)
+	if shell == string(raw) {
+		// No <head> to insert after means a shell this code does not recognise,
+		// and serving it unmodified would render the dashboard on a customer's
+		// domain. Refused loudly instead: a page that does not load is a bug
+		// report, and a dashboard on a customer's hostname is an incident.
+		http.Error(w, "the application shell could not be prepared for this custom domain",
+			http.StatusInternalServerError)
+		return
+	}
+
+	// Vary on Host, because the same path now produces different documents on
+	// different hostnames and a cache in front of this must not serve one for
+	// the other.
+	w.Header().Set("Vary", "Host")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	http.ServeContent(w, r, indexFile, time.Time{}, strings.NewReader(shell))
 }
 
 // looksLikeAsset reports whether a path should 404 rather than fall back.

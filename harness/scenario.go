@@ -13,6 +13,16 @@ type Stat struct {
 	Name      string
 	Durations []time.Duration
 	Rows      int // rows the scenario returned, from its last iteration
+
+	// Bytes is the response body's size on the wire, from the last iteration.
+	//
+	// Latency and row count between them do not cover ADR-004's second
+	// invariant. "Client payload size and render cost stay bounded by viewport
+	// size, never by total monitor count" is a claim about *bytes*, and a page
+	// that returns 25 rows in 4 KB at 500 monitors and 25 rows in 400 KB at
+	// 5,000 has held every other figure in this report and broken the thing the
+	// report exists to protect. Zero on a target with no wire.
+	Bytes int
 }
 
 func (s *Stat) percentile(q float64) time.Duration {
@@ -44,12 +54,21 @@ func (s *Stat) P95() time.Duration { return s.percentile(0.95) }
 // while cancelling out most of the runner's noise.
 type Scenario struct {
 	Name string
-	Run  func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error)
+	Run  func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error)
 
 	// ViewportBounded asserts the row count is identical at every scale. This is
 	// ADR-004's second invariant stated literally: client payload size must be
 	// bounded by the page, never by how many monitors exist.
 	ViewportBounded bool
+
+	// MaxPayloadGrowth caps bytes(largest scale) / bytes(smallest scale).
+	//
+	// The other half of ADR-004's second invariant, and the half a frontend can
+	// break on its own: adding an `include=` to the dashboard's list request is
+	// a one-line change that multiplies the payload without moving a single
+	// latency figure. Zero means report the number and do not fail on it, which
+	// is right for a target that reports no bytes at all.
+	MaxPayloadGrowth float64
 
 	// RangeBounded is the weaker claim, for a response whose size is set by the
 	// range asked for rather than by a page limit: it may legitimately differ
@@ -71,6 +90,16 @@ type Scenario struct {
 	MaxAbs time.Duration
 }
 
+// Measure is one iteration's result: what came back, and how big it was.
+//
+// Bytes rather than rows alone because ADR-004's second invariant is two claims
+// and rows only tests one of them. A scenario on a target with no wire reports
+// zero and the payload assertion is skipped rather than made about zero.
+type Measure struct {
+	Rows  int
+	Bytes int
+}
+
 // minRangeSample is how many rows a range-bounded scenario needs before its
 // non-growth claim is asserted rather than merely reported.
 const minRangeSample = 10
@@ -84,9 +113,9 @@ func Scenarios(pageSize int) []Scenario {
 			ViewportBounded: true,
 			MaxGrowth:       3.0,
 			MaxAbs:          150 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				res, err := t.ListMonitors(ctx, ListQuery{Limit: pageSize})
-				return res.Rows, err
+				return Measure{Rows: res.Rows, Bytes: res.Bytes}, err
 			},
 		},
 		{
@@ -98,9 +127,9 @@ func Scenarios(pageSize int) []Scenario {
 			ViewportBounded: true,
 			MaxGrowth:       3.0,
 			MaxAbs:          150 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				res, err := t.ListMonitors(ctx, ListQuery{Limit: pageSize, Cursor: w.DeepCursor})
-				return res.Rows, err
+				return Measure{Rows: res.Rows, Bytes: res.Bytes}, err
 			},
 		},
 		{
@@ -129,9 +158,9 @@ func Scenarios(pageSize int) []Scenario {
 			ViewportBounded: false, // fewer than a page may match at small scale
 			MaxGrowth:       6.0,
 			MaxAbs:          250 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				res, err := t.ListMonitors(ctx, ListQuery{Limit: pageSize, Status: "down"})
-				return res.Rows, err
+				return Measure{Rows: res.Rows, Bytes: res.Bytes}, err
 			},
 		},
 		{
@@ -139,10 +168,10 @@ func Scenarios(pageSize int) []Scenario {
 			ViewportBounded: true,
 			MaxGrowth:       3.0,
 			MaxAbs:          200 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				tag := w.Tags[r.Intn(len(w.Tags))]
 				res, err := t.ListMonitors(ctx, ListQuery{Limit: pageSize, TagID: tag})
-				return res.Rows, err
+				return Measure{Rows: res.Rows, Bytes: res.Bytes}, err
 			},
 		},
 		{
@@ -158,18 +187,57 @@ func Scenarios(pageSize int) []Scenario {
 			Name:      "membership: unfiltered",
 			MaxGrowth: 0,
 			MaxAbs:    100 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				res, err := t.Membership(ctx, ListQuery{})
-				return int(res.Count), err
+				return Measure{Rows: int(res.Count)}, err
 			},
 		},
 		{
 			Name:      "membership: status=down",
 			MaxGrowth: 0,
 			MaxAbs:    100 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				res, err := t.Membership(ctx, ListQuery{Status: "down"})
-				return int(res.Count), err
+				return Measure{Rows: int(res.Count)}, err
+			},
+		},
+		{
+			// The request the dashboard actually sends.
+			//
+			// The bare listing above measures the endpoint; this measures the
+			// page. `include=last_heartbeat,heartbeats,uptime` is what the
+			// monitor list asks for on every load and every refresh, and the
+			// strip of recent checks is the expensive part — it is the one embed
+			// whose cost is a multiple of the page size rather than a constant.
+			//
+			// It is here because it is the scenario a well-meaning change
+			// breaks. Raising heartbeats_limit, or adding `tags` to the default
+			// include set, moves nothing this report measures except this line.
+			Name:            "list: dashboard page (include=)",
+			ViewportBounded: true,
+			MaxGrowth:       3.0,
+			// Two, not one-point-something, and the slack is measured rather
+			// than guessed. Each row's strip is bounded at thirty beats, so once
+			// every monitor has thirty the payload is identical at both scales —
+			// but before that it is however much history the run happened to
+			// accumulate, and the smaller scale seeds faster and therefore has
+			// more. Observed at 32.2 KB against 16.5 KB on one run for that
+			// reason alone.
+			//
+			// What this has to catch is a change of kind rather than of degree:
+			// adding `tags` to the default include set, or raising
+			// heartbeats_limit, multiplies the payload several times over and
+			// moves no other figure in this report. Two is comfortably above the
+			// noise and far below that.
+			MaxPayloadGrowth: 2.0,
+			MaxAbs:           300 * time.Millisecond,
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
+				res, err := t.ListMonitors(ctx, ListQuery{
+					Limit:           pageSize,
+					Include:         "last_heartbeat,heartbeats,uptime",
+					HeartbeatsLimit: 30,
+				})
+				return Measure{Rows: res.Rows, Bytes: res.Bytes}, err
 			},
 		},
 		{
@@ -184,9 +252,10 @@ func Scenarios(pageSize int) []Scenario {
 			RangeBounded: true,
 			MaxGrowth:    3.0,
 			MaxAbs:       200 * time.Millisecond,
-			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (int, error) {
+			Run: func(ctx context.Context, t Target, w *Workload, r *rand.Rand) (Measure, error) {
 				m := w.Monitors[r.Intn(len(w.Monitors))]
-				return t.History(ctx, m.ID, w.HistoryFrom, w.HistoryTo)
+				rows, err := t.History(ctx, m.ID, w.HistoryFrom, w.HistoryTo)
+				return Measure{Rows: rows}, err
 			},
 		},
 	}
@@ -208,6 +277,10 @@ type ScaleResult struct {
 	// Partition is nil when the target could not be disrupted — which is the
 	// SQLite target, always, because there is no engine underneath it.
 	Partition *PartitionResult
+
+	// Live is nil when the target has no browser-facing update channel, which
+	// is again the SQLite target: there is no server to open a stream against.
+	Live *LiveResult
 }
 
 // PartitionResult is what happened when every monitored endpoint failed at once.
@@ -306,6 +379,26 @@ func Evaluate(scenarios []Scenario, results []ScaleResult, minWriteRate float64)
 					ss.Rows, small.Scale, ls.Rows, large.Scale),
 			})
 		}
+		// The bytes half of ADR-004's second invariant.
+		//
+		// Asserted separately from latency because the two fail independently:
+		// a payload that has quadrupled while the query got no slower is exactly
+		// what adding an embed to the default request looks like, and every
+		// timing figure in this report would pass.
+		if sc.MaxPayloadGrowth > 0 && ss.Bytes > 0 && ls.Bytes > 0 {
+			growth := float64(ls.Bytes) / float64(ss.Bytes)
+			if growth > sc.MaxPayloadGrowth {
+				findings = append(findings, Finding{
+					Scenario: sc.Name,
+					Failed:   true,
+					Detail: fmt.Sprintf(
+						"response grew %.1fx (%s -> %s) for a %.0fx increase in monitors; cap is %.1fx — client payload must be bounded by the page, not by the install (ADR-004)",
+						growth, humanBytes(ss.Bytes), humanBytes(ls.Bytes),
+						float64(large.Scale)/float64(small.Scale), sc.MaxPayloadGrowth),
+				})
+			}
+		}
+
 		if sc.MaxGrowth > 0 && ss.P95() > 0 {
 			// The two p95s are only a growth ratio if the two runs did the same
 			// work. Equal row counts is the usual case — a page is 25 rows at
@@ -349,6 +442,7 @@ func Evaluate(scenarios []Scenario, results []ScaleResult, minWriteRate float64)
 		}
 	}
 
+	findings = append(findings, evaluateLive(small, large)...)
 	findings = append(findings, evaluateWrites(large, minWriteRate)...)
 	findings = append(findings, evaluatePartition(large)...)
 	findings = append(findings, evaluateSeeding(small, large)...)
@@ -515,4 +609,84 @@ func evaluatePartition(large ScaleResult) []Finding {
 		})
 	}
 	return findings
+}
+
+// humanBytes renders a size the way a person reads one.
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// evaluateLive is the assertion the 5,000-monitor figure cannot make.
+//
+// Every other number in this report scales with the install. This one must not:
+// ADR-004's whole design rests on a monitor nobody is watching costing a
+// connected browser nothing, and the failure mode it exists to prevent — the one
+// that puts a hard ceiling on the product this is measured against — is a
+// channel that broadcasts everything to everyone.
+//
+// Two claims, and they fail differently.
+//
+// A foreign update is a correctness failure with no tolerance. It means a stream
+// received a diff for a monitor it never subscribed to, which is the design not
+// being implemented rather than being slow.
+//
+// A per-client rate that grows with monitor count is the scaling failure. At
+// 5,000 monitors the engine produces ten times the results it does at 500, and
+// a client watching the same twenty-five rows must receive the same number of
+// diffs at both. The bound is generous — the workload's monitors are not
+// identical and a page at one scale is not the same page at another — but a
+// tenfold increase in monitors producing anything like a tenfold increase per
+// client is the broadcast, arriving.
+func evaluateLive(small, large ScaleResult) []Finding {
+	var findings []Finding
+	if small.Live == nil || large.Live == nil {
+		return findings
+	}
+
+	for _, res := range []*LiveResult{small.Live, large.Live} {
+		if res.Foreign > 0 {
+			findings = append(findings, Finding{
+				Scenario: "live: scoped diffs",
+				Failed:   true,
+				Detail: fmt.Sprintf(
+					"%d of %d diffs were for a monitor the receiving stream never subscribed to — the channel is not scoped, and ADR-004's entire design rests on it being scoped",
+					res.Foreign, res.Updates),
+			})
+		}
+	}
+
+	smallRate, largeRate := small.Live.PerClientRate(), large.Live.PerClientRate()
+	if smallRate <= 0 {
+		findings = append(findings, Finding{
+			Scenario: "live: per-client rate",
+			Detail: fmt.Sprintf(
+				"not compared: %d streams received nothing at %d monitors over %.1fs, so there is no baseline",
+				small.Live.Clients, small.Scale, small.Live.Seconds),
+		})
+		return findings
+	}
+
+	growth := largeRate / smallRate
+	const maxLiveGrowth = 2.0
+	finding := Finding{
+		Scenario: "live: per-client rate",
+		Detail: fmt.Sprintf(
+			"%.1f updates/sec per stream at %d monitors and %.1f at %d (%.1fx) across %d streams of %d rows each",
+			smallRate, small.Scale, largeRate, large.Scale, growth,
+			large.Live.Clients, large.Live.Scoped),
+	}
+	if growth > maxLiveGrowth {
+		finding.Failed = true
+		finding.Detail += fmt.Sprintf(
+			" — a %.0fx increase in monitors must not move a figure bounded by viewport; cap is %.1fx",
+			float64(large.Scale)/float64(small.Scale), maxLiveGrowth)
+	}
+	return append(findings, finding)
 }

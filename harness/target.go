@@ -66,6 +66,16 @@ type ListQuery struct {
 	Status  string
 	TagID   []byte
 	GroupID []byte
+
+	// Include is the `include=` embed list, verbatim. It exists so a scenario
+	// can ask for exactly what the dashboard asks for: the strip of recent
+	// checks and the uptime figures are the expensive part of the real request,
+	// and a benchmark that measured the bare listing would be measuring a page
+	// nobody loads.
+	Include string
+
+	// HeartbeatsLimit sets `heartbeats_limit=` when Include names heartbeats.
+	HeartbeatsLimit int
 }
 
 // ListResult reports what a page fetch returned. Rows is the count actually
@@ -74,6 +84,20 @@ type ListQuery struct {
 type ListResult struct {
 	Rows int
 	Next *Cursor
+
+	// Bytes is the response body's size on the wire.
+	//
+	// This is the half of ADR-004's second invariant that latency does not
+	// cover, and it is the half a frontend can break on its own. "Client-side
+	// payload size and render cost stay bounded by viewport size, never by total
+	// monitor count" is two claims; a page that returns 25 rows in 4 KB at 500
+	// monitors and 25 rows in 400 KB at 5,000 has held the row count and broken
+	// the invariant, and every latency figure in this report would still pass.
+	//
+	// Zero on a target that has no wire — the SQLite one reads rows out of the
+	// schema and there is no serialised response to measure. The assertion is
+	// skipped rather than reported as a claim about zero bytes.
+	Bytes int
 }
 
 // MembershipResult is the signal behind GET /api/v1/monitors/membership.
@@ -193,6 +217,52 @@ type Target interface {
 	History(ctx context.Context, monitorID []byte, from, to time.Time) (int, error)
 
 	Close() error
+}
+
+// LiveResult is what one window of the browser update channel carried.
+//
+// The cost this measures is the one the 5,000-monitor gate does not exercise at
+// all: it scales with connected clients and with viewport size, and not with
+// how many monitors exist. That is precisely ADR-004's claim, and it is the
+// claim that stops being true the first time somebody makes the stream carry
+// everything "because it is simpler".
+type LiveResult struct {
+	// Clients is how many streams were open.
+	Clients int
+
+	// Scoped is how many monitors each stream subscribed to.
+	Scoped int
+
+	// Updates is the total monitor diffs delivered across every stream.
+	Updates int
+
+	// Foreign is diffs delivered for a monitor the receiving stream had not
+	// subscribed to. Any at all is a failure: it means the channel is not
+	// scoped, and the whole design rests on it being scoped.
+	Foreign int
+
+	// Bytes is the total delivered across every stream, summaries included.
+	Bytes int
+
+	// Seconds is the measurement window.
+	Seconds float64
+}
+
+// PerClientRate is updates per second per open stream, which is the figure that
+// must not move with monitor count.
+func (l LiveResult) PerClientRate() float64 {
+	if l.Clients == 0 || l.Seconds <= 0 {
+		return 0
+	}
+	return float64(l.Updates) / float64(l.Clients) / l.Seconds
+}
+
+// Streamer is the optional half a target implements when it has a browser-facing
+// update channel to measure.
+type Streamer interface {
+	// MeasureLive opens `clients` streams, each scoped to `scoped` monitors
+	// drawn from the workload, and reports what arrived over the window.
+	MeasureLive(ctx context.Context, w *Workload, clients, scoped, seconds int) (LiveResult, error)
 }
 
 // Disruptor is the optional half: a target that can break the thing its monitors

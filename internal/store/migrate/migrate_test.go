@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,5 +117,55 @@ func TestLoadRejectsBadFilenames(t *testing.T) {
 	_, err := Load(migrationFS(map[string]string{"initial.sql": "SELECT 1;"}), "sqlite")
 	if err == nil {
 		t.Fatal("Load accepted a file that is not NNNN_snake_case.sql")
+	}
+}
+
+// A downgrade is the case the runner used to miss entirely: it iterates the
+// migrations the binary carries, finds each already applied with a matching
+// checksum, and never looks at the versions beyond them. That start is clean,
+// silent, and running against a schema it does not understand.
+func TestApplyRefusesADatabaseMigratedByANewerBinary(t *testing.T) {
+	t.Parallel()
+
+	newer := migrationFS(map[string]string{
+		"0001_first.sql":  `CREATE TABLE a (id INTEGER PRIMARY KEY) STRICT;`,
+		"0002_second.sql": `CREATE TABLE b (id INTEGER PRIMARY KEY) STRICT;`,
+	})
+	older := migrationFS(map[string]string{
+		"0001_first.sql": `CREATE TABLE a (id INTEGER PRIMARY KEY) STRICT;`,
+	})
+
+	db := testDB(t)
+	if _, err := Apply(t.Context(), db, newer, "sqlite"); err != nil {
+		t.Fatalf("apply newer: %v", err)
+	}
+
+	_, err := Apply(t.Context(), db, older, "sqlite")
+	if err == nil {
+		t.Fatal("older binary started against a newer schema, want refusal")
+	}
+	if !errors.Is(err, ErrSchemaAhead) {
+		t.Fatalf("error %v, want ErrSchemaAhead", err)
+	}
+	// The message has to name the version, because "schema too new" without a
+	// number leaves the operator guessing which backup to reach for.
+	if !strings.Contains(err.Error(), "0002") {
+		t.Errorf("error %q does not name the offending migration", err)
+	}
+}
+
+// A binary at exactly head is the normal case and must not trip the guard.
+func TestApplyAcceptsADatabaseAtExactlyHead(t *testing.T) {
+	t.Parallel()
+
+	fsys := migrationFS(map[string]string{
+		"0001_first.sql": `CREATE TABLE a (id INTEGER PRIMARY KEY) STRICT;`,
+	})
+	db := testDB(t)
+	if _, err := Apply(t.Context(), db, fsys, "sqlite"); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if _, err := Apply(t.Context(), db, fsys, "sqlite"); err != nil {
+		t.Fatalf("second apply: %v", err)
 	}
 }

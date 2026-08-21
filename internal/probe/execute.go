@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/observation"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
@@ -156,8 +157,8 @@ func (s *Session) emit(a *probev1.Assignment, t task, obs check.Observation, at 
 		r.ResponseTimeMs = float64(obs.ResponseTime.Microseconds()) / 1000.0
 	}
 	if s.shouldReport(key, obs, at) {
-		r.Certificate = toCertificateObservation(obs.Certificate)
-		r.Domain = toDomainObservation(obs.Domain)
+		r.Certificate = observation.Certificate(obs.Certificate)
+		r.Domain = observation.Domain(obs.Domain)
 	}
 
 	s.buf.Add(r)
@@ -228,47 +229,6 @@ func observationKey(obs check.Observation) (string, bool) {
 	default:
 		return "", false
 	}
-}
-
-func toCertificateObservation(c *check.Certificate) *probev1.CertificateObservation {
-	if c == nil {
-		return nil
-	}
-	out := &probev1.CertificateObservation{
-		Subject:                 c.Subject,
-		Issuer:                  c.Issuer,
-		SerialNumber:            c.SerialNumber,
-		ValidToUnixMicros:       c.NotAfter.UnixMicro(),
-		FingerprintSha256:       c.FingerprintSHA256,
-		SubjectAlternativeNames: c.SANs,
-		ChainValid:              c.ChainValid,
-		ChainError:              c.ChainError,
-	}
-	if !c.NotBefore.IsZero() {
-		out.ValidFromUnixMicros = c.NotBefore.UnixMicro()
-	}
-	if c.DaysRemainingThreshold != nil {
-		threshold := int32(*c.DaysRemainingThreshold)
-		out.DaysRemainingThreshold = &threshold
-	}
-	return out
-}
-
-func toDomainObservation(d *check.Domain) *probev1.DomainObservation {
-	if d == nil {
-		return nil
-	}
-	out := &probev1.DomainObservation{
-		Domain:              d.Domain,
-		ExpiresAtUnixMicros: d.ExpiresAt.UnixMicro(),
-		Registrar:           d.Registrar,
-		Source:              d.Source,
-	}
-	if d.DaysRemainingThreshold != nil {
-		threshold := int32(*d.DaysRemainingThreshold)
-		out.DaysRemainingThreshold = &threshold
-	}
-	return out
 }
 
 // reschedule puts the monitor back on the heap.

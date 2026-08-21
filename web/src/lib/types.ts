@@ -69,6 +69,15 @@ export type Monitor = {
 	upside_down: boolean;
 	group_id: string | null;
 	parent_monitor_id: string | null;
+	/**
+	 * The probe this monitor is pinned to, or null for "run it anywhere".
+	 *
+	 * Only `docker` needs one: every other check answers the same question from
+	 * anywhere with the right egress, while "is this container running" is a
+	 * question about one host's daemon. The server fills it in when the install
+	 * has exactly one probe, which is every solo install.
+	 */
+	probe_id: string | null;
 	tag_ids: string[];
 	notification_channel_ids: string[];
 	notify_on_recovery: boolean;
@@ -80,6 +89,8 @@ export type Monitor = {
 
 	// include= embeds, absent unless asked for.
 	last_heartbeat?: Heartbeat;
+	/** A bounded run of recent checks, newest first. `include=heartbeats`. */
+	heartbeats?: Heartbeat[];
 	uptime?: { '24h': number | null; '30d': number | null };
 	group?: Group;
 	tags?: Tag[];
@@ -93,6 +104,112 @@ export type MembershipSignal = {
 	version: number;
 	count: number;
 	generated_at: string;
+};
+
+/**
+ * An incident.
+ *
+ * State is not a field a client may PATCH. Advancing an incident goes through
+ * the timeline, so that every state change carries the sentence explaining it —
+ * an incident that moved from investigating to identified with nobody saying
+ * what was identified is the thing a post-mortem cannot reconstruct.
+ */
+export type Incident = {
+	id: string;
+	title: string;
+	state: IncidentState;
+	impact: IncidentImpact;
+	started_at: string;
+	resolved_at: string | null;
+	monitor_ids: string[];
+	status_page_ids: string[];
+	auto_opened: boolean;
+	acknowledged_at: string | null;
+	acknowledged_by: string | null;
+	assigned_to: string | null;
+	updates?: IncidentUpdate[];
+	metrics: {
+		time_to_detect_seconds: number | null;
+		time_to_acknowledge_seconds: number | null;
+		time_to_resolve_seconds: number | null;
+	} | null;
+	created_at: string;
+	updated_at: string;
+};
+
+export type IncidentState = 'investigating' | 'identified' | 'monitoring' | 'resolved';
+export type IncidentImpact = 'none' | 'minor' | 'major' | 'critical';
+
+export const INCIDENT_STATES: IncidentState[] = [
+	'investigating',
+	'identified',
+	'monitoring',
+	'resolved'
+];
+export const INCIDENT_IMPACTS: IncidentImpact[] = ['none', 'minor', 'major', 'critical'];
+
+/** One entry on an incident's timeline. */
+export type IncidentUpdate = {
+	id: string;
+	state?: IncidentState;
+	body: string;
+	author_id: string | null;
+	notified_subscribers: boolean;
+	created_at: string;
+};
+
+/** Instance settings, as read. Secrets are never in this shape. */
+export type Settings = {
+	general: {
+		instance_name?: string;
+		base_url?: string;
+		timezone?: string;
+		locale?: string;
+	};
+	appearance: { theme?: string; primary_color?: string | null };
+	retention: {
+		raw_days?: number;
+		rollup_1m_days?: number;
+		rollup_5m_days?: number;
+		rollup_1h_days?: number;
+		rollup_1d_days?: number;
+		webhook_delivery_days?: number;
+	};
+	smtp: {
+		host: string | null;
+		port: number | null;
+		username: string | null;
+		encryption: string;
+		from_address: string | null;
+		from_name: string | null;
+	};
+	monitoring: {
+		default_interval_seconds?: number;
+		default_timeout_seconds?: number;
+		default_retries?: number;
+		default_notification_channel_ids?: string[];
+		max_concurrent_checks?: number;
+	};
+	security: {
+		session_timeout_minutes?: number;
+		login_rate_limit_per_minute?: number;
+		api_rate_limit_per_minute?: number;
+		require_totp?: boolean;
+		trusted_proxies?: string[];
+	};
+	telemetry: { enabled: boolean; last_sent_at?: string | null };
+};
+
+/** One check executor. Read-only in this build; enrolment is Phase 4. */
+export type Probe = {
+	id: string;
+	name: string;
+	region: string | null;
+	mode: 'embedded' | 'remote';
+	version: string | null;
+	last_seen_at: string | null;
+	enabled: boolean;
+	created_at: string;
 };
 
 export type Group = {

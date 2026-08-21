@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
+	"github.com/webloomlabs/uptime-cairn/internal/live"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
@@ -219,6 +220,7 @@ func (s *Server) getPrometheusMetrics(w http.ResponseWriter, r *http.Request) {
 	writeEngineMetrics(&b)
 	writeProbeMetrics(&b)
 	s.writePoolMetrics(&b)
+	s.writeLiveMetrics(&b)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -270,7 +272,13 @@ func escapeLabel(value string) string {
 // a credential is a metrics endpoint somebody turns off.
 func (s *Server) metricsAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if isLoopback(clientIP(r)) {
+		// The exemption is for a scraper on this host, and "on this host" is a
+		// claim about the connection rather than about a header. resolveClient
+		// is what separates the two: a request forwarded by a same-host reverse
+		// proxy also arrives from 127.0.0.1, and without this it inherited an
+		// exemption meant for a local Prometheus while carrying the whole
+		// monitor inventory out to the internet.
+		if ip, known := resolveClient(r, s.trusted); known && isLoopback(ip) {
 			next(w, r)
 			return
 		}
@@ -402,6 +410,28 @@ func (s *Server) writePoolMetrics(b *strings.Builder) {
 			fmt.Fprintf(b, "%s{pool=%q} %g\n", series.name, p.Name, series.value(p))
 		}
 	}
+}
+
+// writeLiveMetrics reports the cost of the live-update channel.
+//
+// It is here because it is the one cost in this system that scales with
+// connected clients rather than with monitor count, and the 5,000-monitor gate
+// does not exercise that dimension at all. ADR-004's first invariant is that
+// server-side resource use stays flat as total monitor count grows regardless
+// of how many are being viewed; the number that would falsify it is this one
+// against a flat heartbeat rate.
+//
+// Absent rather than zero when no bus is wired in, on the same reasoning as the
+// probe series: a series reporting 0 subscribers is a claim that nobody is
+// watching, and "this build has no live channel" is a different statement.
+func (s *Server) writeLiveMetrics(b *strings.Builder) {
+	counter, ok := s.live.(live.Counter)
+	if !ok {
+		return
+	}
+	b.WriteString("\n# HELP cairn_live_subscribers Open browser update streams.\n")
+	b.WriteString("# TYPE cairn_live_subscribers gauge\n")
+	fmt.Fprintf(b, "cairn_live_subscribers %d\n", counter.Subscribers())
 }
 
 // writeProbeMetrics republishes what each probe reported about itself.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/protocol"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 )
 
@@ -43,7 +44,7 @@ type PushIngest interface {
 	// The API runs the checker because the control plane must not import
 	// probe/check (ADR-001); what crosses this interface is an observation, and
 	// from there a manual check is treated exactly like a scheduled one.
-	RecordCheck(ctx context.Context, monitor model.Monitor, status model.Status, code, message string, responseTime *time.Duration) (model.Heartbeat, error)
+	RecordCheck(ctx context.Context, monitor model.Monitor, c protocol.Check) (model.Heartbeat, error)
 }
 
 func (s *Server) pushHeartbeat(w http.ResponseWriter, r *http.Request) {

@@ -36,14 +36,14 @@ func TestSetupHappensOnce(t *testing.T) {
 	server := testServer(t)
 	c := newClient(t, server)
 
-	_, status := c.do(http.MethodGet, "/api/v1/setup", nil)
+	_, status := c.do(http.MethodGet, "/api/v1/setup/status", nil)
 	if required, _ := status["setup_required"].(bool); !required {
 		t.Fatal("a fresh install did not report setup_required")
 	}
 
 	c.setup()
 
-	_, status = c.do(http.MethodGet, "/api/v1/setup", nil)
+	_, status = c.do(http.MethodGet, "/api/v1/setup/status", nil)
 	if required, _ := status["setup_required"].(bool); required {
 		t.Error("setup_required is still true after setup")
 	}

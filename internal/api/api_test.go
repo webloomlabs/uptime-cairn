@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
+	"github.com/webloomlabs/uptime-cairn/internal/live"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
@@ -32,6 +33,15 @@ func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
 	server, _ := testServerWithStore(t)
+	return server
+}
+
+// testServer2 is testServer with extra checkers registered, for the tests whose
+// subject is a monitor type the default registry does not carry.
+func testServer2(t *testing.T, extra ...check.Checker) *httptest.Server {
+	t.Helper()
+
+	server, _ := testServerWithStore(t, extra...)
 	return server
 }
 
@@ -93,16 +103,25 @@ func testAPI(t *testing.T, extra ...check.Checker) (*httptest.Server, *sqlite.St
 		alerts.Wait()
 	})
 
+	// A real live bus, wired to a real control plane, because the interesting
+	// claim about the live channel is that a diff produced by ingest reaches the
+	// subscriber holding that row — and a stand-in bus would only prove the
+	// stand-in agrees with itself.
+	updates := live.NewBus()
+
 	cp := controlplane.New(store, controlplane.NewPublisher(), alerts,
 		secrets.NewVault(keeper, "monitors", "config"), log,
-		model.EmbeddedProbeID, model.SentinelOrgID)
+		model.EmbeddedProbeID, model.SentinelOrgID).
+		WithLive(updates)
 
 	// The subscriber relay is recorded rather than real: what the handlers decide
 	// — who gets told, and with what — is the half that lives here. Whether the
 	// message then reaches a mail server is tested in internal/notify, against a
 	// mail server.
 	api := New(store, noopNotifier{}, noopNotifier{}, cp, alerts, registry, keeper, log, "Test Instance").
-		WithSubscribers(&recordingRelay{})
+		WithSubscribers(&recordingRelay{}).
+		WithLive(updates).
+		WithImports(store)
 
 	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)
@@ -174,6 +193,23 @@ func (c *client) do(method, path string, body any) (*http.Response, map[string]a
 		_ = json.Unmarshal(raw, &decoded)
 	}
 	return resp, decoded
+}
+
+// authorise applies whatever credential this client is holding to a request the
+// caller built itself — the streaming tests, which cannot go through do because
+// they must not read the body to completion.
+func (c *client) authorise(req *http.Request) {
+	if c.csrf != "" {
+		req.Header.Set(csrfHeader, c.csrf)
+	}
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
+	if c.http.Jar != nil {
+		for _, cookie := range c.http.Jar.Cookies(req.URL) {
+			req.AddCookie(cookie)
+		}
+	}
 }
 
 // setup completes first-run setup and keeps the session.

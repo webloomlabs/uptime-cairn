@@ -48,6 +48,17 @@ type Config struct {
 	// what a status page will call this install.
 	InstanceName string
 
+	// TrustedProxies names the peers allowed to speak for a client through
+	// X-Forwarded-For. Empty by default, and empty means the header is believed
+	// nowhere in the process.
+	//
+	// The one decision that turns on it today is the /metrics exemption: a
+	// scrape from loopback needs no credential, and a reverse proxy on the same
+	// host also connects from loopback. Naming the proxy here is what lets the
+	// server tell a local Prometheus from the entire internet arriving through
+	// one — see docs/operations/reverse-proxy.md.
+	TrustedProxies []string
+
 	// BaseURL is where this install is reachable from outside — the value that
 	// turns an alert into something clickable. Empty by default and empty in the
 	// event envelope when unset, because guessing it from the listen address

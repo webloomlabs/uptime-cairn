@@ -138,6 +138,12 @@ func (s *Server) ingestResults(ctx context.Context, results []*probev1.Result) (
 	// two events in one pass, not two passes.
 	s.raise(append(pending, s.record(ctx, observation)...))
 
+	// And the browsers holding these rows, on the same terms and for the same
+	// reason (ADR-004). Only the subscriptions naming these monitor ids see
+	// anything; a client watching a different page of the install receives
+	// nothing at all from this batch.
+	s.broadcast(beats, states)
+
 	// The high-water mark: every result at or below this id is durable. Results
 	// are ordered by result_id within a session, so the last one sent is the
 	// mark — and it is only sent after the write above returned.

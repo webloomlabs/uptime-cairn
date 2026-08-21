@@ -23,7 +23,7 @@ func testAssets() fstest.MapFS {
 func TestSPAServesShellForClientRoutes(t *testing.T) {
 	t.Parallel()
 
-	handler := newSPAHandler(testAssets())
+	handler := newSPAHandler(testAssets(), nil)
 
 	// Every path here is one the frontend routes and the server has never heard
 	// of. The two subscription links are the ones that matter most: they are
@@ -68,7 +68,7 @@ func TestSPAServesShellForClientRoutes(t *testing.T) {
 func TestSPADoesNotFallBackForAssets(t *testing.T) {
 	t.Parallel()
 
-	handler := newSPAHandler(testAssets())
+	handler := newSPAHandler(testAssets(), nil)
 
 	for _, path := range []string{
 		"/_app/immutable/entry/missing.js",
@@ -87,7 +87,7 @@ func TestSPADoesNotFallBackForAssets(t *testing.T) {
 func TestSPAServesRealFiles(t *testing.T) {
 	t.Parallel()
 
-	handler := newSPAHandler(testAssets())
+	handler := newSPAHandler(testAssets(), nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/_app/immutable/entry/app.j7Fk.js", nil))
@@ -115,7 +115,7 @@ func TestSPAServesRealFiles(t *testing.T) {
 func TestSPAFallsBackForDottedRoutes(t *testing.T) {
 	t.Parallel()
 
-	handler := newSPAHandler(testAssets())
+	handler := newSPAHandler(testAssets(), nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status/status.example.com", nil))
@@ -127,7 +127,7 @@ func TestSPAFallsBackForDottedRoutes(t *testing.T) {
 func TestSPARejectsWrites(t *testing.T) {
 	t.Parallel()
 
-	handler := newSPAHandler(testAssets())
+	handler := newSPAHandler(testAssets(), nil)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/status/acme", nil))
@@ -146,7 +146,7 @@ func TestSPARejectsTraversal(t *testing.T) {
 
 	handler := newSPAHandler(fstest.MapFS{
 		"index.html": {Data: []byte("shell")},
-	})
+	}, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

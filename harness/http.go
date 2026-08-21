@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -592,6 +593,12 @@ func (t *HTTPTarget) ListMonitors(ctx context.Context, q ListQuery) (ListResult,
 	if len(q.GroupID) > 0 {
 		params = append(params, "group_id="+hexUUID(q.GroupID))
 	}
+	if q.Include != "" {
+		params = append(params, "include="+q.Include)
+	}
+	if q.HeartbeatsLimit > 0 {
+		params = append(params, "heartbeats_limit="+strconv.Itoa(q.HeartbeatsLimit))
+	}
 
 	var page struct {
 		Data       []json.RawMessage `json:"data"`
@@ -599,15 +606,164 @@ func (t *HTTPTarget) ListMonitors(ctx context.Context, q ListQuery) (ListResult,
 			NextCursor *string `json:"next_cursor"`
 		} `json:"pagination"`
 	}
-	if err := t.call(ctx, http.MethodGet, "/api/v1/monitors?"+strings.Join(params, "&"), nil, &page, nil); err != nil {
+	// The raw body is what the assertion needs, not the decoded shape: the
+	// invariant is about bytes on the wire reaching a browser, and a decoded
+	// struct has already thrown that number away.
+	raw, err := t.callRaw(ctx, http.MethodGet, "/api/v1/monitors?"+strings.Join(params, "&"))
+	if err != nil {
+		return ListResult{}, err
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
 		return ListResult{}, err
 	}
 
-	out := ListResult{Rows: len(page.Data)}
+	out := ListResult{Rows: len(page.Data), Bytes: len(raw)}
 	if page.Pagination.NextCursor != nil {
 		out.Next = &Cursor{Token: *page.Pagination.NextCursor}
 	}
 	return out, nil
+}
+
+// callRaw is call, keeping the body.
+func (t *HTTPTarget) callRaw(ctx context.Context, method, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, t.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if t.key != "" {
+		req.Header.Set("Authorization", "Bearer "+t.key)
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, truncate(string(raw), 400))
+	}
+	return raw, nil
+}
+
+// MeasureLive opens browser update streams and reports what they carried.
+//
+// This is ADR-004's live half under the same load the rest of the gate runs at,
+// and the assertion it enables is the one the 5,000-monitor figure cannot make:
+// a monitor nobody is watching must cost a connected browser nothing. Every
+// stream here subscribes to a page's worth of ids and nothing else, so at
+// 5,000 monitors on a 20-second interval the engine is producing 250 results a
+// second while each client should be receiving on the order of its own page
+// divided by the interval — and if it is receiving 250, the channel is not
+// scoped and the whole design has quietly become a broadcast.
+//
+// Foreign counts the failure directly: a diff for a monitor this stream never
+// subscribed to. One is a bug, not a tolerance.
+func (t *HTTPTarget) MeasureLive(ctx context.Context, w *Workload, clients, scoped, seconds int) (LiveResult, error) {
+	out := LiveResult{Clients: clients, Scoped: scoped}
+	if clients <= 0 || seconds <= 0 || len(w.Monitors) == 0 {
+		return out, nil
+	}
+	if scoped > len(w.Monitors) {
+		scoped = len(w.Monitors)
+	}
+	out.Scoped = scoped
+
+	window, cancel := context.WithTimeout(ctx, time.Duration(seconds)*time.Second)
+	defer cancel()
+
+	var (
+		mu      sync.Mutex
+		updates int
+		foreign int
+		total   int
+		wg      sync.WaitGroup
+	)
+
+	started := time.Now()
+	for c := 0; c < clients; c++ {
+		// Each client watches a different slice, so the measurement is not one
+		// page of monitors observed several times — which would let a broadcast
+		// implementation pass by accident.
+		offset := (c * scoped) % len(w.Monitors)
+		ids := make([]string, 0, scoped)
+		want := make(map[string]bool, scoped)
+		for i := 0; i < scoped; i++ {
+			id := hexUUID(w.Monitors[(offset+i)%len(w.Monitors)].ID)
+			ids = append(ids, id)
+			want[id] = true
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, bad, bytes := t.readStream(window, ids, want)
+			mu.Lock()
+			updates += n
+			foreign += bad
+			total += bytes
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+
+	out.Updates = updates
+	out.Foreign = foreign
+	out.Bytes = total
+	out.Seconds = time.Since(started).Seconds()
+	return out, nil
+}
+
+// readStream consumes one SSE stream until the context expires.
+func (t *HTTPTarget) readStream(ctx context.Context, ids []string, want map[string]bool) (updates, foreign, bytes int) {
+	path := t.BaseURL + "/api/v1/live?monitor_ids=" + strings.Join(ids, ",")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return 0, 0, 0
+	}
+	req.Header.Set("Authorization", "Bearer "+t.key)
+	req.Header.Set("Accept", "text/event-stream")
+
+	// Its own client: the shared one has a response-header timeout tuned for
+	// request/response, and a stream that stays open for the window would trip
+	// it.
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, 0, 0
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, 0, 0
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
+
+	var event string
+	for scanner.Scan() {
+		line := scanner.Text()
+		bytes += len(line) + 1
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			event = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: ") && event == "monitor":
+			var diff struct {
+				MonitorID string `json:"monitor_id"`
+			}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &diff); err != nil {
+				continue
+			}
+			updates++
+			if !want[diff.MonitorID] {
+				foreign++
+			}
+		}
+	}
+	return updates, foreign, bytes
 }
 
 func (t *HTTPTarget) Membership(ctx context.Context, q ListQuery) (MembershipResult, error) {

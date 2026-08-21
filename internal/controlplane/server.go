@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/webloomlabs/uptime-cairn/internal/live"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
@@ -58,6 +59,18 @@ type ConfigOpener interface {
 type Alerter interface {
 	Publish(ev notify.Event)
 	Instance() notify.Instance
+}
+
+// LiveBus is the browser-facing update channel, declared here by the consumer.
+//
+// Fire-and-forget for the same reason Alerter is: a browser that cannot keep up
+// must never become backpressure on heartbeat ingest, and the moment somebody
+// is staring at the dashboard is the moment ingest matters most. The
+// implementation drops rather than blocks, and this interface is shaped so it
+// has no way not to.
+type LiveBus interface {
+	Publish(u live.Update)
+	PublishSummary(s live.Summary)
 }
 
 // Tuning the control plane hands the probe at registration. Every value has a
@@ -108,6 +121,7 @@ type Server struct {
 	store   Store
 	pub     *Publisher
 	alerts  Alerter
+	updates LiveBus
 	configs ConfigOpener
 	log     *slog.Logger
 	probeID model.ID
@@ -121,6 +135,55 @@ type Server struct {
 // as-is; both are what a test that is not exercising those paths wants.
 func New(store Store, pub *Publisher, alerts Alerter, configs ConfigOpener, log *slog.Logger, probeID, orgID model.ID) *Server {
 	return &Server{store: store, pub: pub, alerts: alerts, configs: configs, log: log, probeID: probeID, orgID: orgID}
+}
+
+// WithLive attaches the browser-facing update bus. Nil is valid and means
+// nothing is watching, which is every test that is not exercising it.
+func (s *Server) WithLive(b LiveBus) *Server {
+	s.updates = b
+	return s
+}
+
+// broadcast pushes a batch's changes to whoever has those rows on screen.
+//
+// After the write, on the same terms as alerting: a diff for a heartbeat that
+// then failed to persist would leave a browser showing a status the database
+// does not have, and the next reconciliation tick would silently correct it —
+// which is worse than not sending it, because nobody would ever know it had
+// happened.
+//
+// Scoped by construction. Nothing here loops over monitors or over clients; it
+// hands each change to the bus, which delivers it only to subscriptions holding
+// that id. A monitor nobody is looking at costs one map lookup per connected
+// browser and produces no traffic at all, which is the property ADR-004 exists
+// to guarantee.
+func (s *Server) broadcast(beats []model.Heartbeat, states map[model.ID]*model.MonitorState) {
+	if s.updates == nil || len(beats) == 0 {
+		return
+	}
+
+	for _, beat := range beats {
+		update := live.Update{
+			MonitorID: beat.MonitorID,
+			At:        beat.Time,
+			Important: beat.Important,
+			Message:   beat.Message,
+		}
+		if state, ok := states[beat.MonitorID]; ok {
+			update.Status = state.Status
+			update.StateVersion = state.StateVersion
+		} else {
+			// A suppressed or rejected result has no state entry. The
+			// heartbeat's own status is the honest answer, and the version stays
+			// zero so a client treats it as "no newer than what I hold".
+			update.Status = beat.Status.String()
+		}
+		if beat.ResponseTime != nil {
+			ms := float64(beat.ResponseTime.Microseconds()) / 1000.0
+			update.ResponseTimeMs = &ms
+		}
+		s.updates.Publish(update)
+	}
 }
 
 // raise publishes the events a batch produced, after the batch is durable.
@@ -246,7 +309,25 @@ func (s *Server) WatchAssignments(req *probev1.WatchAssignmentsRequest, stream p
 	changed, unsubscribe := s.pub.Subscribe()
 	defer unsubscribe()
 
-	current, rev, err := s.assignments(ctx)
+	// Which probe is asking decides what it is given. A monitor with no pin runs
+	// anywhere; a monitor pinned to a named probe runs only there, because "is
+	// this container running" is a question about one host's daemon and there is
+	// no second opinion to be had (protocol §6.4).
+	//
+	// An empty probe_id is this build's embedded probe, which is the only probe
+	// it has. Read from the request rather than from s.probeID so the filter is
+	// already right when Phase 4 puts a second one on the other end of it —
+	// filtering by the control plane's own identity would work in solo mode and
+	// hand every remote probe the whole set.
+	asking := s.probeID
+	if raw := req.GetProbeId(); len(raw) > 0 {
+		if len(raw) != len(asking) {
+			return status.Errorf(codes.InvalidArgument, "probe_id is %d bytes, want %d", len(raw), len(asking))
+		}
+		copy(asking[:], raw)
+	}
+
+	current, rev, err := s.assignments(ctx, asking)
 	if err != nil {
 		return status.Errorf(codes.Internal, "load assignments: %v", err)
 	}
@@ -280,7 +361,7 @@ func (s *Server) WatchAssignments(req *probev1.WatchAssignmentsRequest, stream p
 			default:
 			}
 
-			next, nextRev, err := s.assignments(ctx)
+			next, nextRev, err := s.assignments(ctx, asking)
 			if err != nil {
 				s.log.Error("reload assignments", "error", err)
 				continue
@@ -319,8 +400,14 @@ func (s *Server) WatchAssignments(req *probev1.WatchAssignmentsRequest, stream p
 	}
 }
 
-// assignments builds the current set, keyed by monitor id in hex.
-func (s *Server) assignments(ctx context.Context) (map[string]*probev1.Assignment, uint64, error) {
+// assignments builds the set for one probe, keyed by monitor id in hex.
+//
+// The filter is applied here rather than in the query on purpose: the store
+// reads the assignable set once and every open stream narrows the same slice,
+// so a hundred connected probes cost one read rather than a hundred. That
+// matters because a burst of writes wakes every stream at once, which is the
+// case the settle window in WatchAssignments exists for.
+func (s *Server) assignments(ctx context.Context, probeID model.ID) (map[string]*probev1.Assignment, uint64, error) {
 	monitors, err := s.store.ListAssignable(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -329,6 +416,9 @@ func (s *Server) assignments(ctx context.Context) (map[string]*probev1.Assignmen
 
 	out := make(map[string]*probev1.Assignment, len(monitors))
 	for _, m := range monitors {
+		if m.ProbeID != nil && *m.ProbeID != probeID {
+			continue
+		}
 		assignment, err := s.toAssignment(m)
 		if err != nil {
 			// Withheld rather than sent with half a config. An HTTP monitor

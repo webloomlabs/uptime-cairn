@@ -193,6 +193,19 @@ cross-compilation to ARM/Pi), SvelteKit + Tailwind frontend, SQLite or
 Postgres + Timescale, gRPC + Protobuf transport, Playwright in an optional
 sidecar for browser checks, Typst for PDF reports.
 
+## Documentation
+
+| | |
+|---|---|
+| **[Install](docs/guides/install.md)** | Docker, Compose, binary, Raspberry Pi |
+| **[First monitor](docs/guides/quickstart.md)** | Account, monitor, alert, and how to prove it fires |
+| **[Monitor types](docs/guides/monitor-types.md)** | The nine types and what each actually checks |
+| **[Alerting](docs/guides/alerting.md)** | Every channel, webhook templating, maintenance windows |
+| **[Migrating from Uptime Kuma](docs/guides/migrating-from-uptime-kuma.md)** | `cairn import kuma`, and exactly what does not come across |
+| **[Operations](docs/operations/)** | Backups, upgrades, reverse proxies, what to alert on |
+| **[API](docs/api/README.md)** | Conventions, and a [generated reference](docs/api/reference.md) of every operation |
+| **[Security](SECURITY.md)** | Posture, and how to report a vulnerability |
+
 ## Roadmap in brief
 
 | Phase | What | When |

@@ -50,6 +50,12 @@ type StatusPageStore interface {
 
 	MonitorsOnStatusPage(ctx context.Context, pageID model.ID) (map[model.ID]store.PublicMonitor, error)
 
+	// CustomDomains is the hostname-to-slug map for custom-domain pages, read
+	// on document requests and cached. Published pages only: a draft answering
+	// on a customer's hostname is the one thing an operator must not get by
+	// accident.
+	CustomDomains(ctx context.Context) (map[string]string, error)
+
 	CreateSubscriber(ctx context.Context, sub model.Subscriber) error
 	ListSubscribers(ctx context.Context, pageID model.ID, limit int) ([]model.Subscriber, error)
 	SubscriberByToken(ctx context.Context, confirmHash, unsubscribeHash []byte) (model.Subscriber, error)
@@ -127,6 +133,11 @@ func (s *Server) createStatusPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The custom-domain cache is dropped on every status page write rather than
+	// left to expire. The one moment somebody is watching for a custom domain to
+	// start working is the moment after they saved it.
+	defer s.domains.invalidate()
+
 	if err := s.store.CreateStatusPage(r.Context(), page); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			s.pageSlugTaken(w, r, page)
@@ -173,6 +184,8 @@ func (s *Server) updateStatusPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	defer s.domains.invalidate()
+
 	if err := s.store.UpdateStatusPage(r.Context(), page); err != nil {
 		switch {
 		case errors.Is(err, store.ErrConflict):
@@ -192,6 +205,8 @@ func (s *Server) deleteStatusPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	defer s.domains.invalidate()
+
 	if err := s.store.DeleteStatusPage(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			s.statusPageNotFound(w, r)

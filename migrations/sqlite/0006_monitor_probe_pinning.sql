@@ -1,0 +1,32 @@
+-- Pin a monitor to a named probe.
+--
+-- Every other monitor type answers the same question from anywhere with the
+-- right egress: an http monitor checked from Sydney and from Frankfurt is two
+-- opinions about one target, which is the whole basis of multi-region probing.
+-- `docker` is not like that. "Is this container running" is a question about one
+-- host's daemon, and only the probe on that host can answer it — there is no
+-- second opinion to be had (protocol §6.4, and §14 on why consensus is
+-- meaningless for host-local types).
+--
+-- So the pin exists, and it is a column on the monitor rather than a rule
+-- inside the docker checker, because the constraint is about placement rather
+-- than about checking. A `grpc` monitor against a service reachable only from
+-- one network segment wants exactly the same thing, and inventing a second
+-- mechanism for it later would be the retrofit this avoids.
+--
+-- NULL means unpinned: run it wherever, which is what every type except docker
+-- wants and what solo mode does for all of them. In solo mode there is exactly
+-- one probe and the pin is therefore a no-op that is nonetheless correct — which
+-- is the point of building it now rather than when Phase 4 makes it load-bearing.
+--
+-- ON DELETE RESTRICT rather than SET NULL: silently unpinning a docker monitor
+-- when its probe is removed would leave it running somewhere with a different
+-- container set, reporting a container missing that was never meant to be there.
+-- Refusing the delete makes the operator decide, which is the right person.
+ALTER TABLE monitors ADD COLUMN probe_id BLOB REFERENCES probes(id) ON DELETE RESTRICT;
+
+-- The assignment reload filters on this, and it is the hot query in the system
+-- for anybody running remote probes: every probe reloads the whole assignable
+-- set on every write. Partial, because in the deployment this schema is aimed at
+-- almost every row is NULL and an index over 5,000 NULLs earns nothing.
+CREATE INDEX idx_monitors_probe ON monitors (org_id, probe_id) WHERE probe_id IS NOT NULL;

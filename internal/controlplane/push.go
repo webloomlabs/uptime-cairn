@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/protocol"
 	probev1 "github.com/webloomlabs/uptime-cairn/proto/cairn/probe/v1"
 )
 
@@ -144,12 +145,24 @@ func describeSince(last *time.Time, created time.Time) string {
 // What comes back through this door is an observation, in the same vocabulary a
 // probe would have used, and from here on a manual check is indistinguishable
 // from a scheduled one: same transition table, same consecutive-failure count,
-// same alerts. A "check now" that took a shortcut would be testing the shortcut.
-func (s *Server) RecordCheck(ctx context.Context, monitor model.Monitor, status model.Status, code, message string, responseTime *time.Duration) (model.Heartbeat, error) {
-	result := s.newResult(monitor, outcomeFor(status), message, time.Now().UTC())
-	result.Code = code
-	if responseTime != nil {
-		result.ResponseTimeMs = float64(responseTime.Microseconds()) / 1000.0
+// same alerts, and the same certificate and registration rows. A "check now"
+// that took a shortcut would be testing the shortcut.
+//
+// The certificate is the part that used to be dropped here, and dropping it had
+// a visible cost: pressing "check now" after installing a new certificate
+// refreshed the verdict and left the expiry panel showing the certificate that
+// had just been replaced, until the next scheduled check caught up. The
+// observation is unconditional rather than rate-limited on this path — the
+// hourly resend interval exists because a probe's buffer is a fixed size and
+// several hundred bytes on every result cuts its outage coverage to a fifth,
+// and a manual check has no buffer and happens when somebody presses a button.
+func (s *Server) RecordCheck(ctx context.Context, monitor model.Monitor, c protocol.Check) (model.Heartbeat, error) {
+	result := s.newResult(monitor, outcomeFor(c.Status), c.Message, time.Now().UTC())
+	result.Code = c.Code
+	result.Certificate = c.Certificate
+	result.Domain = c.Domain
+	if c.ResponseTime != nil {
+		result.ResponseTimeMs = float64(c.ResponseTime.Microseconds()) / 1000.0
 	}
 
 	_, beats, err := s.ingestResults(ctx, []*probev1.Result{result})

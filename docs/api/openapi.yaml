@@ -236,6 +236,163 @@ paths:
               schema: { $ref: "#/components/schemas/Overview" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /api/v1/probes:
+    get:
+      tags: [System]
+      operationId: listProbes
+      summary: List the probes this install can place a monitor on
+      description: |
+        Read-only. Enrolment, revocation, and the operator screens that go with them
+        are Phase 4 behind the protocol's credential exchange; what Phase 1 needs is
+        the ability to *name* a probe, because a monitor can be pinned to one and a
+        client filling in `probe_id` has to be able to find out what the choices are.
+
+        Unpaginated on purpose: the count is bounded by hosts an operator runs a probe
+        on, which is a number in the tens even for the largest install this product is
+        sized for. In solo mode it is one.
+
+        Reads under `monitors:read` rather than a scope of its own — it exists to fill
+        in a monitor field, and it returns no credential. A probe's token hash is not
+        in the response and not in the struct behind it.
+      x-cairn-phase: 1
+      x-cairn-scopes: [monitors:read]
+      responses:
+        "200":
+          description: Every probe, embedded first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Probe" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/live:
+    get:
+      tags: [System]
+      operationId: streamUpdates
+      summary: Live updates for the monitors on screen
+      description: |
+        A Server-Sent Events stream carrying scoped diffs for exactly the monitor
+        ids named in `monitor_ids`, plus the global summary counts, which every
+        stream receives regardless of scope.
+
+        This is the live half of
+        [ADR-004](../adr/004-ui-state-synchronisation.md). A client subscribes to
+        the rows it is showing; a monitor nobody is looking at produces no traffic
+        to anybody, which is what makes the full-state-broadcast failure mode
+        structurally impossible rather than merely tuned around. Filtered-view
+        *membership* is not pushed — it is kept fresh by polling
+        `/monitors/membership`, and the staleness window for a monitor that
+        changes status off-screen and would now match an active filter is bounded
+        by that interval.
+
+        The summary is computed server-side and pushed independently. It is
+        deliberately not something the client sums from what it happens to be
+        subscribed to: that would make a filtered view report "3 down" because
+        three of the down monitors were on this page.
+
+        Ordinary API surface under an ordinary scope. The dashboard gets no
+        privileged channel — anything holding `monitors:read` can open a stream
+        and watch the same diffs, with `curl -N`.
+
+        ### Events
+
+        | `event:` | `data:` |
+        |---|---|
+        | `stream` | `{"stream_id": "..."}` — sent first. Needed to change scope. |
+        | `summary` | `MonitorSummary`. Sent on open and whenever the counts move. |
+        | `monitor` | `MonitorUpdate`. One monitor's diff. |
+
+        A comment frame (`: keepalive`) goes down an idle stream every 15 seconds.
+        Not for the browser, which is happy to wait — for the proxies between it
+        and here, which close a connection that has been quiet for a minute and
+        produce a dashboard that stops updating with no error anywhere.
+
+        ### Backpressure
+
+        A subscriber that cannot keep up loses messages rather than blocking.
+        Heartbeat ingest must never queue behind a browser, and a backgrounded tab
+        that comes back gets the current state from its next page fetch anyway.
+        Losses are counted and logged server-side, because from the browser's side
+        a dropped update is a row that simply stopped moving.
+      x-cairn-phase: 1
+      x-cairn-scopes: [monitors:read]
+      parameters:
+        - name: monitor_ids
+          in: query
+          description: |
+            The monitors this stream carries. Comma-separated. May be empty: a view
+            that has not loaded its rows yet still wants the summary channel.
+
+            Bounded, and the bound is ADR-004's second invariant written as a
+            number — client payload and render cost must track viewport size, never
+            total monitor count. A client subscribing to every monitor in the
+            install has reintroduced the full-state broadcast one id at a time.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The event stream.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "501":
+          description: This build has no live-update bus wired in. Poll `/monitors/membership`.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/live/{streamId}/scope:
+    put:
+      tags: [System]
+      operationId: setStreamScope
+      summary: Change what an open stream carries
+      description: |
+        Replaces a stream's subscription in place. The stream keeps running.
+
+        This exists because paginating a list is the most ordinary thing a user
+        does, and a channel that had to be closed and reopened on every page turn
+        would spend its life reconnecting — which is the objection ADR-004 raises
+        against the framings it rejects, answered directly rather than worked
+        around.
+      x-cairn-phase: 1
+      x-cairn-scopes: [monitors:read]
+      parameters:
+        - name: streamId
+          in: path
+          required: true
+          description: From the `stream` event the stream sent when it opened.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [monitor_ids]
+              properties:
+                monitor_ids:
+                  type: array
+                  items: { type: string, format: uuid }
+      responses:
+        "204": { description: The stream now carries these monitors. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: |
+            That stream is closed or never existed. The two are the same thing to a
+            client, and the answer to both is to open a new stream.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
   # --------------------------------------------------------------------------
   # Setup and authentication
   # --------------------------------------------------------------------------
@@ -575,11 +732,26 @@ paths:
           description: |
             Optionally embed related data. `last_heartbeat` and `uptime` cost extra
             per-row work; the dashboard list view requests them, exports do not.
+
+            `heartbeats` embeds a bounded run of recent checks per monitor — the
+            strip a list view draws under each row. It is resolved for the whole
+            page in one statement rather than one request per row, which is the
+            fan-out this parameter exists to prevent: a client that requests it
+            per row has reintroduced exactly the cost the 5,000-monitor gate
+            measures. Its length is `heartbeats_limit`, and it is bounded on
+            purpose so the embed's cost tracks the viewport rather than the
+            install (ADR-004).
           schema:
             type: array
-            items: { type: string, enum: [last_heartbeat, uptime, tags, group] }
+            items: { type: string, enum: [last_heartbeat, heartbeats, uptime, tags, group] }
           style: form
           explode: false
+        - name: heartbeats_limit
+          in: query
+          description: |
+            How many recent checks `include=heartbeats` returns per monitor.
+            Clamped to the maximum rather than refused, the same as `limit`.
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
       responses:
         "200":
           description: A page of monitors.
@@ -638,9 +810,13 @@ paths:
           in: query
           schema:
             type: array
-            items: { type: string, enum: [last_heartbeat, uptime, tags, group, certificate] }
+            items: { type: string, enum: [last_heartbeat, heartbeats, uptime, tags, group, certificate] }
           style: form
           explode: false
+        - name: heartbeats_limit
+          in: query
+          description: How many recent checks `include=heartbeats` returns. Clamped, not refused.
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
       responses:
         "200":
           description: The monitor.
@@ -3677,6 +3853,26 @@ components:
             Dependency parent. While the parent is down, this monitor's alerts are
             suppressed and its heartbeats are annotated as suppressed — the router being
             down should page once, not forty times. Cycles are rejected.
+        probe_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Pin this monitor to one named probe. Null means unpinned: any probe may
+            run it, which is what every type except `docker` wants.
+
+            `docker` is the type that needs this. Every other check answers the same
+            question from anywhere with the right egress — an `http` monitor checked
+            from two continents is two opinions about one target — while "is this
+            container running" is a question about one host's daemon, and there is
+            no second opinion to be had. The pin is *placement* rather than checking,
+            so it is a field on the monitor rather than a key inside `config`; the
+            next type that needs it wants no second mechanism.
+
+            On a `docker` monitor the server fills this in when the install has
+            exactly one probe, which is every solo install, and refuses the write
+            with a `/probe_id` error when it has more than one. Guessing which host
+            was meant produces a monitor reporting a container missing that was never
+            meant to be there.
         notification_channel_ids:
           type: array
           description: Channels alerted on state change. Empty means no alerts for this monitor.
@@ -3696,6 +3892,15 @@ components:
             - $ref: "#/components/schemas/Heartbeat"
           readOnly: true
           description: Present when requested via `include=last_heartbeat`.
+        heartbeats:
+          type: array
+          items: { $ref: "#/components/schemas/Heartbeat" }
+          readOnly: true
+          description: |
+            Present when requested via `include=heartbeats`. Most recent first,
+            at most `heartbeats_limit` entries. A monitor that has never been
+            checked carries an empty array rather than being absent, which is
+            the difference between "no history" and "not asked for".
         uptime:
           allOf:
             - $ref: "#/components/schemas/UptimeSummary"
@@ -3703,6 +3908,79 @@ components:
           description: Present when requested via `include=uptime`.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
+
+    MonitorUpdate:
+      type: object
+      description: |
+        One monitor's change, as a live subscriber sees it. A diff, not a monitor:
+        the client already holds the row, and re-sending its configuration on every
+        heartbeat is the full-state broadcast this design exists to avoid, arriving
+        one row at a time instead of all at once.
+      required: [monitor_id, status, at, important, state_version]
+      properties:
+        monitor_id: { type: string, format: uuid }
+        status: { $ref: "#/components/schemas/MonitorStatus" }
+        at: { type: string, format: date-time }
+        response_time_ms:
+          type: [number, "null"]
+          description: Null when nothing was measured, which is every failure that never reached the target.
+        important:
+          type: boolean
+          description: |
+            A transition. The same flag the stored heartbeat carries, so the row a
+            client draws attention to and the row the history marks cannot disagree.
+        message:
+          type: string
+          description: Only on failures and transitions. An up-to-up check has nothing to say.
+        state_version:
+          type: integer
+          format: int64
+          description: |
+            The monitor's version after this change, so a client can discard an
+            update it has already applied — which happens on the seam between a
+            page refetch and the stream that was running during it.
+
+    MonitorSummary:
+      type: object
+      description: |
+        The global header counts. Computed server-side and pushed to every stream
+        regardless of scope, because a client summing its own subscription would
+        report "3 down" for a filtered view holding three of the down monitors.
+      required: [counts, at]
+      properties:
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+          description: Monitor count per status, keyed by `MonitorStatus`.
+        at: { type: string, format: date-time }
+
+    Probe:
+      type: object
+      description: |
+        One check executor. Solo mode has exactly one, embedded and seeded by the
+        first migration — heartbeats reference a probe from the first commit, because
+        nullable-and-backfill-later is the retrofit ADR-001 exists to avoid.
+      required: [id, name, mode, enabled, created_at]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string }
+        region:
+          type: [string, "null"]
+          description: |
+            Advisory, and never how a host-local monitor is placed: a region can hold
+            more than one host, and `docker` needs the host.
+        mode:
+          type: string
+          enum: [embedded, remote]
+          description: |
+            `embedded` is the probe compiled into this binary, whose row *is* its
+            identity and which therefore carries no credential. `remote` enrols.
+        version:
+          type: [string, "null"]
+          description: Agent version last reported. Null for a probe that has never connected.
+        last_seen_at: { type: [string, "null"], format: date-time }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time, readOnly: true }
 
     Monitor:
       description: A configured check. The `type` field selects the shape of `config`.
@@ -3754,6 +4032,12 @@ components:
           type: array
           items: { type: string, format: uuid }
         parent_monitor_id: { type: [string, "null"], format: uuid }
+        probe_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Absent leaves the pin as it is; null unpins; a value repins. Unpinning a
+            `docker` monitor on an install with more than one probe is refused.
         notification_channel_ids:
           type: array
           items: { type: string, format: uuid }

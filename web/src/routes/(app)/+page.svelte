@@ -103,11 +103,39 @@
 		};
 	});
 
+	/**
+	 * The status counts the rail draws.
+	 *
+	 * `/overview` on load and on a fifteen-second timer, overridden by whatever
+	 * the live channel has pushed since. Both are the same server-side query, so
+	 * they cannot disagree about what "down" means — the live one is simply more
+	 * recent, and the poll is what fills the rail in before the first transition
+	 * and what recovers it if the stream drops.
+	 *
+	 * Still not summed from the loaded rows. That is what ADR-004 rules out, and
+	 * it is why the rail can say "18 up" while the list shows a filtered page of
+	 * three.
+	 */
+	const counts = $derived.by(() => {
+		const base = overview?.monitors;
+		if (!base) return null;
+		const live = list.counts;
+		if (!live) return base;
+		return {
+			up: live.up ?? 0,
+			down: live.down ?? 0,
+			pending: live.pending ?? 0,
+			paused: live.paused ?? 0,
+			maintenance: live.maintenance ?? 0,
+			total: Object.values(live).reduce((sum, n) => sum + n, 0)
+		};
+	});
+
 	const overall = $derived.by(() => {
-		if (!overview) return 'unknown';
-		if (overview.monitors.down > 0) return 'down';
-		if (overview.monitors.maintenance > 0) return 'maintenance';
-		if (overview.monitors.pending > 0) return 'pending';
+		if (!counts) return 'unknown';
+		if (counts.down > 0) return 'down';
+		if (counts.maintenance > 0) return 'maintenance';
+		if (counts.pending > 0) return 'pending';
 		return 'up';
 	});
 </script>
@@ -323,29 +351,29 @@
 
 			{#if overviewError}
 				<div class="mt-4"><ErrorBox error={overviewError} onretry={loadOverview} /></div>
-			{:else if !overview}
+			{:else if !counts}
 				<Spinner />
 			{:else}
 				<div class="mt-5 flex justify-center">
 					<StatusDial status={overall} size={56} />
 				</div>
 				<dl class="mt-5 grid grid-cols-3 gap-2 text-center">
-					{#each [{ k: 'down', v: overview.monitors.down }, { k: 'up', v: overview.monitors.up }, { k: 'paused', v: overview.monitors.paused }] as cell (cell.k)}
+					{#each [{ k: 'down', v: counts.down }, { k: 'up', v: counts.up }, { k: 'paused', v: counts.paused }] as cell (cell.k)}
 						<div>
 							<dd class="text-2xl font-semibold tabular-nums">{cell.v}</dd>
 							<dt class="muted text-xs">{t(`status.${cell.k}`)}</dt>
 						</div>
 					{/each}
 				</dl>
-				{#if overview.monitors.pending || overview.monitors.maintenance}
+				{#if counts.pending || counts.maintenance}
 					<p class="muted mt-3 text-center text-xs">
-						{overview.monitors.pending}
-						{t('status.pending')} · {overview.monitors.maintenance}
+						{counts.pending}
+						{t('status.pending')} · {counts.maintenance}
 						{t('status.maintenance')}
 					</p>
 				{/if}
 				<p class="muted mt-4 text-center text-xs">
-					{t('overview.usingMonitors', { count: overview.monitors.total })}
+					{t('overview.usingMonitors', { count: counts.total })}
 				</p>
 			{/if}
 		</section>

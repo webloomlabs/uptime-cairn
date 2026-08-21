@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
+	"github.com/webloomlabs/uptime-cairn/internal/observation"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 	"github.com/webloomlabs/uptime-cairn/internal/telemetry"
@@ -235,6 +236,7 @@ func (s *Server) applyMonitorUpdate(ctx context.Context, m *model.Monitor, store
 	if len(body.ParentMonitorID) > 0 {
 		problems = append(problems, s.applyParentChange(ctx, m, body.ParentMonitorID)...)
 	}
+	problems = append(problems, s.applyPinChange(ctx, m, body.ProbeID)...)
 	if len(body.Config) > 0 {
 		problems = append(problems, s.applyConfigChange(m, stored, body.Config)...)
 	}
@@ -355,6 +357,25 @@ func (s *Server) applyParentChange(ctx context.Context, m *model.Monitor, raw js
 	return s.resolveParent(ctx, m, supplied)
 }
 
+// applyPinChange moves a monitor between probes, or unpins it.
+//
+// It runs even when the field is absent, unlike the two above, because the
+// absent case is not always a no-op: a docker monitor that somehow reached this
+// point unpinned has to be caught before it is written, and resolvePin is where
+// that lives. With the field absent and the pin already set, it returns nothing
+// and changes nothing.
+func (s *Server) applyPinChange(ctx context.Context, m *model.Monitor, raw json.RawMessage) []ValidationItem {
+	if len(raw) == 0 {
+		return s.resolvePin(ctx, m, nil, false)
+	}
+	var supplied *string
+	if err := json.Unmarshal(raw, &supplied); err != nil {
+		return []ValidationItem{{Pointer: "/probe_id", Code: "invalid",
+			Message: "probe_id must be an identifier or null"}}
+	}
+	return s.resolvePin(ctx, m, supplied, true)
+}
+
 func (s *Server) pauseMonitor(w http.ResponseWriter, r *http.Request) {
 	s.setEnabled(w, r, false)
 }
@@ -445,22 +466,17 @@ func (s *Server) runMonitorCheck(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), monitor.Timeout)
 	defer cancel()
-	observation := checker.Check(ctx, config)
+	seen := checker.Check(ctx, config)
 
-	// The certificate this check may have observed is deliberately not recorded
-	// here, and it is worth saying why rather than leaving it looking like an
-	// oversight. Carrying it would mean mapping check.Observation onto the
-	// protocol's types, and that mapping lives in internal/probe by convention —
-	// which this package must not import, and which the control plane must not
-	// import either (ADR-001). Duplicating a twenty-line mapper that would then
-	// drift silently is the worse of the two, so a manual check refreshes the
-	// verdict and leaves the certificate row to the scheduled check, which
-	// updates it within one interval. Resolving that properly is a seam decision
-	// rather than a patch.
-
+	// Everything the check saw goes through, not just the verdict. The mapping
+	// onto the protocol's types is internal/observation's, which is the same
+	// mapping the probe session uses for a scheduled check — one definition, so
+	// the certificate panel cannot be correct after a scheduled check and stale
+	// after a manual one. It is a separate package precisely so that the
+	// control plane, which ingests the result, still never links the checkers
+	// (ADR-001).
 	telemetry.Engine.ChecksRunInline.Add(1)
-	beat, err := s.push.RecordCheck(r.Context(), monitor, observation.Status,
-		observation.Code, observation.Message, observation.ResponseTime)
+	beat, err := s.push.RecordCheck(r.Context(), monitor, observation.Check(seen))
 	if err != nil {
 		s.internal(w, r, "record manual check", err)
 		return

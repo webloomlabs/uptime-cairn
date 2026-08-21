@@ -61,7 +61,7 @@ func TestAssignmentCarriesTheDecryptedConfig(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := New(store, NewPublisher(), nil, vault, log, model.EmbeddedProbeID, model.SentinelOrgID)
 
-	set, _, err := server.assignments(context.Background())
+	set, _, err := server.assignments(context.Background(), model.EmbeddedProbeID)
 	if err != nil {
 		t.Fatalf("assignments: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestMonitorIsWithheldWhenItsCredentialsCannotBeRead(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&logged, nil))
 	server := New(store, NewPublisher(), nil, testConfigVault(t), log, model.EmbeddedProbeID, model.SentinelOrgID)
 
-	set, _, err := server.assignments(context.Background())
+	set, _, err := server.assignments(context.Background(), model.EmbeddedProbeID)
 	if err != nil {
 		t.Fatalf("assignments: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestMonitorWithoutCredentialsNeedsNoKey(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	server := New(store, NewPublisher(), nil, nil, log, model.EmbeddedProbeID, model.SentinelOrgID)
 
-	set, _, err := server.assignments(context.Background())
+	set, _, err := server.assignments(context.Background(), model.EmbeddedProbeID)
 	if err != nil {
 		t.Fatalf("assignments: %v", err)
 	}

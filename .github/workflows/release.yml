@@ -91,7 +91,7 @@ jobs:
           name="cairn_${version}_${GOOS}_${GOARCH}${GOARM:+v$GOARM}"
           mkdir -p "dist/${name}"
           mv cairn "dist/${name}/"
-          cp README.md LICENSE "dist/${name}/"
+          cp README.md LICENSE SECURITY.md "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           rm -rf "dist/${name}"
 
@@ -147,6 +147,46 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  clients:
+    name: Generated clients
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+
+      # Generated at release time and attached, never committed. Committing them
+      # would put thousands of lines of machine output in every spec diff, and a
+      # reviewer skimming past generated code is a reviewer skimming past the
+      # spec change that produced it.
+      - name: TypeScript
+        run: |
+          npx --yes @hey-api/openapi-ts@latest \
+            --input docs/api/openapi.yaml \
+            --output clients/typescript \
+            --client @hey-api/client-fetch
+
+      - name: Go
+        run: |
+          npx --yes @openapitools/openapi-generator-cli@latest generate \
+            -i docs/api/openapi.yaml \
+            -g go \
+            -o clients/go \
+            --additional-properties=packageName=cairn,isGoSubmodule=true
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/cairn-client-typescript_${GITHUB_REF_NAME}.tar.gz" -C clients typescript
+          tar -czf "dist/cairn-client-go_${GITHUB_REF_NAME}.tar.gz" -C clients go
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clients
+          path: dist/*.tar.gz
+          retention-days: 1
+
   sbom:
     name: SBOM
     runs-on: ubuntu-latest
@@ -169,7 +209,7 @@ jobs:
 
   release:
     name: Publish
-    needs: [binaries, image, sbom]
+    needs: [binaries, image, sbom, clients]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -177,7 +217,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: staged
-          pattern: "{binary-*,sbom}"
+          pattern: "{binary-*,sbom,clients}"
 
       - name: Collect and checksum
         run: |

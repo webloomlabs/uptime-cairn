@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
+	"github.com/webloomlabs/uptime-cairn/internal/importer/kuma"
+	"github.com/webloomlabs/uptime-cairn/internal/live"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
@@ -35,7 +37,15 @@ type MonitorStore interface {
 	// The include= embeds. Each takes the whole page's ids, because the
 	// alternative is a query per row on the endpoint the load gate covers.
 	LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.ID]model.Heartbeat, error)
+	RecentHeartbeats(ctx context.Context, ids []model.ID, limit int) (map[model.ID][]model.Heartbeat, error)
 	UptimeRatios(ctx context.Context, ids []model.ID, window string) (map[model.ID]float64, error)
+
+	// Probes are read-only here: enrolment is Phase 4. What Phase 1 needs is
+	// the ability to name one, so a monitor that only one host can answer for
+	// can say which host.
+	ListProbes(ctx context.Context) ([]model.Probe, error)
+	GetProbe(ctx context.Context, id model.ID) (model.Probe, error)
+	CountEnabledProbes(ctx context.Context) (int, error)
 
 	StatusCounts(ctx context.Context) (map[string]int, error)
 	GetCertificate(ctx context.Context, id model.ID) (model.Certificate, error)
@@ -149,6 +159,28 @@ type Server struct {
 	// mail relay, it just cannot promise anybody anything.
 	relay SubscriberRelay
 
+	// imports is the store the Kuma importer writes through, and running is what
+	// keeps two imports from both deciding the same name was free. Nil in a
+	// build that has no importer wired in, which /imports/kuma reports as 501.
+	imports kuma.Store
+	running *importRunner
+
+	// domains resolves a request's Host to a custom-domain status page.
+	domains *domainCache
+
+	// live is the browser-facing update bus (ADR-004). Nil in a build or a test
+	// that is not running one, which /api/v1/live reports as 501 rather than
+	// panicking on — a dashboard without it still works, bounded by the
+	// membership poll instead of being near-instant.
+	live    live.Bus
+	streams *liveStreams
+
+	// trusted is the set of peers permitted to speak for somebody else through
+	// X-Forwarded-For. Empty by default and empty in every test that does not
+	// name one, which is what keeps the header untrusted unless an operator has
+	// said otherwise.
+	trusted *trustedProxies
+
 	// instanceName is the issuer shown in an authenticator app.
 	instanceName string
 
@@ -174,7 +206,7 @@ func New(s Store, publisher Notifier, sweeps Notifier, push PushIngest, alerts A
 	if instanceName == "" {
 		instanceName = "Uptime Cairn"
 	}
-	return &Server{
+	server := &Server{
 		store:         s,
 		notify:        publisher,
 		sweeps:        sweeps,
@@ -189,10 +221,17 @@ func New(s Store, publisher Notifier, sweeps Notifier, push PushIngest, alerts A
 		subscribers:   secrets.NewVault(keeper, "subscribers", "target"),
 		log:           log,
 		limiter:       newLoginLimiter(),
-		checks:        newCheckLimiter(),
-		instanceName:  instanceName,
-		orgID:         model.SentinelOrgID,
+		streams:       newLiveStreams(),
+		running:       &importRunner{},
+
+		checks:       newCheckLimiter(),
+		instanceName: instanceName,
+		orgID:        model.SentinelOrgID,
 	}
+	// After construction, because the cache reads through the store this server
+	// was just given.
+	server.domains = newDomainCache(s.CustomDomains)
+	return server
 }
 
 // WithOutbound attaches the webhook delivery engine.
@@ -205,6 +244,43 @@ func New(s Store, publisher Notifier, sweeps Notifier, push PushIngest, alerts A
 func (s *Server) WithOutbound(d Redeliverer) *Server {
 	s.outbound = d
 	return s
+}
+
+// WithImports attaches the store the Kuma importer writes through.
+//
+// Separate from Store even though it is the same object, because the importer
+// declares its own interface and handing it this one is what proves the two
+// agree — the CLI constructs the same Target from the same concrete store.
+func (s *Server) WithImports(store kuma.Store) *Server {
+	s.imports = store
+	return s
+}
+
+// WithLive attaches the live-update bus.
+//
+// A setter, like the others, because a server built for a test that never opens
+// a stream has no reason to construct one — and because the bus is the seam
+// ADR-004's solo/scaled split runs through, so what gets passed here is exactly
+// what changes between the two modes.
+func (s *Server) WithLive(b live.Bus) *Server {
+	s.live = b
+	return s
+}
+
+// WithTrustedProxies declares which peers may set X-Forwarded-For on behalf of
+// a client. This is the only place in the server where that header is believed,
+// and it is believed nowhere unless an operator has named the proxy.
+//
+// It returns an error rather than panicking because the value comes from a
+// flag, and a flag typed wrong should stop the process with the flag's name in
+// the message rather than in a stack trace.
+func (s *Server) WithTrustedProxies(values []string) error {
+	t, err := parseTrustedProxies(values)
+	if err != nil {
+		return err
+	}
+	s.trusted = t
+	return nil
 }
 
 // WithRetuner attaches the rollup runner, so a retention change through
@@ -245,11 +321,15 @@ func (s *Server) Handler() http.Handler {
 	// available only until an administrator exists, and login is how a caller
 	// obtains a credential in the first place.
 	public := http.NewServeMux()
-	// Both spellings: /setup/status is the path the frozen spec names, and the
-	// bare /setup answered the same question in earlier builds. Keeping the old
-	// one costs a line and avoids breaking anything already written against it.
+	// /setup/status is the path the frozen spec names, and it is the only one.
+	//
+	// A `GET /api/v1/setup` alias answering the same question used to sit beside
+	// it, kept for "anything already written against it". The contract test
+	// found it, which is what that test is for: an endpoint the spec does not
+	// describe is an endpoint no other client knows exists, whatever the
+	// intention was. Nothing has been released, so nothing was written against
+	// it, and the spec is the contract.
 	public.HandleFunc("GET /api/v1/setup/status", s.setupStatus)
-	public.HandleFunc("GET /api/v1/setup", s.setupStatus)
 	public.HandleFunc("POST /api/v1/setup", s.completeSetup)
 	public.HandleFunc("POST /api/v1/auth/login", s.login)
 	// The dead-man's-switch ingest. Unauthenticated by design — see push.go.
@@ -326,6 +406,23 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("DELETE /api/v1/tags/{tagId}", s.require(auth.ScopeTagsWrite, s.deleteTag))
 
 	authed.HandleFunc("GET /api/v1/system/info", s.getSystemInfo)
+	// Probes read under monitors:read: the endpoint exists so a caller can fill
+	// in monitor.probe_id, it returns no credential, and in solo mode it answers
+	// with one row.
+	authed.HandleFunc("GET /api/v1/probes", s.require(auth.ScopeMonitorsRead, s.listProbes))
+
+	// The guided import flow. Same importer as `cairn import kuma`, through the
+	// same seam: two write paths would be two sets of rules, and the one that
+	// drifts is the one nobody exercises.
+	authed.HandleFunc("POST /api/v1/imports/kuma", s.require(auth.ScopeImportsWrite, s.importFromKuma))
+	authed.HandleFunc("GET /api/v1/imports/{importJobId}", s.require(auth.ScopeImportsWrite, s.getImportJob))
+
+	// ADR-004's live half. Ordinary API surface under an ordinary scope: the
+	// dashboard gets no privileged channel, so anything holding monitors:read
+	// can open a stream and watch the same diffs the dashboard watches.
+	authed.HandleFunc("GET /api/v1/live", s.require(auth.ScopeMonitorsRead, s.streamUpdates))
+	authed.HandleFunc("PUT /api/v1/live/{streamId}/scope", s.require(auth.ScopeMonitorsRead, s.setStreamScope))
+
 	authed.HandleFunc("GET /api/v1/overview", s.require(auth.ScopeMonitorsRead, s.getOverview))
 
 	authed.HandleFunc("GET /api/v1/users", s.require(auth.ScopeUsersRead, s.listUsers))
@@ -387,7 +484,7 @@ func (s *Server) Handler() http.Handler {
 	// URLs subscriber mail carries are client-side routes, and a file server
 	// answers all of them with 404 (see ui.go).
 	if assets, err := ui.FS(); err == nil {
-		mux.Handle("/", newSPAHandler(assets))
+		mux.Handle("/", newSPAHandler(assets, s.domains))
 	} else {
 		s.log.Error("embedded UI unavailable", "error", err)
 	}
@@ -437,4 +534,19 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+// Flush passes through, because embedding http.ResponseWriter hides every
+// optional interface the wrapped writer implements.
+//
+// This is the classic decorator bug and it fails in a specific, confusing way:
+// the streaming endpoint's type assertion to http.Flusher stops holding, so
+// /api/v1/live reported "response writer cannot flush" on a stdlib server that
+// can. Without it an SSE stream would either 500 or, worse on a wrapper that
+// buffers silently, deliver nothing until the handler returned — which for a
+// long-lived stream is never.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }

@@ -4,6 +4,7 @@
 	import { formatDuration, formatRelative, formatUptime, monitorTarget } from '$lib/format';
 	import { typeChip } from '$lib/monitortypes';
 	import StatusDial from './StatusDial.svelte';
+	import HeartbeatStrip from './HeartbeatStrip.svelte';
 	import Icon from './Icon.svelte';
 
 	/**
@@ -86,15 +87,20 @@
 					{formatDuration(monitor.interval_seconds)}
 				</span>
 
-				<!-- The reference draws a strip of recent checks here. This does not,
-				     and the reason is in the API rather than in the styling: the list
-				     endpoint embeds the *last* heartbeat and there is no embed for a
-				     run of them, so a real strip would be one request per row — the
-				     precise fan-out both ADR-004 and the include= design exist to
-				     prevent. Drawing one from a single beat, or from an uptime ratio,
-				     would be inventing a history the client has not been told. So the
-				     row shows the two figures it genuinely has, and the strip lives on
-				     the detail page where the heartbeats are actually fetched. -->
+				<!-- The run of recent checks.
+				     It is drawn from `include=heartbeats`, which the server resolves
+				     for the whole page in one statement. A strip fetched per row would
+				     be the exact fan-out both ADR-004 and the include= design exist to
+				     prevent, and drawing one from a single beat or from an uptime
+				     ratio would be inventing a history the client was never told.
+				     Absent when the caller did not ask for the embed, in which case
+				     the row simply has no strip rather than an empty one. -->
+				{#if monitor.heartbeats?.length}
+					<span class="hidden shrink-0 lg:block">
+						<HeartbeatStrip beats={monitor.heartbeats} limit={30} height={20} />
+					</span>
+				{/if}
+
 				<span class="hidden shrink-0 items-center gap-5 text-right md:flex">
 					<span class="w-16">
 						<span class="block text-sm font-semibold tabular-nums">

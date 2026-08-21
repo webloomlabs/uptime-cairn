@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,14 +24,21 @@ import (
 // includes is the parsed include= set.
 type includes struct {
 	LastHeartbeat bool
+	Heartbeats    bool
 	Uptime        bool
 	Tags          bool
 	Group         bool
 	Certificate   bool
+
+	// HeartbeatLimit is how long a run `heartbeats` resolves. Set from
+	// heartbeats_limit=, clamped rather than rejected, in the same spirit as
+	// the page limit: a client asking for a thousand beats a row gets the
+	// ceiling, not a 400.
+	HeartbeatLimit int
 }
 
 func (i includes) any() bool {
-	return i.LastHeartbeat || i.Uptime || i.Tags || i.Group || i.Certificate
+	return i.LastHeartbeat || i.Heartbeats || i.Uptime || i.Tags || i.Group || i.Certificate
 }
 
 // parseIncludes reads the comma-separated list. An unrecognised value is a 400
@@ -53,6 +61,8 @@ func (s *Server) parseIncludes(w http.ResponseWriter, r *http.Request, allowCert
 		case "":
 		case "last_heartbeat":
 			out.LastHeartbeat = true
+		case "heartbeats":
+			out.Heartbeats = true
 		case "uptime":
 			out.Uptime = true
 		case "tags":
@@ -68,12 +78,38 @@ func (s *Server) parseIncludes(w http.ResponseWriter, r *http.Request, allowCert
 			out.Certificate = true
 		default:
 			writeProblem(w, r, s.log, http.StatusBadRequest, "invalid-include", "Invalid include",
-				fmt.Sprintf("include %q is not one of last_heartbeat, uptime, tags, group, certificate", strings.TrimSpace(name)))
+				fmt.Sprintf("include %q is not one of last_heartbeat, heartbeats, uptime, tags, group, certificate", strings.TrimSpace(name)))
 			return includes{}, false
+		}
+	}
+
+	if out.Heartbeats {
+		out.HeartbeatLimit = defaultHeartbeatEmbed
+		if raw := r.URL.Query().Get("heartbeats_limit"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 {
+				writeProblem(w, r, s.log, http.StatusBadRequest, "invalid-parameter", "Invalid parameter",
+					"heartbeats_limit must be a positive integer")
+				return includes{}, false
+			}
+			out.HeartbeatLimit = min(n, maxHeartbeatEmbed)
 		}
 	}
 	return out, true
 }
+
+// The bounds on the heartbeats embed.
+//
+// A run of checks under a row is a fixed-width strip on screen, so the useful
+// range is small and the ceiling is what keeps the embed's cost bounded by the
+// viewport rather than by whatever a caller types — which is the ADR-004
+// invariant this endpoint is on the wrong side of the moment the ceiling is
+// removed. Fifty beats across a hundred rows is five thousand rows, which is
+// the largest page this embed can be asked to produce.
+const (
+	defaultHeartbeatEmbed = 20
+	maxHeartbeatEmbed     = 50
+)
 
 // embed fills in the requested include= data for a page of monitors.
 //
@@ -101,6 +137,26 @@ func (s *Server) embed(ctx context.Context, rendered []monitorJSON, monitors []s
 				encoded := toHeartbeatJSON(beat)
 				rendered[i].LastHeartbeat = &encoded
 			}
+		}
+	}
+
+	if want.Heartbeats {
+		// One bounded seek per monitor stitched into one statement, not one
+		// request per row — the strip under each row in the reference dashboard
+		// is exactly the fan-out both ADR-004 and this parameter exist to
+		// prevent, and drawing it from a single beat or from an uptime ratio
+		// would be inventing a history the client was never told.
+		runs, err := s.store.RecentHeartbeats(ctx, ids, want.HeartbeatLimit)
+		if err != nil {
+			return fmt.Errorf("recent heartbeats: %w", err)
+		}
+		for i, m := range monitors {
+			run := runs[m.Monitor.ID]
+			encoded := make([]heartbeatJSON, 0, len(run))
+			for _, beat := range run {
+				encoded = append(encoded, toHeartbeatJSON(beat))
+			}
+			rendered[i].Heartbeats = encoded
 		}
 	}
 

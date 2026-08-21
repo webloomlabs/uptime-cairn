@@ -32,6 +32,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/api"
 	"github.com/webloomlabs/uptime-cairn/internal/config"
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
+	"github.com/webloomlabs/uptime-cairn/internal/live"
 	"github.com/webloomlabs/uptime-cairn/internal/maintenance"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
@@ -51,6 +52,16 @@ import (
 const shutdownGrace = 10 * time.Second
 
 // Run starts the process and blocks until ctx is cancelled.
+// summaryInterval is the floor between two pushes of the global header counts.
+//
+// The counts come from a scan of monitor_state, and the case this bounds is the
+// one the load-test harness constructs on purpose: a burst that breaks every
+// monitored endpoint at once, transitioning several thousand monitors inside a
+// single scheduler tick. Recomputing per transition would put that scan on the
+// ingest path once per monitor at the exact moment ingest is under the most
+// pressure. Two seconds is invisible against a twenty-second interval floor.
+const summaryInterval = 2 * time.Second
+
 func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	log := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	log.Info("starting", "version", version.Version, "mode", cfg.Mode, "data_dir", cfg.DataDir)
@@ -151,9 +162,21 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	// here rather than a change at every call site.
 	events := &fanout{notify: alerts, outbound: webhooks}
 
+	// ADR-004's live half. The in-process bus, because solo mode has no
+	// multi-process fan-out to solve and requiring a broker for one would break
+	// "solo mode keeps zero required external dependencies". Scaled mode swaps
+	// this one line for a NATS-backed implementation of the same interface; the
+	// API handler and the frontend cannot tell which is underneath, which is the
+	// ADR's own open follow-up.
+	updates := live.NewSummariser(live.NewBus(),
+		func(ctx context.Context) (map[string]int, error) { return store.StatusCounts(ctx) },
+		summaryInterval, log.With("component", "live"))
+	go updates.Run(ctx)
+
 	publisher := controlplane.NewPublisher()
 	cp := controlplane.New(store, publisher, events, configVault, log.With("component", "controlplane"),
-		model.EmbeddedProbeID, model.SentinelOrgID)
+		model.EmbeddedProbeID, model.SentinelOrgID).
+		WithLive(updates)
 
 	// Maintenance windows. The sweep is the only writer of the maintenance
 	// suppression flag; ingest owns the dependency one, which is derived at the
@@ -222,7 +245,16 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		log.With("component", "api"), cfg.InstanceName).
 		WithOutbound(webhooks).
 		WithRetuner(rollups).
-		WithSubscribers(subscribers)
+		WithSubscribers(subscribers).
+		WithLive(updates).
+		WithImports(store)
+
+	// Refused before the listener opens rather than at the first scrape: a
+	// --trusted-proxy typed wrong is an authentication decision made on a value
+	// nobody checked, and the operator is standing at the terminal now.
+	if err := apiServer.WithTrustedProxies(cfg.TrustedProxies); err != nil {
+		return err
+	}
 
 	// Stored settings are applied before the listener opens, so an install
 	// configured yesterday behaves today the way it was configured rather than

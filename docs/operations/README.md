@@ -11,8 +11,15 @@ see [development/running.md](../development/running.md).
   optional: `/metrics` must be denied at the proxy.
 - **[upgrading.md](upgrading.md)** — how an upgrade runs, why there is no
   rollback, and what an older binary does against a newer database.
+- **[observability-and-ops.md](observability-and-ops.md)** — the short version of
+  everything below, plus what to alert on and the one thing a control-plane
+  outage does not survive. Start here.
 - **[self-monitoring.md](self-monitoring.md)** — the health endpoints, the five
   metrics worth alerting on, and what they cost your Prometheus.
+
+Getting it installed in the first place is [guides/install.md](../guides/install.md).
+Security posture and how to report a vulnerability is
+[SECURITY.md](../../SECURITY.md).
 
 ## Deployment artefacts
 
