@@ -310,6 +310,8 @@
 	"public.poweredBy": "Powered by Uptime Cairn",
 	"public.notFound": "No status page exists at this address.",
 	"public.updated": "Updated {when}",
+	"public.serviceStatus": "Service status",
+	"public.nextUpdate": "Next update in {seconds} sec.",
 	"public.noData": "No data",
 
 	"subscription.confirmTitle": "Confirm your subscription",

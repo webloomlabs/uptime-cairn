@@ -29,7 +29,16 @@
 		--color-pending: #fdb022;
 		--color-paused: #7d879c;
 		--color-maintenance: #62a8fa;
-		--color-unknown: #4a5264;
+		/*
+		 * "No data", and it is a light value here on purpose. This is only ever a
+		 * fill — an uptime stone, a status dot — never text, so contrast is not the
+		 * constraint; being read as *absence* is. The dark slate this used to carry
+		 * in both themes recedes correctly against the dark ground and turns into a
+		 * near-black bar on a white status page, where a visitor scanning a wall of
+		 * stones reads dark as bad. That is the exact misreading UptimeBar refuses
+		 * to cause by never drawing a missing day in the down tone.
+		 */
+		--color-unknown: #ccd3de;
 
 		--surface: #f7f8fa;
 		--surface-raised: #ffffff;
@@ -75,6 +84,9 @@
 		--color-paused-soft: #1e232e;
 		--color-maintenance-soft: #10243d;
 		--color-unknown-soft: #181d26;
+		/* Against a dark ground the pale value reads as a filled bar rather than an
+		   empty one, so "no data" goes back to a slate that recedes. */
+		--color-unknown: #4a5264;
 	}
 
 	html {

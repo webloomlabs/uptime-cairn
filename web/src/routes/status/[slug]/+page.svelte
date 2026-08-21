@@ -103,14 +103,38 @@
 		}
 	}
 
+	const REFRESH_SECONDS = 60;
+
+	/**
+	 * Seconds until the next poll, counted down for the visitor.
+	 *
+	 * Shown because of who is reading this page: somebody waiting for a number to
+	 * change, deciding every few seconds whether to hit reload. Telling them the
+	 * page refreshes itself, and when, is the difference between a page that
+	 * looks frozen and one that is visibly working. It is driven off the same
+	 * timer that does the refreshing rather than a second schedule, so it cannot
+	 * drift away from the thing it describes.
+	 */
+	let secondsToRefresh = $state(REFRESH_SECONDS);
+
 	$effect(() => {
 		void slug;
 		void load();
+		secondsToRefresh = REFRESH_SECONDS;
 		// A status page is refreshed on its own because the person looking at it is
 		// waiting for it to change. Sixty seconds against the server's own
 		// thirty-second cache header.
-		const timer = setInterval(() => void load(), 60000);
-		return () => clearInterval(timer);
+		const timer = setInterval(() => {
+			void load();
+			secondsToRefresh = REFRESH_SECONDS;
+		}, REFRESH_SECONDS * 1000);
+		const tick = setInterval(() => {
+			secondsToRefresh = Math.max(0, secondsToRefresh - 1);
+		}, 1000);
+		return () => {
+			clearInterval(timer);
+			clearInterval(tick);
+		};
 	});
 
 	// The five values `overall_status` actually takes (internal/model/statuspage.go).
@@ -148,9 +172,9 @@
 	{/if}
 </svelte:head>
 
-<div class="mx-auto max-w-3xl px-4 py-10">
+<div class="min-h-full">
 	{#if needsPassword}
-		<form class="card mx-auto max-w-sm space-y-4 p-6" onsubmit={unlock}>
+		<form class="card mx-auto mt-16 max-w-sm space-y-4 p-6" onsubmit={unlock}>
 			<h1 class="font-semibold">{t('auth.password')}</h1>
 			<Field label={t('auth.password')} id="page-password">
 				{#snippet children({ id })}
@@ -165,139 +189,174 @@
 			</Button>
 		</form>
 	{:else if error}
-		<div class="py-16 text-center">
+		<div class="mx-auto max-w-3xl px-4 py-16 text-center">
 			<p class="muted">{t('public.notFound')}</p>
 		</div>
 	{:else if !statusPage}
 		<Spinner />
 	{:else}
 		{@const sp = statusPage}
-		<header class="mb-8 text-center">
-			{#if sp.logo_url}
-				<img src={sp.logo_url} alt="" class="mx-auto mb-4 h-12 object-contain" />
-			{/if}
-			<h1 class="text-2xl font-semibold">{sp.title}</h1>
-			{#if sp.description}
-				<p class="muted mt-1">{sp.description}</p>
-			{/if}
+
+		<!-- A full-bleed band with the headline card lifted out of it. The overlap
+		     is doing real work: it puts the one sentence a visitor came for above
+		     everything else on the page, at a size they can read without reading. -->
+		<header
+			class="border-b px-4 pt-10 pb-28"
+			style="background-color: var(--surface-sunken); border-color: var(--border)"
+		>
+			<div class="mx-auto flex max-w-3xl flex-wrap items-start justify-between gap-4">
+				<div class="min-w-0">
+					{#if sp.logo_url}
+						<img src={sp.logo_url} alt="" class="mb-3 h-10 object-contain" />
+					{/if}
+					<h1 class="text-2xl font-bold tracking-tight">{sp.title}</h1>
+					{#if sp.description}
+						<p class="muted mt-1 text-sm">{sp.description}</p>
+					{/if}
+				</div>
+				<div class="text-right">
+					<p class="font-semibold">{t('public.serviceStatus')}</p>
+					<p class="muted text-xs">
+						{t('public.updated', { when: formatRelative(sp.generated_at) })}
+						<span aria-hidden="true">|</span>
+						<!-- aria-live is deliberately absent: a screen reader announcing a
+						     countdown every second would make the page unusable. -->
+						{t('public.nextUpdate', { seconds: secondsToRefresh })}
+					</p>
+				</div>
+			</div>
 		</header>
 
-		<div
-			class="mb-8 rounded-lg px-5 py-4 text-center text-lg font-medium"
-			style="background-color: var(--color-{headline.tone}-soft)"
-		>
-			{headline.text}
-		</div>
+		<div class="mx-auto -mt-20 max-w-3xl px-4 pb-10">
+			<div class="card mb-8 flex items-center gap-5 p-6 sm:p-8">
+				<!-- Decorative: the sentence beside it says the same thing, so the
+				     colour is never the only carrier. -->
+				<span
+					class="flex h-16 w-16 shrink-0 items-center justify-center rounded-full sm:h-20 sm:w-20"
+					style="background-color: var(--color-{headline.tone}-soft)"
+					aria-hidden="true"
+				>
+					<span
+						class="h-9 w-9 rounded-full sm:h-11 sm:w-11"
+						style="background-color: var(--color-{headline.tone})"
+					></span>
+				</span>
+				<p class="text-2xl font-bold tracking-tight sm:text-3xl">
+					{headline.text}
+				</p>
+			</div>
 
-		{#if sp.active_incidents.length}
-			<section class="mb-8 space-y-3">
-				<h2 class="font-semibold">{t('public.activeIncidents')}</h2>
-				{#each sp.active_incidents as incident (incident.id)}
-					{@render incidentCard(incident)}
-				{/each}
-			</section>
-		{/if}
+			{#if sp.active_incidents.length}
+				<section class="mb-8 space-y-3">
+					<h2 class="font-semibold">{t('public.activeIncidents')}</h2>
+					{#each sp.active_incidents as incident (incident.id)}
+						{@render incidentCard(incident)}
+					{/each}
+				</section>
+			{/if}
 
-		{#if sp.scheduled_maintenance.length}
-			<section class="mb-8 space-y-3">
-				<h2 class="font-semibold">{t('public.scheduledMaintenance')}</h2>
-				{#each sp.scheduled_maintenance as window (window.title + window.starts_at)}
-					<div class="card p-5">
-						<p class="font-medium">{window.title}</p>
-						<p class="muted text-sm">
-							{formatAbsolute(window.starts_at)}
-							{#if window.ends_at}— {formatAbsolute(window.ends_at)}{/if}
-						</p>
-						{#if window.description}
-							<p class="mt-2 text-sm">{window.description}</p>
-						{/if}
-					</div>
-				{/each}
-			</section>
-		{/if}
-
-		{#each sp.sections as section (section.name)}
-			<section class="mb-6">
-				<h2 class="mb-2 font-semibold">{section.name}</h2>
-				{#if section.description}
-					<p class="muted mb-2 text-sm">{section.description}</p>
-				{/if}
-				<div class="card divide-y" style="border-color: var(--border)">
-					{#each section.monitors as monitor (monitor.id)}
-						<div class="space-y-2 p-4" style="border-color: var(--border)">
-							<div class="flex flex-wrap items-baseline justify-between gap-2">
-								<span class="font-medium">{monitor.name}</span>
-								<span class="flex items-center gap-3">
-									{#if monitor.uptime_percentage !== null}
-										<span class="muted text-sm tabular-nums">
-											{formatUptime(monitor.uptime_percentage)}
-										</span>
-									{/if}
-									<StatusBadge status={monitor.status} size="sm" />
-								</span>
-							</div>
-							{#if monitor.description}
-								<p class="muted text-sm">{monitor.description}</p>
-							{/if}
-							{#if monitor.uptime_bar?.length}
-								<UptimeBar entries={monitor.uptime_bar} />
+			{#if sp.scheduled_maintenance.length}
+				<section class="mb-8 space-y-3">
+					<h2 class="font-semibold">{t('public.scheduledMaintenance')}</h2>
+					{#each sp.scheduled_maintenance as window (window.title + window.starts_at)}
+						<div class="card p-5">
+							<p class="font-medium">{window.title}</p>
+							<p class="muted text-sm">
+								{formatAbsolute(window.starts_at)}
+								{#if window.ends_at}— {formatAbsolute(window.ends_at)}{/if}
+							</p>
+							{#if window.description}
+								<p class="mt-2 text-sm">{window.description}</p>
 							{/if}
 						</div>
 					{/each}
-				</div>
-			</section>
-		{/each}
-
-		<section class="mb-8 space-y-3">
-			<h2 class="font-semibold">{t('public.pastIncidents')}</h2>
-			{#if sp.recent_incidents.length === 0}
-				<p class="muted card p-5 text-sm">{t('public.noIncidents')}</p>
-			{:else}
-				{#each sp.recent_incidents as incident (incident.id)}
-					{@render incidentCard(incident)}
-				{/each}
+				</section>
 			{/if}
-		</section>
 
-		{#if sp.subscriptions_enabled}
-			<section class="card mb-8 p-6">
-				<h2 class="font-semibold">{t('public.subscribe')}</h2>
-				{#if subscribed}
-					<p class="mt-2 text-sm">{t('public.subscribeSent')}</p>
-				{:else}
-					<form class="mt-3 flex flex-wrap gap-2" onsubmit={subscribe}>
-						<label class="flex-1" style="min-width: 12rem">
-							<span class="sr-only">{t('public.subscribeEmail')}</span>
-							<input
-								type="email"
-								class="field"
-								bind:value={subscribeTarget}
-								placeholder={t('public.subscribeEmail')}
-								required
-							/>
-						</label>
-						<Button type="submit" variant="primary" loading={subscribing}>
-							{t('public.subscribeSubmit')}
-						</Button>
-					</form>
-					{#if subscribeError}
-						<p class="mt-2 text-sm" style="color: var(--color-down)" role="alert">
-							{subscribeError}
-						</p>
+			{#each sp.sections as section (section.name)}
+				<section class="mb-6">
+					<h2 class="mb-2 font-semibold">{section.name}</h2>
+					{#if section.description}
+						<p class="muted mb-2 text-sm">{section.description}</p>
 					{/if}
+					<div class="card divide-y" style="border-color: var(--border)">
+						{#each section.monitors as monitor (monitor.id)}
+							<div class="space-y-3 px-5 py-4" style="border-color: var(--border)">
+								<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+									<p class="min-w-0 font-medium">
+										{monitor.name}
+										{#if monitor.uptime_percentage !== null}
+											<span class="muted font-normal" aria-hidden="true">|</span>
+											<span class="tabular-nums" style="color: var(--color-up)">
+												{formatUptime(monitor.uptime_percentage)}
+											</span>
+										{/if}
+									</p>
+									<StatusBadge status={monitor.status} size="sm" />
+								</div>
+								{#if monitor.description}
+									<p class="muted text-sm">{monitor.description}</p>
+								{/if}
+								{#if monitor.uptime_bar?.length}
+									<UptimeBar entries={monitor.uptime_bar} />
+								{/if}
+							</div>
+						{/each}
+					</div>
+				</section>
+			{/each}
+
+			<section class="mb-8 space-y-3">
+				<h2 class="font-semibold">{t('public.pastIncidents')}</h2>
+				{#if sp.recent_incidents.length === 0}
+					<p class="muted card p-5 text-sm">{t('public.noIncidents')}</p>
+				{:else}
+					{#each sp.recent_incidents as incident (incident.id)}
+						{@render incidentCard(incident)}
+					{/each}
 				{/if}
 			</section>
-		{/if}
 
-		<footer class="muted space-y-1 text-center text-xs">
-			{#if sp.footer_text}
-				<p>{sp.footer_text}</p>
+			{#if sp.subscriptions_enabled}
+				<section class="card mb-8 p-6">
+					<h2 class="font-semibold">{t('public.subscribe')}</h2>
+					{#if subscribed}
+						<p class="mt-2 text-sm">{t('public.subscribeSent')}</p>
+					{:else}
+						<form class="mt-3 flex flex-wrap gap-2" onsubmit={subscribe}>
+							<label class="flex-1" style="min-width: 12rem">
+								<span class="sr-only">{t('public.subscribeEmail')}</span>
+								<input
+									type="email"
+									class="field"
+									bind:value={subscribeTarget}
+									placeholder={t('public.subscribeEmail')}
+									required
+								/>
+							</label>
+							<Button type="submit" variant="primary" loading={subscribing}>
+								{t('public.subscribeSubmit')}
+							</Button>
+						</form>
+						{#if subscribeError}
+							<p class="mt-2 text-sm" style="color: var(--color-down)" role="alert">
+								{subscribeError}
+							</p>
+						{/if}
+					{/if}
+				</section>
 			{/if}
-			<p>{t('public.updated', { when: formatRelative(sp.generated_at) })}</p>
-			{#if sp.show_powered_by}
-				<p>{t('public.poweredBy')}</p>
-			{/if}
-		</footer>
+
+			<footer class="muted space-y-1 text-center text-xs">
+				{#if sp.footer_text}
+					<p>{sp.footer_text}</p>
+				{/if}
+				<p>{t('public.updated', { when: formatRelative(sp.generated_at) })}</p>
+				{#if sp.show_powered_by}
+					<p>{t('public.poweredBy')}</p>
+				{/if}
+			</footer>
+		</div>
 	{/if}
 </div>
 
