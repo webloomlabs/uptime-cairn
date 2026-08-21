@@ -7,6 +7,7 @@
 	import Button from '$lib/components/Button.svelte';
 	import Field from '$lib/components/Field.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import Logo from '$lib/components/Logo.svelte';
 
 	/**
 	 * First run: the one account that creates itself.
@@ -67,7 +68,10 @@
 <div class="flex min-h-full items-center justify-center p-6">
 	<div class="w-full max-w-md space-y-6">
 		<div class="flex items-center justify-between">
-			<h1 class="text-xl font-semibold">{t('app.name')}</h1>
+			<h1 class="flex items-center gap-2.5 text-xl font-semibold">
+				<span style="color: var(--color-up)"><Logo size={18} /></span>
+				{t('app.name')}
+			</h1>
 			<ThemeToggle />
 		</div>
 

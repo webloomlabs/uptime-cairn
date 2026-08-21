@@ -1,0 +1,81 @@
+# Deploying a development instance from source, with the data volume declared
+# here rather than clicked into a control panel.
+#
+# This file exists because of a specific failure. The Dockerfile declares
+# `VOLUME /data`, so a container started with no mount configured gets a *fresh
+# anonymous volume* every time — the app runs, setup succeeds, monitors collect
+# history, and the next deploy silently starts over on a new empty volume. It
+# looks perfectly healthy in the browser the whole way. A mount that lives in a
+# web form can be forgotten; one that lives in a file that deploys with the code
+# cannot, and shows up in a diff when it changes.
+#
+# In Coolify: Build Pack → Docker Compose, Docker Compose Location →
+# /docker-compose.dev.yml. Nothing else needs configuring in the UI.
+
+services:
+  cairn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+
+    environment:
+      # Coolify fills this from the domain it assigns and routes the proxy to
+      # port 3000 on the back of it. The `_3000` suffix is what tells it which
+      # port to route to; without it the proxy assumes 80 and finds nothing.
+      - SERVICE_FQDN_CAIRN_3000
+      - SERVICE_URL_CAIRN_3000
+
+    volumes:
+      # A *named* volume, deliberately, and it is the whole point of this file.
+      #
+      # Named rather than a host bind mount for a second reason worth stating:
+      # the image runs as UID 10001, and Docker copies the image's ownership of
+      # /data into a new named volume, so this works with no chown. A bind mount
+      # arrives owned by root, the process cannot create cairn.db, and the
+      # container exits at startup — a different failure, equally avoidable.
+      - cairn-data:/data
+
+    command:
+      - "--data-dir=/data"
+      - "--listen=:3000"
+      # The flags the Dockerfile build pack gave no way to set. An unset
+      # SERVICE_URL substitutes empty, which the binary accepts — alerts simply
+      # carry no link rather than the container refusing to start.
+      - "--base-url=${SERVICE_URL_CAIRN_3000}"
+      - "--instance-name=${CAIRN_INSTANCE_NAME:-Uptime Cairn (dev)}"
+
+    # ICMP monitors try the unprivileged datagram socket before the raw one, and
+    # the kernel allows it only for GIDs inside this range. The image runs as
+    # GID 10001, so the range has to reach it. Without this, ping monitors report
+    # `unknown` rather than `down` — the probe cannot ask, which is a different
+    # fact from the target being dead. Remove this block if your host refuses the
+    # sysctl; nothing else depends on it.
+    sysctls:
+      net.ipv4.ping_group_range: "10001 10001"
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      # Generous, because first start runs migrations, generates the encryption
+      # key, and registers the probe before it serves anything.
+      start_period: 30s
+      retries: 3
+
+    security_opt:
+      - no-new-privileges:true
+
+    # Not published on the host: the proxy reaches this over the Docker network,
+    # and an unpublished port is one fewer way to reach the API without TLS.
+
+volumes:
+  cairn-data:
+    # Everything that cannot be recreated: cairn.db and cairn.key. Losing the key
+    # while encrypted data exists is unrecoverable by design — the process
+    # refuses to start rather than generating a replacement that would render
+    # every stored credential unreadable while appearing to work. Copy it off the
+    # host once, and keep it somewhere other than beside the database it
+    # protects. See docs/operations/backup-restore.md.
+    name: uptime-cairn-dev-data

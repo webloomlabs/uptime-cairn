@@ -20,6 +20,7 @@ see [development/running.md](../development/running.md).
 |---|---|
 | [`Dockerfile`](../../Dockerfile) | Multi-arch image; frontend, then binary, then a small runtime |
 | [`docker-compose.yml`](../../docker-compose.yml) | Reference solo install: one container, one volume |
+| [`docker-compose.dev.yml`](../../docker-compose.dev.yml) | Builds from source, for a PaaS that deploys from a repository |
 | [`deploy/systemd/uptime-cairn.service`](../../deploy/systemd/uptime-cairn.service) | Unit for a binary install, hardened |
 
 ## The shape of a solo install
@@ -35,6 +36,29 @@ web server. Two things on disk cannot be recreated:
 
 Back them up to different places, and read
 [backup-restore.md](backup-restore.md) for why the second sentence is literal.
+
+### Check the volume is real, on every new install
+
+The Dockerfile declares `VOLUME /data`, so a container started with no mount
+configured does not fail — Docker gives it a fresh anonymous volume, the app
+runs, setup succeeds, and the next deploy starts over on a new empty one. From
+the browser it looks healthy the entire time, and the only signal is a line in
+the log saying a new encryption key was generated.
+
+So verify it once, rather than trusting that the panel saved:
+
+```console
+$ docker inspect <container> --format '{{json .Mounts}}' | python3 -m json.tool
+        "Type": "volume",
+        "Name": "0a5eca5724feedd0377515b9f389d104c35eeb23f13f5f8071487ea04cdf461d",
+```
+
+A 64-hex name is Docker inventing an anonymous volume, and it is the shape of an
+install that will silently reset. A named volume or a `"Type": "bind"` with a
+path you recognise is correct. Declaring the volume in a compose file that
+deploys with the code — [`docker-compose.dev.yml`](../../docker-compose.dev.yml)
+— removes the opportunity to get this wrong, which is better than remembering to
+check.
 
 ## Configuration
 

@@ -4,6 +4,7 @@
 	import { session } from '$lib/session.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import Logo from '$lib/components/Logo.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 
 	let { children } = $props();
@@ -106,13 +107,13 @@
 			style="border-color: var(--border); background-color: var(--surface-sunken)"
 		>
 			<div class="px-5 pt-6 pb-8">
-				<a href="/" class="flex items-center gap-2 text-lg font-semibold tracking-tight">
-					<span
-						class="inline-block h-2 w-2 rounded-full"
-						style="background-color: var(--color-up)"
-						aria-hidden="true"
-					></span>
-					{t('app.name')}
+				<a
+					href="/"
+					class="flex items-center gap-2.5 text-lg font-semibold tracking-tight"
+					style="color: var(--color-up)"
+				>
+					<Logo size={16} />
+					<span style="color: var(--text)">{t('app.name')}</span>
 				</a>
 			</div>
 
