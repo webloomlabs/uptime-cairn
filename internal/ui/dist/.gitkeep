@@ -1,0 +1,15 @@
+This file exists twice, and the duplication is deliberate.
+
+internal/ui/dist/ is generated: the frontend build writes it and the Go binary
+embeds it. But //go:embed on a missing or empty directory is a compile error, so
+a clean checkout — one where nobody has ever run the frontend toolchain — needs
+at least one file there to build the server at all.
+
+So a copy of this file is committed at internal/ui/dist/.gitkeep, and this one
+lives in web/static/ because SvelteKit copies static/ into the build output
+verbatim. That means the build reproduces the committed file byte for byte
+instead of deleting it, and `git status` stays clean after `npm run build`.
+
+Keep the two identical. If you change one, change the other.
+
+See internal/ui/embed.go and web/README.md.
