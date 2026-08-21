@@ -30,7 +30,7 @@ import type { MonitorStatus } from './types';
  * Consequences section warns about.
  */
 
-/** One monitor's diff, matching MonitorUpdate in the OpenAPI spec. */
+/** One monitor's diff, matching MonitorLiveUpdate in the OpenAPI spec. */
 export type MonitorUpdate = {
 	monitor_id: string;
 	status: MonitorStatus;

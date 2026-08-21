@@ -669,13 +669,57 @@ func (s *Store) SetMonitorEnabled(ctx context.Context, id model.ID, enabled bool
 	return tx.Commit()
 }
 
+// boundedSeekPerMonitor builds `n` bounded seeks stitched with UNION ALL, each
+// taking the newest `limit` heartbeats for one monitor. It takes two parameters
+// per arm, org_id then monitor_id, in that order.
+//
+// Shared by the two list embeds because the shape is the load-bearing part and
+// having it written once means it cannot drift on one of them. `limit` is
+// interpolated rather than bound so every arm is the same string and the
+// parameter list stays at two per arm; it is an int from a clamped internal
+// constant, never caller text. SQLite plans it identically either way.
+//
+// The predicate names org_id *and* monitor_id because the only index here is
+// (org_id, monitor_id, time DESC, probe_id). Naming monitor_id alone cannot use
+// the index's leading column, and SQLite falls back to scanning the whole thing
+// — a page of twenty-five rows then costs the size of the entire heartbeats
+// table. TestEmbedsSeekRatherThanScan asserts this mechanically.
+func boundedSeekPerMonitor(n, limit int) string {
+	const columns = `time, monitor_id, org_id, probe_id, status, response_time_ms,
+	                 code, message, attempt, important, suppressed, suppression_reason`
+
+	arm := fmt.Sprintf(`SELECT * FROM (SELECT %s FROM heartbeats
+		WHERE org_id = ? AND monitor_id = ? ORDER BY time DESC LIMIT %d)`, columns, limit)
+
+	arms := make([]string, n)
+	for i := range arms {
+		arms[i] = arm
+	}
+	return strings.Join(arms, " UNION ALL ")
+}
+
 // LastHeartbeats returns the most recent heartbeat per monitor, for the list
 // view's include=last_heartbeat.
 //
-// One query with a correlated MAX(time) rather than a query per row: the whole
-// point of the include parameter is that the dashboard's list view asks for it
-// on every page, and a fan-out of 25 range scans is what the 5,000-monitor gate
-// exists to catch.
+// One bounded seek per monitor stitched together with UNION ALL — the same
+// shape as RecentHeartbeats below, for the same reason and one more.
+//
+// The obvious form is a join against `SELECT monitor_id, MAX(time) ... GROUP BY
+// monitor_id`, and it reads as one query rather than twenty-five. What it is not
+// is one *seek*. The only index here is (org_id, monitor_id, time DESC,
+// probe_id), so a predicate that names monitor_id without org_id cannot use its
+// leading column, and SQLite falls back to scanning the whole index — twice,
+// once for the aggregate and once for the join. The cost is then the size of the
+// entire heartbeats table rather than the size of the page, which is precisely
+// the property ADR-004 claims this endpoint has and the 5,000-monitor gate
+// measures. Unfixed, one page of twenty-five rows read 26ms of index at 500
+// monitors and 489ms at 5,000.
+//
+// It is worth saying why this hid for so long: given ANALYZE statistics SQLite
+// will skip-scan the index and the query looks fine. Nothing in this codebase
+// ever runs ANALYZE, so no cairn database has those statistics — but a
+// benchmark harness that happens to run it does, and reports a query that is
+// fast nowhere it actually runs. Naming org_id removes the guess entirely.
 func (s *Store) LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.ID]model.Heartbeat, error) {
 	if len(ids) == 0 {
 		return map[model.ID]model.Heartbeat{}, nil
@@ -683,21 +727,10 @@ func (s *Store) LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.I
 
 	args := make([]any, 0, len(ids)*2)
 	for _, id := range ids {
-		args = append(args, id[:])
-	}
-	for _, id := range ids {
-		args = append(args, id[:])
+		args = append(args, model.SentinelOrgID[:], id[:])
 	}
 
-	list := placeholders(len(ids))
-	rows, err := s.ro.QueryContext(ctx, `
-		SELECT h.time, h.monitor_id, h.org_id, h.probe_id, h.status, h.response_time_ms,
-		       h.code, h.message, h.attempt, h.important, h.suppressed, h.suppression_reason
-		FROM heartbeats h
-		JOIN (SELECT monitor_id, MAX(time) AS time FROM heartbeats
-		      WHERE monitor_id IN (`+list+`) GROUP BY monitor_id) latest
-		  ON latest.monitor_id = h.monitor_id AND latest.time = h.time
-		WHERE h.monitor_id IN (`+list+`)`, args...)
+	rows, err := s.ro.QueryContext(ctx, boundedSeekPerMonitor(len(ids), 1), args...)
 	if err != nil {
 		return nil, fmt.Errorf("last heartbeats: %w", err)
 	}
@@ -710,8 +743,8 @@ func (s *Store) LastHeartbeats(ctx context.Context, ids []model.ID) (map[model.I
 			return nil, err
 		}
 		// Several probes may have reported at the same microsecond. Whichever
-		// arrives first wins; they describe the same instant, so the choice
-		// cannot be wrong in a way anybody can see.
+		// the index reaches first wins; they describe the same instant, so the
+		// choice cannot be wrong in a way anybody can see.
 		if _, seen := out[beat.MonitorID]; !seen {
 			out[beat.MonitorID] = beat
 		}
@@ -746,18 +779,12 @@ func (s *Store) RecentHeartbeats(ctx context.Context, ids []model.ID, limit int)
 		return map[model.ID][]model.Heartbeat{}, nil
 	}
 
-	const columns = `time, monitor_id, org_id, probe_id, status, response_time_ms,
-	                 code, message, attempt, important, suppressed, suppression_reason`
-
-	arms := make([]string, 0, len(ids))
-	args := make([]any, 0, len(ids)*3)
+	args := make([]any, 0, len(ids)*2)
 	for _, id := range ids {
-		arms = append(arms, `SELECT * FROM (SELECT `+columns+` FROM heartbeats
-			WHERE org_id = ? AND monitor_id = ? ORDER BY time DESC LIMIT ?)`)
-		args = append(args, model.SentinelOrgID[:], id[:], limit)
+		args = append(args, model.SentinelOrgID[:], id[:])
 	}
 
-	rows, err := s.ro.QueryContext(ctx, strings.Join(arms, " UNION ALL "), args...)
+	rows, err := s.ro.QueryContext(ctx, boundedSeekPerMonitor(len(ids), limit), args...)
 	if err != nil {
 		return nil, fmt.Errorf("recent heartbeats: %w", err)
 	}

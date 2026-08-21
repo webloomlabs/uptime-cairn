@@ -306,7 +306,7 @@ paths:
         |---|---|
         | `stream` | `{"stream_id": "..."}` — sent first. Needed to change scope. |
         | `summary` | `MonitorSummary`. Sent on open and whenever the counts move. |
-        | `monitor` | `MonitorUpdate`. One monitor's diff. |
+        | `monitor` | `MonitorLiveUpdate`. One monitor's diff. |
 
         A comment frame (`: keepalive`) goes down an idle stream every 15 seconds.
         Not for the browser, which is happy to wait — for the proxies between it
@@ -3909,7 +3909,7 @@ components:
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
 
-    MonitorUpdate:
+    MonitorLiveUpdate:
       type: object
       description: |
         One monitor's change, as a live subscriber sees it. A diff, not a monitor:

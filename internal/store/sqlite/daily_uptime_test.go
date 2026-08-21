@@ -94,7 +94,7 @@ func TestDailyUptimePrefersTheRolledUpDay(t *testing.T) {
 	}
 
 	now := time.Now().UTC()
-	yesterday := now.Truncate(24 * time.Hour).AddDate(0, 0, -1)
+	yesterday := now.Truncate(24*time.Hour).AddDate(0, 0, -1)
 
 	writeBeats(t, s, m, yesterday.Add(time.Hour), time.Minute,
 		[]model.Heartbeat{{Status: model.StatusUp}, {Status: model.StatusUp}})

@@ -61,16 +61,27 @@ jobs:
       #
       # The artefacts are attached to the release, where somebody wanting a
       # client can take one.
+      #
+      # Both generators are pinned, and `typescript` is installed alongside
+      # openapi-ts rather than left to npx.
+      #
+      # `@latest` on a codegen tool means this job's result depends on what
+      # somebody else published this morning — it has already broken the build
+      # once on an upstream release that crashed before it read the spec, which
+      # is a red X that says nothing about the change under review. And
+      # openapi-ts declares `typescript` as a *peer* dependency, which npx does
+      # not install: without `-p typescript` it fails on import with an
+      # undefined `ts.SyntaxKind`, no matter which version is pinned.
       - name: Generate the TypeScript client
         run: |
-          npx --yes @hey-api/openapi-ts@latest \
+          npx --yes -p typescript@5.9.3 -p @hey-api/openapi-ts@0.99.0 openapi-ts \
             --input docs/api/openapi.yaml \
             --output /tmp/clients/typescript \
             --client @hey-api/client-fetch
 
       - name: Generate the Go client
         run: |
-          npx --yes @openapitools/openapi-generator-cli@latest generate \
+          npx --yes @openapitools/openapi-generator-cli@2.40.1 generate \
             -i docs/api/openapi.yaml \
             -g go \
             -o /tmp/clients/go \

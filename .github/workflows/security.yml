@@ -106,7 +106,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan the image
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: uptime-cairn:scan
           format: sarif
@@ -129,7 +129,7 @@ jobs:
       # Separately, and this one *does* fail: an advisory with a fix available
       # against a package we chose to install is a package we can update.
       - name: Fail on fixable findings
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: uptime-cairn:scan
           format: table
