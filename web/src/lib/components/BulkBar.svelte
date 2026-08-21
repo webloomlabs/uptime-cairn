@@ -79,11 +79,7 @@
 		</Button>
 
 		{#if tags.length}
-			<select
-				class="rounded-md border px-2 py-1 text-sm"
-				style="border-color: var(--border-strong); background-color: var(--surface)"
-				bind:value={tagId}
-			>
+			<select class="field w-auto" bind:value={tagId}>
 				<option value="">{t('form.tags')}…</option>
 				{#each tags as tag (tag.id)}
 					<option value={tag.id}>{tag.name}</option>

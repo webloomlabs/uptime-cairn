@@ -136,8 +136,10 @@
 		}
 	}
 
-	const inputClass = 'w-full rounded-md border px-3 py-2 text-sm';
-	const inputStyle = 'border-color: var(--border-strong); background-color: var(--surface)';
+	// Both defined in app.css, so every control in the product shares one
+	// treatment rather than each form carrying its own copy of it.
+	const inputClass = 'field';
+	const inputStyle = '';
 </script>
 
 <form class="space-y-5" onsubmit={submit}>

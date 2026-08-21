@@ -148,10 +148,14 @@ to make once:
 - **A missing key renders as the key**, visibly, rather than falling back to
   English. A half-translated UI that looks finished is how a language ships with a
   third of its strings missing for two years.
-- **Interpolation is `{name}`**, resolved against an object. There is no plural
-  machinery yet: English needs two forms and a `{n}` counter covers it, and a
-  language with six deserves `Intl.PluralRules` rather than a guess made now. The
-  keys are shaped so adding it later renames nothing.
+- **Interpolation is `{name}`**, resolved against an object.
+- **Plurals go through `Intl.PluralRules`.** A key with a `count` value gets its
+  category appended — `overview.usingMonitors.one`,
+  `overview.usingMonitors.other` — and the browser decides which category a number
+  falls into for the active locale. English needs two forms and Polish needs four;
+  writing the English rule inline as `n === 1` is how a language ships permanently
+  broken. A key with no plural variants is used as-is, so most strings pay nothing
+  for this.
 
 Locale is negotiated from `navigator.languages` by language subtag, so a browser
 asking for `en-AU` gets `en` rather than nothing.
@@ -159,6 +163,19 @@ asking for `en-AU` gets `en` rather than nothing.
 There is no translation platform wired up. When there is one, it consumes
 `src/lib/i18n/*.json` directly — flat JSON with stable keys is what every one of
 them expects.
+
+## A Tailwind 4 trap worth knowing about
+
+`@theme` variables are emitted **only where Tailwind can see a utility class using
+them**. Every status colour in this UI is composed at runtime —
+`var(--color-{tone})`, where `tone` is a status word — which a source scanner
+cannot see. Declaring them in `@theme` silently dropped four of the six from the
+built stylesheet, and the symptom is a status marker that is present in the DOM,
+correctly sized, and completely transparent.
+
+They are declared on `:root` in `app.css` instead. The rule: a custom property
+referenced only through a runtime-built `var()` belongs on `:root`, not in
+`@theme`.
 
 ## Accessibility and theming
 

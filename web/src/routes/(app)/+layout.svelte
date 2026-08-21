@@ -4,15 +4,16 @@
 	import { session } from '$lib/session.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 
 	let { children } = $props();
 
 	/**
-	 * The authenticated shell, and the gate in front of it.
+	 * The authenticated shell: a fixed left rail, and the page beside it.
 	 *
-	 * The gate is a convenience, not the enforcement: every endpoint behind it
-	 * checks its own session and scope on the server. Its job is to stop the
-	 * dashboard rendering a page of empty panels and 401s to somebody whose
+	 * The gate in front of it is a convenience, not the enforcement — every
+	 * endpoint checks its own session and scope on the server. Its job is to stop
+	 * the dashboard rendering a page of empty panels and 401s to somebody whose
 	 * session has gone, and to send a fresh install to setup rather than to a
 	 * sign-in form with no account to sign in to.
 	 */
@@ -27,24 +28,34 @@
 		}
 	});
 
-	type Link = { href: string; label: string; scope?: string; capability?: string };
+	type Link = { href: string; label: string; icon: string; scope?: string; capability?: string };
 
-	// Navigation lists what this build's UI actually has, filtered further by what
-	// this principal may read. Two rules, and the second is the one that gets
-	// broken: a link to a page that answers 403 reads as a broken product rather
-	// than as a scoped key, and a link to a route the frontend does not implement
-	// is worse still — it lands on the shell's not-found and looks like data loss.
-	//
-	// Incidents, status pages and settings have API surface and no screens yet
-	// (docs/plans/PHASE-1-TODO.md, "UI"). They get links when they get pages.
+	// Filtered by what this principal may read and what this build actually has.
+	// A link to a page that answers 403 reads as a broken product rather than as a
+	// scoped key, and a link to a route the frontend does not implement is worse
+	// still — it lands on the shell's not-found and looks like data loss.
 	const links = $derived(
 		(
 			[
-				{ href: '/', label: t('nav.dashboard'), scope: 'monitors:read' },
-				{ href: '/monitors', label: t('nav.monitors'), scope: 'monitors:read' },
+				{ href: '/', label: t('nav.monitoring'), icon: 'monitoring', scope: 'monitors:read' },
+				{
+					href: '/incidents',
+					label: t('nav.incidents'),
+					icon: 'incidents',
+					scope: 'incidents:read',
+					capability: 'incidents'
+				},
+				{
+					href: '/status-pages',
+					label: t('nav.statusPages'),
+					icon: 'status',
+					scope: 'status_pages:read',
+					capability: 'status_pages'
+				},
 				{
 					href: '/notifications',
 					label: t('nav.notifications'),
+					icon: 'notifications',
 					scope: 'notifications:read',
 					capability: 'notifications'
 				}
@@ -57,61 +68,124 @@
 	);
 
 	function active(href: string): boolean {
-		if (href === '/') return page.url.pathname === '/';
+		if (href === '/') return page.url.pathname === '/' || page.url.pathname.startsWith('/monitors');
 		return page.url.pathname === href || page.url.pathname.startsWith(href + '/');
 	}
+
+	const initials = $derived(
+		(session.user?.name ?? session.user?.email ?? '?')
+			.split(/[\s@.]+/)
+			.filter(Boolean)
+			.slice(0, 2)
+			.map((part) => part[0]?.toUpperCase() ?? '')
+			.join('')
+	);
+
+	let open = $state(false);
 </script>
 
 {#if session.authenticated}
 	<a href="#main" class="skip-link">{t('app.skipToContent')}</a>
 
-	<div class="flex min-h-full flex-col">
-		<header class="border-b" style="border-color: var(--border)">
-			<div class="mx-auto flex max-w-7xl flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3">
-				<a href="/" class="flex items-center gap-2 font-semibold">
-					<svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true">
-						<path d="M16 5.5 22.5 17h-13L16 5.5Z" fill="var(--accent)" />
-						<path d="M16 14.5 21 23H11l5-8.5Z" fill="var(--accent)" opacity="0.6" />
-						<rect x="9" y="24.5" width="14" height="2.5" rx="1.25" fill="var(--accent)" />
-					</svg>
+	<div class="flex min-h-full">
+		<!-- The rail. Fixed on desktop, a drawer under it. -->
+		<aside
+			class="fixed inset-y-0 left-0 z-30 flex w-64 flex-col border-r transition-transform lg:translate-x-0"
+			class:-translate-x-full={!open}
+			style="border-color: var(--border); background-color: var(--surface-sunken)"
+		>
+			<div class="px-5 pt-6 pb-8">
+				<a href="/" class="flex items-center gap-2 text-lg font-semibold tracking-tight">
+					<span
+						class="inline-block h-2 w-2 rounded-full"
+						style="background-color: var(--color-up)"
+						aria-hidden="true"
+					></span>
 					{t('app.name')}
 				</a>
+			</div>
 
-				<nav aria-label={t('nav.menu')} class="flex flex-1 flex-wrap gap-1">
-					{#each links as link (link.href)}
-						<a
-							href={link.href}
-							class="rounded-md px-3 py-1.5 text-sm hover:bg-[var(--surface-sunken)]"
-							class:font-medium={active(link.href)}
-							style={active(link.href)
-								? 'background-color: var(--surface-sunken); color: var(--text)'
-								: ''}
-							aria-current={active(link.href) ? 'page' : undefined}
-						>
-							{link.label}
-						</a>
-					{/each}
-				</nav>
+			<nav aria-label={t('nav.menu')} class="flex-1 space-y-1 px-3">
+				{#each links as link (link.href)}
+					{@const isActive = active(link.href)}
+					<a
+						href={link.href}
+						onclick={() => (open = false)}
+						class="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors"
+						style={isActive
+							? 'background-color: var(--surface-hover); color: var(--text); font-weight: 500'
+							: 'color: var(--text-muted)'}
+						aria-current={isActive ? 'page' : undefined}
+					>
+						<span style={isActive ? 'color: var(--color-up)' : ''}>
+							<Icon name={link.icon} size={19} />
+						</span>
+						{link.label}
+					</a>
+				{/each}
+			</nav>
 
-				<div class="flex items-center gap-2">
+			<div class="space-y-3 px-3 pt-4 pb-5">
+				<div class="flex items-center gap-3 px-2">
+					<span
+						class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-semibold"
+						style="background-color: var(--surface-hover); color: var(--text)"
+						aria-hidden="true"
+					>
+						{initials}
+					</span>
+					<span class="min-w-0 flex-1">
+						<span class="block truncate text-sm font-medium">
+							{session.user?.name || session.user?.email}
+						</span>
+						{#if session.user?.name}
+							<span class="muted block truncate text-xs">{session.user.email}</span>
+						{/if}
+					</span>
+				</div>
+
+				<div class="flex items-center gap-1 px-1">
 					<ThemeToggle />
-					<span class="muted hidden text-sm sm:inline">{session.user?.email}</span>
 					<button
 						type="button"
-						class="rounded-md px-3 py-1.5 text-sm hover:bg-[var(--surface-sunken)]"
+						class="flex flex-1 items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-[var(--surface-hover)]"
+						style="color: var(--text-muted)"
 						onclick={async () => {
 							await session.signOut();
 							goto('/login', { replaceState: true });
 						}}
 					>
+						<Icon name="logout" size={17} />
 						{t('nav.signOut')}
 					</button>
 				</div>
 			</div>
-		</header>
+		</aside>
 
-		<main id="main" class="mx-auto w-full max-w-7xl flex-1 px-4 py-6">
-			{@render children?.()}
-		</main>
+		{#if open}
+			<button
+				type="button"
+				class="fixed inset-0 z-20 bg-black/50 lg:hidden"
+				aria-label={t('common.close')}
+				onclick={() => (open = false)}
+			></button>
+		{/if}
+
+		<div class="flex min-w-0 flex-1 flex-col lg:pl-64">
+			<button
+				type="button"
+				class="m-3 w-fit rounded-lg p-2 lg:hidden"
+				style="border: 1px solid var(--border)"
+				aria-label={t('nav.menu')}
+				aria-expanded={open}
+				onclick={() => (open = true)}
+			>
+				<Icon name="filter" size={20} />
+			</button>
+
+			<main id="main" class="min-w-0 flex-1 px-4 py-6 sm:px-8 sm:py-8">
+				{@render children?.()}
+			</main>
+		</div>
 	</div>
 {/if}

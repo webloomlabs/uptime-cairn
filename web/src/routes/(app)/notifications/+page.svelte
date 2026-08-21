@@ -9,6 +9,8 @@
 	import ErrorBox from '$lib/components/ErrorBox.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import ChannelForm from '$lib/components/ChannelForm.svelte';
+	import PageTitle from '$lib/components/PageTitle.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 
 	let channels = $state<NotificationChannel[]>([]);
 	let loading = $state(true);
@@ -46,9 +48,8 @@
 	});
 </script>
 
-<div class="space-y-5">
-	<div class="flex flex-wrap items-center justify-between gap-3">
-		<h1 class="text-2xl font-semibold">{t('nav.notifications')}</h1>
+<PageTitle title={t('nav.notifications')}>
+	{#snippet actions()}
 		{#if canWrite && !creating && !editing}
 			<Button
 				variant="primary"
@@ -57,14 +58,19 @@
 					editing = null;
 				}}
 			>
-				New channel
+				<Icon name="plus" size={16} />
+				{t('notifications.newChannel')}
 			</Button>
 		{/if}
-	</div>
+	{/snippet}
+</PageTitle>
 
+<div class="space-y-5">
 	{#if creating || editing}
-		<section class="surface rounded-lg p-5">
-			<h2 class="mb-4 font-semibold">{editing ? editing.name : 'New channel'}</h2>
+		<section class="card p-6">
+			<h2 class="mb-4 font-semibold">
+				{editing ? editing.name : t('notifications.newChannel')}
+			</h2>
 			{#key editing?.id ?? 'new'}
 				<ChannelForm
 					channel={editing}
@@ -89,11 +95,9 @@
 	{#if loading}
 		<Spinner />
 	{:else if channels.length === 0}
-		<p class="muted surface rounded-lg px-4 py-8 text-center text-sm">
-			No notification channels yet.
-		</p>
+		<p class="muted card px-4 py-12 text-center text-sm">No notification channels yet.</p>
 	{:else}
-		<ul class="surface divide-y rounded-lg" style="border-color: var(--border)">
+		<ul class="card divide-y" style="border-color: var(--border)">
 			{#each channels as channel (channel.id)}
 				<li
 					class="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3"

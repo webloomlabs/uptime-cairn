@@ -36,6 +36,8 @@ export type FieldSpec = {
 
 export type TypeSpec = {
 	label: string;
+	/** The short form for a list chip, where "TLS certificate expiry" does not fit. */
+	chip: string;
 	summary: string;
 	fields: FieldSpec[];
 };
@@ -52,6 +54,7 @@ const IP_FAMILY: FieldSpec = {
 export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	http: {
 		label: 'HTTP(S)',
+		chip: 'HTTP',
 		summary: 'Request a URL and assert on the status code, body, or response time.',
 		fields: [
 			{ key: 'url', label: 'URL', kind: 'url', required: true, placeholder: 'https://example.com' },
@@ -84,6 +87,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	tcp: {
 		label: 'TCP port',
+		chip: 'TCP',
 		summary: 'Open a TCP connection and confirm something is listening.',
 		fields: [
 			{ key: 'hostname', label: 'Hostname', kind: 'text', required: true },
@@ -93,6 +97,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	icmp: {
 		label: 'Ping (ICMP)',
+		chip: 'PING',
 		summary: 'Ping a host. Falls back to TCP where raw sockets are unavailable.',
 		fields: [
 			{ key: 'hostname', label: 'Hostname', kind: 'text', required: true },
@@ -110,6 +115,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	dns: {
 		label: 'DNS record',
+		chip: 'DNS',
 		summary: 'Resolve a name and optionally assert on what comes back.',
 		fields: [
 			{ key: 'hostname', label: 'Hostname', kind: 'text', required: true },
@@ -141,6 +147,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	tls_expiry: {
 		label: 'TLS certificate expiry',
+		chip: 'TLS',
 		summary: 'Watch a certificate and alert before it expires.',
 		fields: [
 			{ key: 'hostname', label: 'Hostname', kind: 'text', required: true },
@@ -158,6 +165,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	domain_expiry: {
 		label: 'Domain expiry',
+		chip: 'DOMAIN',
 		summary: 'Watch a domain registration through RDAP, falling back to WHOIS.',
 		fields: [
 			{ key: 'domain', label: 'Domain', kind: 'text', required: true, placeholder: 'example.com' },
@@ -179,6 +187,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	grpc: {
 		label: 'gRPC health',
+		chip: 'GRPC',
 		summary: 'Call the standard gRPC health-checking service.',
 		fields: [
 			{ key: 'address', label: 'Address', kind: 'text', required: true, placeholder: 'host:50051' },
@@ -190,6 +199,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	docker: {
 		label: 'Docker container',
+		chip: 'DOCKER',
 		summary: 'Ask a Docker daemon whether a container is running.',
 		fields: [
 			{ key: 'container', label: 'Container', kind: 'text', required: true },
@@ -204,6 +214,7 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 	},
 	push: {
 		label: 'Push (dead-man’s switch)',
+		chip: 'PUSH',
 		summary:
 			'Nothing is checked from here. A job calls the push URL on its own schedule, and silence is the failure.',
 		fields: []
@@ -212,4 +223,9 @@ export const MONITOR_TYPES: Record<string, TypeSpec> = {
 
 export function specFor(type: string): TypeSpec | null {
 	return MONITOR_TYPES[type] ?? null;
+}
+
+/** The list-row chip label, falling back to the raw type for an unknown one. */
+export function typeChip(type: string): string {
+	return MONITOR_TYPES[type]?.chip ?? type.replace(/_/g, ' ').toUpperCase();
 }

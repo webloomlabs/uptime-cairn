@@ -45,7 +45,7 @@
 </svelte:head>
 
 <div class="mx-auto flex min-h-full max-w-md items-center px-4 py-16">
-	<div class="surface w-full rounded-lg p-6 text-center">
+	<div class="card w-full p-8 text-center">
 		<h1 class="text-lg font-semibold">{t('subscription.unsubscribeTitle')}</h1>
 
 		{#if state === 'done'}

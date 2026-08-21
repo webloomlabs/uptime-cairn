@@ -3,7 +3,21 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-21.** There is a dashboard. It is an ordinary API client — one
+**Status: 2026-08-21.** There is a dashboard, and it is styled after the product
+this one is measured against: a fixed left rail, near-black navy, one saturated
+green carrying "up", an indigo reserved for the single primary action on a screen.
+Monitors, incidents and status pages each have a screen; the monitor list and its
+summary rail are one page rather than two. Styling it turned up two defects worth
+recording because neither is visible in source review. Tailwind 4 emits a `@theme`
+variable only where it can see a utility class using it, and every status colour
+here is composed at runtime as `var(--color-{tone})` — four of six were dropped
+from the stylesheet, which renders as a status marker that is present, sized and
+transparent. And the plural machinery that had been deferred produced "1 monitors"
+on the first screen anybody sees, so it is no longer deferred: plurals now go
+through `Intl.PluralRules` rather than an inline `n === 1`, which is the rule that
+holds for a language with four forms as well as for English.
+
+There is a dashboard. It is an ordinary API client — one
 file in it calls `fetch`, and everything else goes through that — so there is no
 privileged endpoint behind it and no field it can set that a scoped API key
 cannot. Monitors can be created, edited, paused, checked, filtered, searched, and
@@ -131,12 +145,12 @@ by which "90% done" lasts three months.
 | Status pages | 4 | 6 |
 | REST API | 22 | 23 |
 | Kuma migration | 0 | 5 |
-| UI | 8 | 11 |
+| UI | 10 | 14 |
 | Security | 8 | 9 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 4 | 8 |
-| **Total** | **93** | **127** |
+| **Total** | **95** | **130** |
 
 Three rows were stale again and are corrected here rather than carried forward.
 Engine & storage read 18/19 with all nineteen ticked; Core monitoring features and
@@ -261,7 +275,10 @@ thing this file exists to prevent.
 - [x] Notification setup with test-fire and webhook template live preview — all thirteen channel types, with the fields mirroring `internal/notify/config.go`. Test-fire is a real delivery and reports what the provider said verbatim. The preview renders through the server's own renderer rather than a second one in the client, and the variable list is fetched from `/notification-channels/template-variables` rather than hardcoded — a preview that renders through different code than delivery is a preview that lies at the moment somebody is trusting it. A channel's last error is shown on the channel itself, because a channel that has quietly stopped working is the failure mode this feature cannot have
 - [x] Dark mode — three states, not two: light, dark, and follow the system. Applied before first paint by an inline script, because reading the preference from a module leaves one frame of the wrong theme on every load. The palette is semantic tokens defined once, with a separate soft variant for status colours used behind text — the same green that reads well as a 12px dot fails contrast as body text. Status is never colour alone
 - [x] i18n scaffolding, English complete, translation pipeline documented — every user-facing string in one flat catalogue with dotted identifier keys, a missing key rendering *as the key* rather than silently falling back to English, and locale negotiated by language subtag so `en-AU` resolves to `en`. Adding a language is a JSON file and one line in a map; it never touches a component. No plural machinery yet, deliberately, and the keys are shaped so adding `Intl.PluralRules` later renames nothing. The pipeline is in [web/README.md](../../web/README.md#internationalisation)
-- [ ] Screens for incidents, status pages, and settings — **the API is complete and there are no pages.** The navigation deliberately does not link to them: a link to a route the frontend does not implement lands on the shell's not-found and reads as data loss. Status pages are the notable gap, because the subscriber delivery below it works and nobody can create a page to use it without `curl`
+- [x] The dashboard is styled after the reference the product is measured against — a fixed left rail, the accent-dotted page titles, a near-black navy ground with one saturated green carrying "up" and an indigo reserved for the single primary action per screen. Status is never colour alone: the round marker carries a glyph, because roughly one in twelve men cannot reliably tell the up green from the down red and it is the most repeated element in the product. The monitor list and the summary rail are one screen rather than two, which is what the reference does and what removes a dashboard that only restated the list. Light mode is a full second palette, not an afterthought — the three-state toggle still means light, dark, and follow the system
+- [x] Read screens for incidents and status pages — the incident table with state, impact, duration and the pages each incident names; the status-page list with its visibility, published state, monitor count and a link to the public view. Both are client-filtered on purpose and unlike the monitor list: incidents are bounded by how often things break rather than by how much is monitored, so a hundred is a busy quarter
+- [ ] Write screens for incidents, status pages, and settings — **read works, create and edit do not.** Opening an incident, composing an update, building a status page and its sections, and editing instance settings are all `curl` today. Status pages are the sharp end: subscriber delivery works end to end and nobody can create a page to use it from the dashboard
+- [ ] A run of recent checks under each monitor in the list — the reference draws one and this does not, and the reason is in the API rather than in the styling: the list endpoint embeds the *last* heartbeat and there is no embed for a run of them, so a real strip would be one request per row, which is the precise fan-out both ADR-004 and the `include=` design exist to prevent. Drawing one from a single beat, or from an uptime ratio, would be inventing a history the client has not been told — so the row shows the two figures it genuinely has and the strip lives on the detail page. Closing this properly means an `include=heartbeats` that resolves a bounded run for the whole page in one query, which is spec surface and therefore not a frontend decision
 - [ ] The real-time half of ADR-004 — **reconciliation is built; scoped diffs are not.** The ADR specifies push over NATS, or an in-process bus in solo mode, for the monitor IDs on screen, and this build has no browser-facing channel for one. Staleness is therefore bounded by the poll interval rather than being near-zero for on-screen rows. The list controller is written against "subscribe to visible IDs, reconcile on interval" as its model, which the ADR notes is the thing that must be true from the start for the upgrade to be additive rather than a rewrite
 - [ ] The UI benchmark the load-test gate is supposed to hold — [ADR-004](../adr/004-ui-state-synchronisation.md) asserts two invariants on every release, and only the server-side one is measured today. Client payload size and render cost bounded by *viewport* rather than by total monitor count is the half a frontend can break on its own, and nothing yet checks it
 

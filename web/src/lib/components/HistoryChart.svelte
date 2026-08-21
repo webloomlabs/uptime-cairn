@@ -23,9 +23,19 @@
 	// changes it would otherwise keep the first render's geometry.
 	const plotHeight = $derived(height - padding.top - padding.bottom);
 
+	/**
+	 * The averages, which are what the line is drawn from.
+	 *
+	 * Deliberately *not* what the minimum and maximum below are drawn from. A
+	 * bucket already carries the extremes of the checks inside it, and reducing it
+	 * to its average throws them away — over a window held in a single bucket that
+	 * makes the three figures identical, which is how this was noticed.
+	 */
 	const measured = $derived(
 		buckets.map((b) => b.response_time_avg_ms).filter((v): v is number => v !== null)
 	);
+
+	/** The y-scale follows the line, which is the averages, not the extremes. */
 	const peak = $derived(measured.length ? Math.max(...measured) : 0);
 	// A flat zero-height chart for a monitor that always answers in under a
 	// millisecond is worse than a scale with headroom, so the ceiling never
@@ -73,6 +83,50 @@
 	);
 
 	const ticks = $derived([0, ceiling / 2, ceiling]);
+
+	/** The extremes of every check in the window, read from the buckets' own. */
+	function extreme(pick: (b: HistoryBucket) => number | null, reduce: (values: number[]) => number) {
+		const values = buckets.map(pick).filter((v): v is number => v !== null);
+		// Null is not zero: a window in which nothing was measured has no minimum,
+		// and reporting 0 ms would read as an impossibly fast response.
+		return values.length ? reduce(values) : null;
+	}
+
+	const slowest = $derived(extreme((b) => b.response_time_max_ms, (v) => Math.max(...v)));
+	const fastest = $derived(extreme((b) => b.response_time_min_ms, (v) => Math.min(...v)));
+
+	/**
+	 * The mean response time across the window, weighted by how many checks each
+	 * bucket holds.
+	 *
+	 * An unweighted mean of bucket averages is only correct when every bucket
+	 * holds the same number of checks, which is exactly what a window straddling
+	 * the start of monitoring does not do — one bucket with three checks would
+	 * count as heavily as one with sixty.
+	 *
+	 * The weight is the bucket's total check count, and that is an approximation
+	 * with a named limit: the schema exposes how many checks a bucket held but not
+	 * how many of them produced a timing, and a check that timed out has no
+	 * response time to contribute. Where every check yields a timing — the ordinary
+	 * case for a monitor that is up — the two are the same number. Closing the gap
+	 * properly means the response-time count on the wire, which is frozen-spec
+	 * surface rather than a frontend decision.
+	 */
+	const average = $derived.by(() => {
+		let total = 0;
+		let checks = 0;
+		for (const bucket of buckets) {
+			if (bucket.response_time_avg_ms === null) continue;
+			const weight =
+				bucket.up_count + bucket.down_count + bucket.maintenance_count + bucket.pending_count;
+			// A bucket that reported an average must have held a check; falling back
+			// to 1 keeps a malformed count from erasing it.
+			const n = weight > 0 ? weight : 1;
+			total += bucket.response_time_avg_ms * n;
+			checks += n;
+		}
+		return checks > 0 ? total / checks : null;
+	});
 </script>
 
 {#if buckets.length === 0}
@@ -109,7 +163,7 @@
 			<polyline
 				{points}
 				fill="none"
-				stroke="var(--accent)"
+				stroke="var(--color-up)"
 				stroke-width="2"
 				stroke-linejoin="round"
 				stroke-linecap="round"
@@ -118,7 +172,12 @@
 		{/each}
 
 		{#each isolated as { bucket, index } (index)}
-			<circle cx={x(index)} cy={y(bucket.response_time_avg_ms ?? 0)} r="2.5" fill="var(--accent)" />
+			<circle
+				cx={x(index)}
+				cy={y(bucket.response_time_avg_ms ?? 0)}
+				r="2.5"
+				fill="var(--color-up)"
+			/>
 		{/each}
 
 		<!-- Downtime underneath the line rather than on it: an outage is a
@@ -139,13 +198,17 @@
 		{/each}
 	</svg>
 
-	<div class="muted flex justify-between text-xs">
+	<div class="muted mt-1 flex justify-between text-xs">
 		<span>{formatAbsolute(buckets[0]?.bucket_start)}</span>
-		<span>
-			{t('monitor.responseTime')}: {formatResponseTime(
-				measured.length ? measured.reduce((a, b) => a + b, 0) / measured.length : null
-			)}
-		</span>
 		<span>{formatAbsolute(buckets[buckets.length - 1]?.bucket_start)}</span>
+	</div>
+
+	<div class="mt-4 grid grid-cols-3 gap-3 border-t pt-4" style="border-color: var(--border)">
+		{#each [{ label: t('chart.average'), value: average }, { label: t('chart.minimum'), value: fastest }, { label: t('chart.maximum'), value: slowest }] as stat (stat.label)}
+			<div>
+				<p class="text-lg font-semibold tabular-nums">{formatResponseTime(stat.value)}</p>
+				<p class="muted text-xs">{stat.label}</p>
+			</div>
+		{/each}
 	</div>
 {/if}

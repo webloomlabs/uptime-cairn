@@ -150,18 +150,11 @@
 
 <div class="mx-auto max-w-3xl px-4 py-10">
 	{#if needsPassword}
-		<form class="surface mx-auto max-w-sm space-y-4 rounded-lg p-5" onsubmit={unlock}>
+		<form class="card mx-auto max-w-sm space-y-4 p-6" onsubmit={unlock}>
 			<h1 class="font-semibold">{t('auth.password')}</h1>
 			<Field label={t('auth.password')} id="page-password">
 				{#snippet children({ id })}
-					<input
-						{id}
-						type="password"
-						class="w-full rounded-md border px-3 py-2 text-sm"
-						style="border-color: var(--border-strong); background-color: var(--surface)"
-						bind:value={password}
-						required
-					/>
+					<input {id} type="password" class="field" bind:value={password} required />
 				{/snippet}
 			</Field>
 			{#if unlockError}
@@ -209,7 +202,7 @@
 			<section class="mb-8 space-y-3">
 				<h2 class="font-semibold">{t('public.scheduledMaintenance')}</h2>
 				{#each sp.scheduled_maintenance as window (window.title + window.starts_at)}
-					<div class="surface rounded-lg p-4">
+					<div class="card p-5">
 						<p class="font-medium">{window.title}</p>
 						<p class="muted text-sm">
 							{formatAbsolute(window.starts_at)}
@@ -229,7 +222,7 @@
 				{#if section.description}
 					<p class="muted mb-2 text-sm">{section.description}</p>
 				{/if}
-				<div class="surface divide-y rounded-lg" style="border-color: var(--border)">
+				<div class="card divide-y" style="border-color: var(--border)">
 					{#each section.monitors as monitor (monitor.id)}
 						<div class="space-y-2 p-4" style="border-color: var(--border)">
 							<div class="flex flex-wrap items-baseline justify-between gap-2">
@@ -258,7 +251,7 @@
 		<section class="mb-8 space-y-3">
 			<h2 class="font-semibold">{t('public.pastIncidents')}</h2>
 			{#if sp.recent_incidents.length === 0}
-				<p class="muted surface rounded-lg p-4 text-sm">{t('public.noIncidents')}</p>
+				<p class="muted card p-5 text-sm">{t('public.noIncidents')}</p>
 			{:else}
 				{#each sp.recent_incidents as incident (incident.id)}
 					{@render incidentCard(incident)}
@@ -267,7 +260,7 @@
 		</section>
 
 		{#if sp.subscriptions_enabled}
-			<section class="surface mb-8 rounded-lg p-5">
+			<section class="card mb-8 p-6">
 				<h2 class="font-semibold">{t('public.subscribe')}</h2>
 				{#if subscribed}
 					<p class="mt-2 text-sm">{t('public.subscribeSent')}</p>
@@ -277,8 +270,7 @@
 							<span class="sr-only">{t('public.subscribeEmail')}</span>
 							<input
 								type="email"
-								class="w-full rounded-md border px-3 py-2 text-sm"
-								style="border-color: var(--border-strong); background-color: var(--surface)"
+								class="field"
 								bind:value={subscribeTarget}
 								placeholder={t('public.subscribeEmail')}
 								required
@@ -310,7 +302,7 @@
 </div>
 
 {#snippet incidentCard(incident: PublicIncident)}
-	<article class="surface rounded-lg p-4">
+	<article class="card p-5">
 		<div class="flex flex-wrap items-baseline justify-between gap-2">
 			<h3 class="font-medium">{incident.title}</h3>
 			<span

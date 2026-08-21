@@ -67,8 +67,10 @@
 		}
 	}
 
-	const inputClass = 'w-full rounded-md border px-3 py-2 text-sm';
-	const inputStyle = 'border-color: var(--border-strong); background-color: var(--surface)';
+	// Both defined in app.css, so every control in the product shares one
+	// treatment rather than each form carrying its own copy of it.
+	const inputClass = 'field';
+	const inputStyle = '';
 </script>
 
 <div class="flex min-h-full items-center justify-center p-6">
@@ -88,7 +90,7 @@
 			</p>
 		{/if}
 
-		<form class="surface space-y-4 rounded-lg p-5" onsubmit={submit}>
+		<form class="card space-y-4 p-6" onsubmit={submit}>
 			<Field label={t('auth.email')} id="email">
 				{#snippet children({ id })}
 					<input

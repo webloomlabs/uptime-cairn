@@ -28,15 +28,15 @@
 	} = $props();
 
 	const base =
-		'inline-flex items-center justify-center gap-2 rounded-md font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
-	const sizes = { sm: 'px-2.5 py-1 text-sm', md: 'px-3.5 py-2 text-sm' };
+		'inline-flex items-center justify-center gap-2 rounded-lg font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
+	const sizes = { sm: 'px-2.5 py-1.5 text-xs', md: 'px-4 py-2 text-sm' };
 	const variants = {
-		primary: 'text-[var(--accent-contrast)] bg-[var(--accent)] hover:opacity-90',
+		primary: 'text-[var(--accent-contrast)] bg-[var(--accent)] hover:bg-[var(--accent-hover)]',
 		secondary:
-			'border border-[var(--border-strong)] bg-[var(--surface-raised)] hover:bg-[var(--surface-sunken)]',
-		ghost: 'hover:bg-[var(--surface-sunken)]',
+			'border border-[var(--border)] bg-[var(--surface-raised)] hover:bg-[var(--surface-hover)]',
+		ghost: 'hover:bg-[var(--surface-hover)]',
 		danger:
-			'border border-[var(--color-down)] text-[var(--color-down)] hover:bg-[var(--color-down-soft)]'
+			'border border-[var(--border)] text-[var(--color-down)] hover:bg-[var(--color-down-soft)]'
 	};
 	const classes = $derived(`${base} ${sizes[size]} ${variants[variant]} ${extra}`);
 </script>

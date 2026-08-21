@@ -17,10 +17,13 @@ import en from './en.json';
  *   - **A missing key renders the key**, loudly, rather than falling back to
  *     English silently. A half-translated UI that looks finished is how a
  *     language ships with a third of its strings missing for two years.
- *   - **No plural machinery yet.** English needs two forms and a `{n}` counter
- *     covers it; a language with six is a real problem and deserves Intl.PluralRules
- *     rather than a guess made now. The catalogue keys are shaped so that adding
- *     it later does not rename anything.
+ *   - **Plurals go through `Intl.PluralRules`, not through `n === 1`.** A key with
+ *     a `count` gets its category appended — `monitors.total.one`,
+ *     `monitors.total.other` — and the browser decides which category a number
+ *     falls into for the active locale. English needs two forms and Polish needs
+ *     four; writing the English rule inline is how a language ships permanently
+ *     broken. A key with no plural variants is used as-is, so most strings pay
+ *     nothing for this.
  */
 
 export type Catalogue = Record<string, string>;
@@ -67,12 +70,29 @@ class I18nState {
 	}
 
 	translate(key: string, values?: Record<string, string | number>): string {
-		const template = this.catalogue[key];
+		const template = this.catalogue[this.resolve(key, values)];
 		if (template === undefined) return key;
 		if (!values) return template;
 		return template.replace(/\{(\w+)\}/g, (whole, name: string) =>
 			name in values ? String(values[name]) : whole
 		);
+	}
+
+	/**
+	 * Picks the plural variant when the caller passed a `count` and the catalogue
+	 * carries variants for this key. Falls straight through otherwise, so a key
+	 * with one form stays one lookup.
+	 */
+	private resolve(key: string, values?: Record<string, string | number>): string {
+		const count = values?.count;
+		if (typeof count !== 'number') return key;
+
+		const category = new Intl.PluralRules(this.locale).select(count);
+		if (this.catalogue[`${key}.${category}`] !== undefined) return `${key}.${category}`;
+		// `other` is the category every locale has, and the one a translator fills
+		// in first — so it is the fallback when a rarer category is missing.
+		if (this.catalogue[`${key}.other`] !== undefined) return `${key}.other`;
+		return key;
 	}
 }
 

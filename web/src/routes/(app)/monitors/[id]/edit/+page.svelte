@@ -4,6 +4,8 @@
 	import type { Monitor } from '$lib/types';
 	import { t } from '$lib/i18n/index.svelte';
 	import MonitorForm from '$lib/components/MonitorForm.svelte';
+	import PageTitle from '$lib/components/PageTitle.svelte';
+	import Icon from '$lib/components/Icon.svelte';
 	import Spinner from '$lib/components/Spinner.svelte';
 	import ErrorBox from '$lib/components/ErrorBox.svelte';
 
@@ -37,10 +39,14 @@
 	<Spinner />
 {:else}
 	<div class="space-y-5">
-		<div>
-			<a href="/monitors/{id}" class="muted text-sm underline">{monitor.name}</a>
-			<h1 class="mt-1 text-2xl font-semibold">{t('common.edit')}</h1>
-		</div>
+		<a
+			href="/monitors/{id}"
+			class="muted inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm transition-colors hover:bg-[var(--surface-hover)]"
+		>
+			<Icon name="chevronLeft" size={16} />
+			{monitor.name}
+		</a>
+		<PageTitle title={t('common.edit')} />
 		{#key monitor.id}
 			<MonitorForm {monitor} />
 		{/key}

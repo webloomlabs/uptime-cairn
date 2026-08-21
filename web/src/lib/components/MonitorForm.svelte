@@ -209,8 +209,10 @@
 		return values.includes(value) ? values.filter((v) => v !== value) : [...values, value];
 	}
 
-	const inputClass = 'w-full rounded-md border px-3 py-2 text-sm';
-	const inputStyle = 'border-color: var(--border-strong); background-color: var(--surface)';
+	// Both defined in app.css, so every control in the product shares one
+	// treatment rather than each form carrying its own copy of it.
+	const inputClass = 'field';
+	const inputStyle = '';
 </script>
 
 <form class="max-w-3xl space-y-6" onsubmit={submit}>
@@ -218,7 +220,7 @@
 		<ErrorBox {error} />
 	{/if}
 
-	<section class="surface space-y-4 rounded-lg p-4">
+	<section class="card space-y-4 p-5">
 		<Field label={t('form.name')} id="name" error={errorFor('/name')}>
 			{#snippet children({ id, describedBy, invalid })}
 				<input
@@ -268,7 +270,7 @@
 		<!-- A type this build does not describe. Rather than refuse, the config is
 		     edited as JSON: the server validates it either way, and a newer server
 		     stays usable from an older dashboard. -->
-		<section class="surface space-y-3 rounded-lg p-4">
+		<section class="card space-y-3 p-5">
 			<Field label="Configuration (JSON)" id="raw-config" error={errorFor('/config')}>
 				{#snippet children({ id, describedBy, invalid })}
 					<textarea
@@ -284,7 +286,7 @@
 			</Field>
 		</section>
 	{:else if spec.fields.length > 0}
-		<section class="surface space-y-4 rounded-lg p-4">
+		<section class="card space-y-4 p-5">
 			{#each basic as field (field.key)}
 				{@render configField(field)}
 			{/each}
@@ -311,7 +313,7 @@
 		</section>
 	{/if}
 
-	<section class="surface grid gap-4 rounded-lg p-4 sm:grid-cols-2">
+	<section class="card grid gap-4 p-5 sm:grid-cols-2">
 		<Field
 			label={t('form.interval')}
 			id="interval"
@@ -404,7 +406,7 @@
 		</Field>
 	</section>
 
-	<section class="surface space-y-3 rounded-lg p-4">
+	<section class="card space-y-3 p-5">
 		<label class="flex items-center gap-2 text-sm">
 			<input type="checkbox" class="h-4 w-4" bind:checked={enabled} />
 			{t('form.enabled')}
@@ -423,7 +425,7 @@
 	</section>
 
 	{#if groups.length || tags.length || channels.length}
-		<section class="surface space-y-4 rounded-lg p-4">
+		<section class="card space-y-4 p-5">
 			{#if groups.length}
 				<Field label={t('form.group')} id="group" optional error={errorFor('/group_id')}>
 					{#snippet children({ id })}
@@ -491,7 +493,7 @@
 		<Button type="submit" variant="primary" loading={saving}>
 			{editing ? t('common.save') : t('common.create')}
 		</Button>
-		<Button href={editing ? `/monitors/${monitor!.id}` : '/monitors'} variant="ghost">
+		<Button href={editing ? `/monitors/${monitor!.id}` : '/'} variant="ghost">
 			{t('common.cancel')}
 		</Button>
 	</div>

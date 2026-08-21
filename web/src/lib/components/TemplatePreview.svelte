@@ -75,7 +75,7 @@
 	});
 </script>
 
-<div class="surface space-y-2 rounded-lg p-3">
+<div class="card space-y-2 p-4">
 	<p class="text-sm font-medium">{label} — preview</p>
 
 	{#if pending && !preview}
