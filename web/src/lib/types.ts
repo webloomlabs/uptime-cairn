@@ -14,10 +14,22 @@ export type Page<T> = {
 
 export type MonitorStatus = 'up' | 'down' | 'pending' | 'paused' | 'maintenance';
 
+/**
+ * A single check's outcome, which has two values a monitor's status never takes.
+ *
+ * `unknown` means the probe could not perform the check at all — a resolver it
+ * cannot reach, a capability it does not have — and `skipped` means the check
+ * never started. Both say something about the probe rather than about the
+ * target, so neither moves the monitor's verdict or its uptime figure. A client
+ * that types these as MonitorStatus renders them as "unknown" by accident and
+ * never says why nothing is happening.
+ */
+export type CheckStatus = MonitorStatus | 'unknown' | 'skipped';
+
 export type Heartbeat = {
 	monitor_id: string;
 	time: string;
-	status: MonitorStatus;
+	status: CheckStatus;
 	response_time_ms: number | null;
 	message: string | null;
 	code: string | null;

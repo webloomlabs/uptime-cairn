@@ -14,7 +14,12 @@
 	 * it, because a smooth line drawn through an outage is a picture of an outage
 	 * that did not happen.
 	 */
-	let { buckets, height = 160 }: { buckets: HistoryBucket[]; height?: number } = $props();
+	let {
+		buckets,
+		from = undefined,
+		to = undefined,
+		height = 160
+	}: { buckets: HistoryBucket[]; from?: string; to?: string; height?: number } = $props();
 
 	const width = 900;
 	const padding = { top: 8, right: 8, bottom: 22, left: 44 };
@@ -85,15 +90,28 @@
 	const ticks = $derived([0, ceiling / 2, ceiling]);
 
 	/** The extremes of every check in the window, read from the buckets' own. */
-	function extreme(pick: (b: HistoryBucket) => number | null, reduce: (values: number[]) => number) {
+	function extreme(
+		pick: (b: HistoryBucket) => number | null,
+		reduce: (values: number[]) => number
+	) {
 		const values = buckets.map(pick).filter((v): v is number => v !== null);
 		// Null is not zero: a window in which nothing was measured has no minimum,
 		// and reporting 0 ms would read as an impossibly fast response.
 		return values.length ? reduce(values) : null;
 	}
 
-	const slowest = $derived(extreme((b) => b.response_time_max_ms, (v) => Math.max(...v)));
-	const fastest = $derived(extreme((b) => b.response_time_min_ms, (v) => Math.min(...v)));
+	const slowest = $derived(
+		extreme(
+			(b) => b.response_time_max_ms,
+			(v) => Math.max(...v)
+		)
+	);
+	const fastest = $derived(
+		extreme(
+			(b) => b.response_time_min_ms,
+			(v) => Math.min(...v)
+		)
+	);
 
 	/**
 	 * The mean response time across the window, weighted by how many checks each
@@ -198,9 +216,13 @@
 		{/each}
 	</svg>
 
+	<!-- The window that was asked for, not the span of the buckets that came back.
+	     A window held in a single bucket has one bucket_start, so labelling both
+	     ends from the data prints the same timestamp twice and claims the chart
+	     covers no time at all. -->
 	<div class="muted mt-1 flex justify-between text-xs">
-		<span>{formatAbsolute(buckets[0]?.bucket_start)}</span>
-		<span>{formatAbsolute(buckets[buckets.length - 1]?.bucket_start)}</span>
+		<span>{formatAbsolute(from ?? buckets[0]?.bucket_start)}</span>
+		<span>{formatAbsolute(to ?? buckets[buckets.length - 1]?.bucket_start)}</span>
 	</div>
 
 	<div class="mt-4 grid grid-cols-3 gap-3 border-t pt-4" style="border-color: var(--border)">

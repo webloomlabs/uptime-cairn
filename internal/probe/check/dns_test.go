@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -393,5 +394,141 @@ func TestReverseName(t *testing.T) {
 	want := "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa."
 	if got := name.String(); got != want {
 		t.Errorf("PTR name = %q, want %q", got, want)
+	}
+}
+
+// startBlackHoleResolver accepts queries and never answers, which is what an
+// unreachable nameserver actually looks like from the client: silence until the
+// deadline. A closed port is not the same thing — it refuses instantly, so a
+// test using one never exercises the timeout path, which is the path a host with
+// a dead IPv6 nameserver in resolv.conf takes on every single check.
+func startBlackHoleResolver(t *testing.T) string {
+	t.Helper()
+
+	packet, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	t.Cleanup(func() { _ = packet.Close() })
+
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			if _, _, err := packet.ReadFrom(buf); err != nil {
+				return
+			}
+			// Read and discard. No reply, ever.
+		}
+	}()
+	return packet.LocalAddr().String()
+}
+
+// resolv.conf is a fallback list, and every resolver implementation walks it
+// until one answers. Querying only the first entry means a host whose primary
+// nameserver is unreachable can never run a DNS monitor — and because an
+// unreachable resolver is reported as unknown rather than down, the symptom is
+// not an alert but a monitor stuck on pending forever, showing no failures while
+// monitoring nothing. That is the shape of the bug this covers.
+func TestDNSWalksPastAnUnreachableResolver(t *testing.T) {
+	t.Parallel()
+
+	working := startFakeResolver(t, &fakeResolver{
+		answers: func(dnsmessage.Question) []dnsmessage.Resource {
+			return []dnsmessage.Resource{aRecord("example.test.", "192.0.2.10")}
+		},
+	})
+	dead := startBlackHoleResolver(t)
+
+	name, err := queryName("example.test", "A")
+	if err != nil {
+		t.Fatalf("query name: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	server, header, answers, _, failure := query(ctx,
+		[]string{dead, working.addr}, name, recordTypes["A"])
+	if failure != nil {
+		t.Fatalf("no resolver answered: %s", failure.Message)
+	}
+	if server != working.addr {
+		t.Errorf("answered by %q, want the second resolver %q", server, working.addr)
+	}
+	if header.RCode != dnsmessage.RCodeSuccess {
+		t.Errorf("rcode = %v, want success", header.RCode)
+	}
+	if len(answers) != 1 {
+		t.Fatalf("got %d answers, want 1", len(answers))
+	}
+}
+
+// With nothing reachable the verdict is still unknown rather than down — the
+// probe could not ask, which says nothing about the record. The message names
+// the resolver the operator expected to be used, and says how many others were
+// tried, so "DNS is broken" and "this host's resolvers are unreachable" are
+// distinguishable without reading a log.
+func TestDNSReportsUnknownWhenNoResolverAnswers(t *testing.T) {
+	t.Parallel()
+
+	first := startBlackHoleResolver(t)
+	second := startBlackHoleResolver(t)
+
+	name, err := queryName("example.test", "A")
+	if err != nil {
+		t.Fatalf("query name: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, _, _, _, failure := query(ctx, []string{first, second}, name, recordTypes["A"])
+	if failure == nil {
+		t.Fatal("a query against two dead resolvers reported success")
+	}
+	if failure.Status != model.StatusUnknown {
+		t.Errorf("status = %s, want unknown", failure.Status)
+	}
+	if !strings.Contains(failure.Message, first) {
+		t.Errorf("message does not name the first resolver tried: %s", failure.Message)
+	}
+	if !strings.Contains(failure.Message, "1 other") {
+		t.Errorf("message does not say the others were tried: %s", failure.Message)
+	}
+}
+
+// Every candidate must share one budget. Three dead nameservers cannot each be
+// allowed the monitor's whole timeout, or a DNS check on a host with a broken
+// primary resolver takes three times as long as the operator configured.
+func TestDNSSharesTheTimeoutAcrossResolvers(t *testing.T) {
+	t.Parallel()
+
+	dead := []string{
+		startBlackHoleResolver(t),
+		startBlackHoleResolver(t),
+		startBlackHoleResolver(t),
+	}
+
+	name, err := queryName("example.test", "A")
+	if err != nil {
+		t.Fatalf("query name: %v", err)
+	}
+
+	const budget = 900 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	start := time.Now()
+	_, _, _, _, failure := query(ctx, dead, name, recordTypes["A"])
+	elapsed := time.Since(start)
+
+	if failure == nil {
+		t.Fatal("dead resolvers reported success")
+	}
+	// A generous ceiling: what is under test is that the walk stays inside one
+	// budget rather than taking one per candidate, not the precision of the
+	// division.
+	if elapsed > budget*2 {
+		t.Errorf("walking %d resolvers took %s against a %s budget", len(dead), elapsed.Round(time.Millisecond), budget)
 	}
 }

@@ -326,7 +326,7 @@
 					</div>
 				</div>
 				{#if history}
-					<HistoryChart buckets={history.data} />
+					<HistoryChart buckets={history.data} from={history.from} to={history.to} />
 				{:else}
 					<Spinner />
 				{/if}

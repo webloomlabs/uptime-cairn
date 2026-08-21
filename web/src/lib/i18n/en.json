@@ -23,7 +23,8 @@
 	"status.pending": "Pending",
 	"status.paused": "Paused",
 	"status.maintenance": "Maintenance",
-	"status.unknown": "Unknown",
+	"status.unknown": "Could not check",
+	"status.skipped": "Skipped",
 	"status.degraded": "Degraded",
 
 	"common.loading": "Loading…",

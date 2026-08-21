@@ -190,7 +190,7 @@ thing this file exists to prevent.
 - [x] HTTP JSON-path assertions — a deliberately small subset (root, field names, array indices); anything outside it is rejected at validation rather than ignored at check time
 - [x] TCP port
 - [x] ICMP ping, including restricted-container detection and TCP fallback — unprivileged datagram socket first, raw second, and unknown rather than down when neither opens
-- [x] DNS record — all ten record types, a named resolver, the response code recorded, and the TCP retry on truncation
+- [x] DNS record — all ten record types, a named resolver, the response code recorded, and the TCP retry on truncation. With no resolver named it walks every nameserver in `resolv.conf` in file order rather than querying only the first: that file is a fallback list, and a host whose primary nameserver is unreachable could otherwise never run a DNS monitor. The failure was quiet rather than loud, which is why it needed finding twice — an unreachable resolver is reported `unknown` rather than down, correctly, so the symptom was a monitor sitting on pending forever showing no failures while monitoring nothing. Every candidate shares one timeout, so three dead nameservers cannot cost three times what the operator configured
 - [x] SSL/TLS expiry — the handshake is made unverified and the chain checked by hand, so an expired certificate is reported as expiry rather than as a generic TLS error
 - [x] Domain expiry (RDAP/WHOIS), with a per-type minimum interval — RFC 9224 bootstrap, WHOIS fallback, one registry lookup a day per domain
 - [x] Push / heartbeat dead-man's-switch — control-plane-side, never assigned to a probe

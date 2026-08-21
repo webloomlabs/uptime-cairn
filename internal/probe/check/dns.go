@@ -143,27 +143,16 @@ func (d *DNS) Check(ctx context.Context, config []byte) Observation {
 		return Observation{Status: model.StatusUnknown, Class: ClassConfig, Message: err.Error()}
 	}
 
-	server, err := resolverAddress(cfg)
+	servers, err := resolverAddresses(cfg)
 	if err != nil {
 		// No resolver configured and none discoverable: this probe cannot ask
 		// the question. That is unknown, not down.
 		return Observation{Status: model.StatusUnknown, Class: ClassConfig, Message: err.Error()}
 	}
 
-	start := time.Now()
-	header, answers, err := exchange(ctx, server, name, recordTypes[cfg.RecordType])
-	elapsed := time.Since(start)
-	if err != nil {
-		obs := classify(err, elapsed)
-		// Every failure here is a failure to reach the resolver, not a verdict
-		// about the record. A resolver we cannot reach tells us nothing about
-		// whether the name resolves elsewhere.
-		if obs.Status == model.StatusDown {
-			obs.Status = model.StatusUnknown
-		}
-		obs.Class = ClassDNS
-		obs.Message = "querying " + server + ": " + obs.Message
-		return obs
+	server, header, answers, elapsed, failure := query(ctx, servers, name, recordTypes[cfg.RecordType])
+	if failure != nil {
+		return *failure
 	}
 
 	obs := Observation{
@@ -282,6 +271,79 @@ func sortFold(s []string) {
 // exchange sends one query over UDP and retries over TCP when the answer is
 // truncated. Skipping the TCP retry is how a monitor comes to report "no TXT
 // record" for a domain whose TXT records are simply larger than 512 bytes.
+// query asks each resolver in turn and returns the first that answers.
+//
+// "Answers" means the resolver responded, not that it liked the question:
+// NXDOMAIN is a verdict about the record and stops the walk, because a second
+// resolver disagreeing with the first is not something to paper over. Only a
+// resolver that could not be reached moves on to the next one.
+//
+// Each attempt gets an equal share of whatever time is left, so a host with
+// three nameservers and a dead first one cannot spend the monitor's entire
+// timeout discovering that. With one candidate the share is the whole budget,
+// which is what a monitor naming its own resolver should get.
+//
+// The failure returned when nothing answers describes the *first* resolver
+// tried, because that is the one the operator expected to be used, and appends
+// how many others were tried after it.
+func query(ctx context.Context, servers []string, name dnsmessage.Name, recordType dnsmessage.Type) (
+	server string, header dnsmessage.Header, answers []answer, elapsed time.Duration, failure *Observation,
+) {
+	var first *Observation
+
+	for i, candidate := range servers {
+		attemptCtx, cancel := shareOfDeadline(ctx, len(servers)-i)
+
+		start := time.Now()
+		h, a, err := exchange(attemptCtx, candidate, name, recordType)
+		took := time.Since(start)
+		cancel()
+
+		if err == nil {
+			return candidate, h, a, took, nil
+		}
+
+		obs := classify(err, took)
+		// A failure here is a failure to reach the resolver, not a verdict about
+		// the record: a resolver we cannot reach tells us nothing about whether
+		// the name resolves elsewhere.
+		if obs.Status == model.StatusDown {
+			obs.Status = model.StatusUnknown
+		}
+		obs.Class = ClassDNS
+		obs.Message = "querying " + candidate + ": " + obs.Message
+		if first == nil {
+			first = &obs
+		}
+
+		// The parent deadline is spent; trying the rest would only report the
+		// same cancellation.
+		if ctx.Err() != nil {
+			break
+		}
+	}
+
+	if len(servers) > 1 && first != nil {
+		first.Message += fmt.Sprintf(" (and %d other resolver(s) from /etc/resolv.conf)", len(servers)-1)
+	}
+	return "", dnsmessage.Header{}, nil, 0, first
+}
+
+// shareOfDeadline gives one attempt its portion of the time left, and never more
+// than the caller has. With no deadline on the parent there is nothing to divide,
+// so the attempt inherits the parent unchanged.
+func shareOfDeadline(ctx context.Context, remaining int) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok || remaining <= 1 {
+		return context.WithCancel(ctx)
+	}
+	share := time.Until(deadline) / time.Duration(remaining)
+	if share <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, share)
+}
+
 func exchange(ctx context.Context, server string, name dnsmessage.Name, recordType dnsmessage.Type) (dnsmessage.Header, []answer, error) {
 	var idBytes [2]byte
 	if _, err := rand.Read(idBytes[:]); err != nil {
@@ -582,23 +644,39 @@ func reverseName(ip net.IP) (string, error) {
 	return sb.String(), nil
 }
 
-// resolverAddress picks the server to query: the configured one, or the first
-// nameserver in resolv.conf. Falling back to net.Resolver here would defeat the
-// point — a DNS monitor exists to interrogate a named resolver.
-func resolverAddress(cfg dnsConfig) (string, error) {
+// resolverAddresses picks the servers to query, in the order they will be tried.
+//
+// A configured resolver is the whole list, and deliberately so: a DNS monitor
+// naming a resolver exists to interrogate *that* resolver, and quietly asking a
+// different one would answer a question nobody asked. Falling back to
+// net.Resolver would defeat the same point.
+//
+// With none configured the list is every nameserver in resolv.conf, in file
+// order. That file is a fallback list — every resolver implementation walks it
+// until one answers — and taking only the first entry means a host whose primary
+// nameserver is unreachable can never run a DNS monitor at all. Because a
+// resolver that cannot be reached is reported as `unknown` rather than down (see
+// Check), the symptom is not an alert: it is a monitor that sits on pending
+// forever, showing no failures, monitoring nothing.
+func resolverAddresses(cfg dnsConfig) ([]string, error) {
 	port := defaultResolverPort
 	if cfg.ResolverPort != nil {
 		port = *cfg.ResolverPort
 	}
 	if cfg.Resolver != nil && *cfg.Resolver != "" {
-		return net.JoinHostPort(*cfg.Resolver, strconv.Itoa(port)), nil
+		return []string{net.JoinHostPort(*cfg.Resolver, strconv.Itoa(port))}, nil
 	}
 
 	servers, err := systemNameservers()
 	if err != nil || len(servers) == 0 {
-		return "", errors.New("no resolver configured and none found in /etc/resolv.conf; set resolver on this monitor")
+		return nil, errors.New("no resolver configured and none found in /etc/resolv.conf; set resolver on this monitor")
 	}
-	return net.JoinHostPort(servers[0], strconv.Itoa(port)), nil
+
+	out := make([]string, 0, len(servers))
+	for _, server := range servers {
+		out = append(out, net.JoinHostPort(server, strconv.Itoa(port)))
+	}
+	return out, nil
 }
 
 func systemNameservers() ([]string, error) {
