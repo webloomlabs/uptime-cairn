@@ -170,7 +170,6 @@
 		const body: Record<string, unknown> = {
 			name,
 			description: description || null,
-			type,
 			config: payloadConfig,
 			enabled,
 			interval_seconds: interval,
@@ -183,6 +182,13 @@
 			group_id: groupId || null,
 			tag_ids: tagIds
 		};
+		// `type` is set on create and never changed. A monitor that changed type
+		// would carry the previous type's config, and the credential inside it, so
+		// the update body has no such field at all — and the server decodes with
+		// DisallowUnknownFields, which turns sending one into a 400 on every edit
+		// rather than a silently ignored key.
+		if (!editing) body.type = type;
+
 		// Absent means "attach the defaults" and an empty array means "deliberately
 		// silent"; the two are different and the server distinguishes them. So the
 		// key is only sent once somebody has actually chosen.
