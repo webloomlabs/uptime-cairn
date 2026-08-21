@@ -63,12 +63,12 @@
 </script>
 
 <div
-	class="fixed inset-x-0 bottom-0 z-20 border-t px-4 py-3"
+	class="fixed inset-x-0 bottom-0 z-20 border-t px-4 py-3 sm:px-8 lg:pl-64"
 	style="border-color: var(--border); background-color: var(--surface-raised)"
 	role="region"
 	aria-label={t('monitors.selected', { count: ids.length })}
 >
-	<div class="mx-auto flex max-w-7xl flex-wrap items-center gap-2">
+	<div class="flex flex-wrap items-center gap-2">
 		<span class="text-sm font-medium">{t('monitors.selected', { count: ids.length })}</span>
 
 		<Button size="sm" loading={running === 'enable'} onclick={() => run('enable')}>

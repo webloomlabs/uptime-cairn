@@ -100,7 +100,14 @@ export type Group = {
 	name: string;
 	description: string | null;
 	parent_group_id: string | null;
+	/**
+	 * The worst status among the group's monitors, its children's included, and
+	 * absent when it holds none. "No monitors" is a different statement from
+	 * "up", and rendering it green would be the dashboard inventing health
+	 * (internal/api/dto.go).
+	 */
 	status?: MonitorStatus;
+	monitor_count: number;
 	created_at: string;
 	updated_at: string;
 };
@@ -108,8 +115,11 @@ export type Group = {
 export type Tag = {
 	id: string;
 	name: string;
+	/** Derived from the name by the server and never supplied by a client. */
 	slug: string;
 	color: string | null;
+	description: string | null;
+	monitor_count: number;
 	created_at: string;
 	updated_at: string;
 };

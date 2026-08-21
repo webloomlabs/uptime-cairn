@@ -58,6 +58,17 @@
 					icon: 'notifications',
 					scope: 'notifications:read',
 					capability: 'notifications'
+				},
+				// Groups and tags are one screen because they are one job. The link
+				// takes a single scope, so it is gated on groups:read; the page
+				// itself checks both and renders only the half the principal may
+				// read. A cookie session holds its whole role's scope set, so the
+				// two come together for everyone who actually browses this nav.
+				{
+					href: '/groups',
+					label: t('nav.taxonomy'),
+					icon: 'tag',
+					scope: 'groups:read'
 				}
 			] satisfies Link[]
 		).filter(
