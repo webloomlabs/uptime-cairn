@@ -1,6 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-	<rect width="32" height="32" rx="7" fill="#0f766e" />
-	<path d="M16 5.5 22.5 17h-13L16 5.5Z" fill="#5eead4" />
-	<path d="M16 14.5 21 23H11l5-8.5Z" fill="#f0fdfa" />
-	<rect x="9" y="24.5" width="14" height="2.5" rx="1.25" fill="#5eead4" />
+	<!--
+	  The cairn mark on a tile. A favicon is square and the mark is 1.94:1, so the
+	  bars are re-proportioned to fill the square rather than the artwork being
+	  letterboxed into a strip that vanishes at 16px. Widths keep the logo's
+	  99:198:300 ratio and the left alignment; only the vertical rhythm is
+	  redrawn. The tile is the rail's own ground with the mark in the product's
+	  one green, so the tab matches what the sidebar shows — and a solid tile is
+	  what keeps it legible against both light and dark browser chrome.
+	-->
+	<rect width="32" height="32" rx="7" fill="#10141c" />
+	<g fill="#32d583">
+		<rect x="4" y="4" width="7.92" height="6" rx="3" />
+		<rect x="4" y="13" width="15.84" height="6" rx="3" />
+		<rect x="4" y="22" width="24" height="6" rx="3" />
+	</g>
 </svg>
