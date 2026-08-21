@@ -279,10 +279,22 @@ chosen later.
 
 The two subscription links are frontend routes rather than the API operations
 themselves because a link in an email is followed with `GET`, and neither
-operation is a `GET`. **The frontend does not implement them yet** — the UI is
-Month 3 — so a subscriber who follows one today reaches the SPA shell. The
-messages are still correct and the API operations behind them work; what is
-missing is the two pages that call them.
+operation is a `GET`. All three are implemented (`web/src/routes/status/[slug]`
+and `web/src/routes/subscriptions/`), and the server answers them with the
+application shell rather than a 404 — see the SPA fallback in
+`internal/api/ui.go`, which has a test naming these three paths specifically,
+because a link in somebody's inbox cannot be reissued.
+
+The two pages behave differently on arrival, and the difference is deliberate.
+**Confirmation runs on load**: the person has already clicked, in their mail
+client, and asking twice is how a double opt-in loses people. A link-scanner
+prefetch reaching it does confirm the subscription, which is acceptable for that
+operation precisely because a scanner running in the recipient's own mail path is
+evidence the message arrived at the address that asked for it.
+**Unsubscribing waits for a button press**, for the mirror-image reason: mail
+clients prefetch, security appliances follow every link in a message, and
+archivers crawl. Acting on load would quietly remove people who never clicked
+anything, and they would not find out until they missed an outage.
 
 `base_url` comes from `general.base_url` in `/api/v1/settings` and is required:
 with none configured, a bulletin is recorded as `suppressed` with that reason

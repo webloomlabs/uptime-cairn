@@ -4,10 +4,13 @@
 /bin/
 
 # The frontend build lands in internal/ui/dist and is embedded at compile time.
-# The placeholder is committed so //go:embed has something to find before the
-# frontend exists; everything else there is generated.
+# Everything there is generated, including index.html, so nothing is committed
+# except .gitkeep — which exists only so //go:embed has a non-empty directory to
+# find in a clean checkout. Tracking the built index.html would mean every
+# developer who runs the frontend build has a dirty tree and eventually commits
+# a build artefact.
 /internal/ui/dist/*
-!/internal/ui/dist/index.html
+!/internal/ui/dist/.gitkeep
 
 # Frontend
 /web/node_modules/

@@ -90,9 +90,18 @@ buf generate              # Go + gRPC stubs; not committed, nothing imports them
 is deliberate: a skeleton that starts and silently does nothing gets discovered
 by a user, and one that says so gets discovered by the developer who wired it.
 
-The frontend build (`web/` into `internal/ui/dist/`) is not wired up yet;
-`internal/ui/dist/index.html` is a committed placeholder so `//go:embed` has a
-directory to find in a clean checkout.
+The frontend builds from `web/` into `internal/ui/dist/`, which the binary embeds
+at compile time:
+
+```sh
+cd web && npm install && npm run build   # writes ../internal/ui/dist
+cd .. && go build ./cmd/cairn
+```
+
+`internal/ui/dist/` is generated in full and gitignored apart from `.gitkeep`,
+which exists only so `//go:embed` has a non-empty directory to find. Skipping the
+frontend build is supported: the server compiles and the API works, and the
+dashboard route says so rather than 404ing. See [web/README.md](../../web/README.md).
 
 ## What is deliberately not here yet
 

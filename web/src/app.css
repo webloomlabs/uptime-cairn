@@ -1,0 +1,129 @@
+@import 'tailwindcss';
+
+/* Dark mode is a class on <html>, set before first paint by the inline script in
+   app.html. The variant has to be declared because Tailwind 4 defaults to the
+   media query alone, and an explicit user choice has to be able to beat the OS. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* The palette is defined once, in terms of what a colour *means* rather than
+   what it looks like, because every one of these has to work in two themes and
+   a status colour that drifts between a badge and a chart is how a dashboard
+   starts lying quietly. Status colours are also given a text-on-surface pair:
+   the same green that reads well as a 12px dot fails contrast as body text. */
+@theme {
+	--color-up: oklch(0.68 0.15 155);
+	--color-up-soft: oklch(0.95 0.04 155);
+	--color-down: oklch(0.62 0.21 25);
+	--color-down-soft: oklch(0.95 0.04 25);
+	--color-pending: oklch(0.76 0.14 75);
+	--color-pending-soft: oklch(0.96 0.05 75);
+	--color-paused: oklch(0.65 0.02 260);
+	--color-paused-soft: oklch(0.95 0.005 260);
+	--color-maintenance: oklch(0.66 0.13 250);
+	--color-maintenance-soft: oklch(0.95 0.03 250);
+	--color-unknown: oklch(0.7 0.01 260);
+	--color-unknown-soft: oklch(0.95 0.003 260);
+}
+
+@layer base {
+	:root {
+		--surface: oklch(0.99 0.002 250);
+		--surface-raised: oklch(1 0 0);
+		--surface-sunken: oklch(0.96 0.004 250);
+		--border: oklch(0.9 0.006 250);
+		--border-strong: oklch(0.82 0.01 250);
+		--text: oklch(0.25 0.012 260);
+		--text-muted: oklch(0.52 0.012 260);
+		--accent: oklch(0.55 0.11 195);
+		--accent-contrast: oklch(0.99 0 0);
+		--ring: oklch(0.6 0.1 195);
+	}
+
+	.dark {
+		--surface: oklch(0.19 0.012 260);
+		--surface-raised: oklch(0.23 0.013 260);
+		--surface-sunken: oklch(0.15 0.01 260);
+		--border: oklch(0.31 0.012 260);
+		--border-strong: oklch(0.42 0.014 260);
+		--text: oklch(0.94 0.005 260);
+		--text-muted: oklch(0.68 0.012 260);
+		--accent: oklch(0.72 0.11 190);
+		--accent-contrast: oklch(0.17 0.01 260);
+		--ring: oklch(0.68 0.1 190);
+
+		/* The soft fills are backgrounds behind text in both themes, so they
+		   invert rather than merely darken — a 95% tint on a dark surface is a
+		   light rectangle, not a subtle one. */
+		--color-up-soft: oklch(0.3 0.06 155);
+		--color-down-soft: oklch(0.32 0.08 25);
+		--color-pending-soft: oklch(0.33 0.07 75);
+		--color-paused-soft: oklch(0.28 0.01 260);
+		--color-maintenance-soft: oklch(0.31 0.06 250);
+		--color-unknown-soft: oklch(0.27 0.006 260);
+	}
+
+	html {
+		background-color: var(--surface);
+		color: var(--text);
+	}
+
+	body {
+		background-color: var(--surface);
+		color: var(--text);
+		-webkit-font-smoothing: antialiased;
+		font-family:
+			ui-sans-serif,
+			system-ui,
+			-apple-system,
+			'Segoe UI',
+			Roboto,
+			'Helvetica Neue',
+			Arial,
+			sans-serif;
+	}
+
+	/* One focus treatment for everything, and never `outline: none`: the
+	   keyboard path through this UI is the one an operator uses at 3am. */
+	:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+		border-radius: 0.25rem;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
+	}
+}
+
+@layer components {
+	.surface {
+		background-color: var(--surface-raised);
+		border: 1px solid var(--border);
+	}
+
+	.muted {
+		color: var(--text-muted);
+	}
+
+	/* Skip link: visually hidden until focused. */
+	.skip-link {
+		position: absolute;
+		left: -9999px;
+		top: 0;
+		z-index: 100;
+	}
+	.skip-link:focus {
+		left: 0.5rem;
+		top: 0.5rem;
+		padding: 0.5rem 0.75rem;
+		background: var(--surface-raised);
+		border: 1px solid var(--border-strong);
+		border-radius: 0.375rem;
+	}
+}

@@ -17,7 +17,13 @@ import (
 	"io/fs"
 )
 
-//go:embed dist
+// all: rather than a bare pattern, and it is load-bearing rather than tidy.
+// //go:embed skips any path whose name begins with `_` or `.`, and SvelteKit
+// puts every hashed asset under `_app/`. Without the prefix the binary compiles,
+// starts, and serves index.html referencing a bundle that is not in it — a
+// dashboard that is blank in the browser and silent in the log.
+//
+//go:embed all:dist
 var dist embed.FS
 
 // FS returns the embedded frontend rooted at dist/, ready to serve.

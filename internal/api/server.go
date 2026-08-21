@@ -381,8 +381,13 @@ func (s *Server) Handler() http.Handler {
 
 	// Registered without a method: "GET /" would be more specific in method and
 	// less specific in path than "/api/v1/", which Go rejects as ambiguous.
+	//
+	// newSPAHandler rather than a plain file server: the dashboard resolves its
+	// own routes, so an unknown document path has to return the shell. The three
+	// URLs subscriber mail carries are client-side routes, and a file server
+	// answers all of them with 404 (see ui.go).
 	if assets, err := ui.FS(); err == nil {
-		mux.Handle("/", http.FileServerFS(assets))
+		mux.Handle("/", newSPAHandler(assets))
 	} else {
 		s.log.Error("embedded UI unavailable", "error", err)
 	}

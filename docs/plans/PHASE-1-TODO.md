@@ -3,7 +3,32 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
-**Status: 2026-08-19.** The 5,000-monitor claim is measured against the real
+**Status: 2026-08-21.** There is a dashboard. It is an ordinary API client — one
+file in it calls `fetch`, and everything else goes through that — so there is no
+privileged endpoint behind it and no field it can set that a scoped API key
+cannot. Monitors can be created, edited, paused, checked, filtered, searched, and
+changed a thousand at a time from a browser; notification channels can be built
+and test-fired with the template preview rendering through the server's own
+renderer rather than a second one in the client. The public status page and the
+two links subscriber mail carries are answered by real pages, which closes the one
+thing the delivery work had to leave open.
+
+It is built to [ADR-004](../adr/004-ui-state-synchronisation.md) rather than
+merely near it: every list is cursor-paginated and filtered server-side with no
+small-install shortcut, and a filtered view reconciles against the membership
+signal instead of being pushed full state. The half that is missing is the
+real-time one, and it is missing for a reason that is visible in the API — there
+is no browser-facing channel for scoped diffs in this build, so staleness is
+bounded by the poll interval rather than being near-zero on screen.
+
+Building it found two bugs that had nothing to do with the frontend. `//go:embed
+dist` silently skips every path beginning with `_`, and SvelteKit puts the whole
+bundle under `_app/` — the binary compiled, started, and served an `index.html`
+referencing files it did not contain. And the server had no SPA fallback, so
+every deep link 404'd, including the three that go out in subscriber mail and
+cannot be reissued. Both now have tests.
+
+**2026-08-19.** The 5,000-monitor claim is measured against the real
 engine rather than against the schema. The load-test harness starts a `cairn`,
 creates the workload through the real API, and measures what the engine achieves:
 239.6 heartbeats a second against the 250 its schedule implies, with 7,620
@@ -99,24 +124,27 @@ by which "90% done" lasts three months.
 
 | Area | Done | Total |
 |---|---|---|
-| Engine & storage | 18 | 19 |
+| Engine & storage | 19 | 19 |
 | Monitor types | 9 | 10 |
-| Core monitoring features | 7 | 8 |
+| Core monitoring features | 8 | 9 |
 | Alerting & webhooks | 10 | 10 |
-| Status pages | 3 | 5 |
+| Status pages | 4 | 6 |
 | REST API | 22 | 23 |
 | Kuma migration | 0 | 5 |
-| UI | 0 | 8 |
+| UI | 8 | 11 |
 | Security | 8 | 9 |
 | Deployment & operations | 0 | 9 |
 | Documentation | 1 | 8 |
 | Quality gates | 4 | 8 |
-| **Total** | **82** | **122** |
+| **Total** | **93** | **127** |
 
-The Engine & storage row read 14/15 until now and was simply stale — two items had
-been ticked without the table being updated. A tracker that quietly disagrees with
-itself is the thing this file exists to prevent, so it is corrected rather than
-carried forward.
+Three rows were stale again and are corrected here rather than carried forward.
+Engine & storage read 18/19 with all nineteen ticked; Core monitoring features and
+Status pages each had an item added to the body without its total being bumped, so
+both under-counted what they contain. The counts above are now derived from the
+checkboxes below rather than maintained beside them — which is the only version of
+this that stays true, because a tracker that quietly disagrees with itself is the
+thing this file exists to prevent.
 
 ---
 
@@ -183,7 +211,7 @@ carried forward.
 ## Status pages
 
 - [x] Multiple pages per install, monitor and group selection — ordered sections, a monitor in at most one section per page, and a slug collision answered `409` naming what is taken
-- [ ] The two frontend routes subscriber mail links to — `/subscriptions/confirm/{token}` and `/subscriptions/unsubscribe/{token}`, plus `/status/{slug}` for the page itself ([the contract is written down](../api/README.md#links-a-status-page-sends-to-its-subscribers)). The messages are correct and the API operations behind them work; a link followed today reaches the SPA shell, because a link in an inbox is a `GET` and neither operation is one. This is UI work and lands with the UI
+- [x] The two frontend routes subscriber mail links to — `/subscriptions/confirm/{token}` and `/subscriptions/unsubscribe/{token}`, plus `/status/{slug}` for the page itself ([the contract is written down](../api/README.md#links-a-status-page-sends-to-its-subscribers)). Built, and the server now answers an unknown document path with the application shell rather than a 404, which is what those three paths needed and a file server does not do. Confirmation runs on load and unsubscribing waits for a button press, which is the same reasoning that kept `List-Unsubscribe` off RFC 8058 one-click: mail clients prefetch, security appliances follow every link in a message, and acting on load would quietly remove people who never clicked. A test names all three paths, because a link in an inbox cannot be reissued
 - [ ] Custom domains, with reverse-proxy and ACME documentation — **the column and its cross-organisation uniqueness are enforced; the reverse-proxy and ACME recipes are not written**, and a hostname without them routes nowhere
 - [x] Uptime bars, incident and maintenance display — read from the 1d rollup tier, and a day with no observations carries a null ratio rather than being drawn as downtime, which is the single most common way a status page lies
 - [x] Subscribe-to-updates via the API, and delivery to the people who subscribed — double opt-in with the confirmation actually sent through the instance relay, and incident updates announced to the confirmed subscribers of every page an incident names, when `notify_subscribers` says to. Email and webhook subscribers both. Every message carries a one-click unsubscribe link, and a message whose link cannot be rendered is not sent at all: the token is stored hashed *and* encrypted (migration `0005`), because it is verified when somebody follows it and replayed at the foot of every message, and a subscription predating that column is issued a fresh token on first use rather than mailed without one. Bulletins are recorded in `notification_deliveries` against their incident, so "did my customers hear about the outage" has an answer. **Two conditions, both reported rather than assumed:** with no instance SMTP relay or no `general.base_url`, a bulletin is recorded `suppressed` naming which is missing, and `/system/info` reports `subscriber_delivery: false` so a dashboard can hide a subscribe box the install cannot honour
@@ -225,14 +253,17 @@ carried forward.
 
 ## UI
 
-- [ ] SvelteKit project in `web/`, built into `internal/ui/dist`
-- [ ] Dashboard list view with server-side pagination, filter, and search
-- [ ] Monitor detail with history charts
-- [ ] Monitor CRUD forms
-- [ ] Bulk operations (multi-select enable/disable/tag)
-- [ ] Notification setup with test-fire and webhook template live preview
-- [ ] Dark mode
-- [ ] i18n scaffolding, English complete, translation pipeline documented
+- [x] SvelteKit project in `web/`, built into `internal/ui/dist` — SvelteKit 2 on Svelte 5 runes, Tailwind 4, static output embedded at compile time with no Node process in production. 69 packages, all build tooling; **nothing ships in the bundle except Svelte**, which is a deliberate deviation from the plan's shadcn/ui and is argued in [web/README.md](../../web/README.md#dependencies) for a reviewer to accept or reject. Two things the embed gets wrong silently are now held by tests: `//go:embed` skips any path beginning with `_`, and SvelteKit puts every hashed asset under `_app/` — the bare pattern compiles, starts, and serves an `index.html` referencing a bundle that is not in the binary. And a single-page application needs the server to answer an unknown document path with the shell, while still 404ing a missing *asset*, because serving HTML where a script was requested turns a broken build into a MIME error three layers from the cause. `internal/ui/dist/index.html` is no longer committed: it is generated, and tracking it meant every developer who built the frontend had a dirty tree
+- [x] Dashboard list view with server-side pagination, filter, and search — cursor-paginated, filtered and searched server-side, with the [ADR-004](../adr/004-ui-state-synchronisation.md) reconciliation loop: `/monitors/membership` polled on an interval, a changed version raising a *stale* banner rather than reordering rows under the pointer, and a refresh that re-reads the rows currently held rather than the collection. There is no small-install shortcut that fetches everything when the count happens to be low today. Filters cover status, type, enabled, group, tag, and a debounced search
+- [x] Monitor detail with history charts — uptime across three windows, a hand-drawn response-time chart whose line *breaks* at a bucket with no measurement rather than interpolating across it, downtime marked separately from latency underneath it, the recent-check strip, and the certificate panel including what `observed_at` actually means
+- [x] Monitor CRUD forms — one form for create and edit, driven by a per-type field table. A type the server offers and the table does not describe falls back to editing the config as JSON rather than hiding the monitor type behind a build. Validation is entirely the server's: failures come back as RFC 9457 with a JSON pointer per bad field, and those pointers are what highlight the controls, so the form has no opinion of its own to disagree with. Editing round-trips the redaction marker untouched, so a form that re-submits its own `GET` cannot destroy a password it was never shown
+- [x] Bulk operations (multi-select enable/disable/tag) — including delete and the partial-success contract reported honestly as two numbers, because a bar that says "done" after failing a third of a batch is how somebody discovers next week that their tag never landed
+- [x] Notification setup with test-fire and webhook template live preview — all thirteen channel types, with the fields mirroring `internal/notify/config.go`. Test-fire is a real delivery and reports what the provider said verbatim. The preview renders through the server's own renderer rather than a second one in the client, and the variable list is fetched from `/notification-channels/template-variables` rather than hardcoded — a preview that renders through different code than delivery is a preview that lies at the moment somebody is trusting it. A channel's last error is shown on the channel itself, because a channel that has quietly stopped working is the failure mode this feature cannot have
+- [x] Dark mode — three states, not two: light, dark, and follow the system. Applied before first paint by an inline script, because reading the preference from a module leaves one frame of the wrong theme on every load. The palette is semantic tokens defined once, with a separate soft variant for status colours used behind text — the same green that reads well as a 12px dot fails contrast as body text. Status is never colour alone
+- [x] i18n scaffolding, English complete, translation pipeline documented — every user-facing string in one flat catalogue with dotted identifier keys, a missing key rendering *as the key* rather than silently falling back to English, and locale negotiated by language subtag so `en-AU` resolves to `en`. Adding a language is a JSON file and one line in a map; it never touches a component. No plural machinery yet, deliberately, and the keys are shaped so adding `Intl.PluralRules` later renames nothing. The pipeline is in [web/README.md](../../web/README.md#internationalisation)
+- [ ] Screens for incidents, status pages, and settings — **the API is complete and there are no pages.** The navigation deliberately does not link to them: a link to a route the frontend does not implement lands on the shell's not-found and reads as data loss. Status pages are the notable gap, because the subscriber delivery below it works and nobody can create a page to use it without `curl`
+- [ ] The real-time half of ADR-004 — **reconciliation is built; scoped diffs are not.** The ADR specifies push over NATS, or an in-process bus in solo mode, for the monitor IDs on screen, and this build has no browser-facing channel for one. Staleness is therefore bounded by the poll interval rather than being near-zero for on-screen rows. The list controller is written against "subscribe to visible IDs, reconcile on interval" as its model, which the ADR notes is the thing that must be true from the start for the upgrade to be additive rather than a rewrite
+- [ ] The UI benchmark the load-test gate is supposed to hold — [ADR-004](../adr/004-ui-state-synchronisation.md) asserts two invariants on every release, and only the server-side one is measured today. Client payload size and render cost bounded by *viewport* rather than by total monitor count is the half a frontend can break on its own, and nothing yet checks it
 
 ## Security
 
@@ -297,8 +328,18 @@ carried forward.
    the figure to watch is `cairn_db_pool_wait_total`, because the observation is
    the first thing on the ingest path that reads before it writes.
 
-The UI comes after those deliberately: the plan puts it in Month 3, and every
-surface it needs now exists — which was the point of finishing the API first. The
-membership signal is the one number to look at before starting it: 6.2ms per poll
-at 5,000 monitors, and its cost scales with connected clients rather than with
-monitor count, which is the dimension the gate does not exercise.
+3. **The UI benchmark.** [ADR-004](../adr/004-ui-state-synchronisation.md) asserts
+   two invariants on every release and the gate measures one of them. The
+   unmeasured half — client payload size and render cost bounded by viewport
+   rather than by total monitor count — is the half a frontend can break on its
+   own, and there is now a frontend to break it. The membership signal is the
+   number to start from: 6.2ms per poll at 5,000 monitors, with a cost that scales
+   with connected clients rather than with monitor count, which is the dimension
+   the gate does not exercise at all.
+
+The dashboard now exists and consumes the API like any other client, which was the
+point of finishing the API first. What it does not have is screens for incidents,
+status pages, and settings — the API is complete for all three — and the real-time
+half of ADR-004, which needs a browser-facing channel this build has no endpoint
+for. Status pages are the one that stings: subscriber delivery works end to end and
+nobody can create a page to use it without `curl`.
