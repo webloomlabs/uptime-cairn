@@ -638,17 +638,26 @@ func (s *Server) renderPublicPage(ctx context.Context, page model.StatusPage) (p
 		ids = append(ids, id)
 	}
 
+	// The bar's window, and the two ends of it the renderer needs to draw a
+	// stone for every day rather than only for the days that have rows.
+	barTo := time.Now().UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+	barFrom := barTo.AddDate(0, 0, -page.UptimeBarDays)
+
 	var (
 		ratios map[model.ID]float64
 		bars   map[model.ID][]store.DailyUptime
 	)
-	if page.ShowUptimePercentage && len(ids) > 0 {
-		if ratios, err = s.store.UptimeRatios(ctx, ids, "90d"); err != nil {
-			return publicStatusPage{}, err
+	if len(ids) > 0 {
+		// show_uptime_percentage governs the figure beside the monitor's name.
+		// The bar is a separate control — uptime_bar_days — and reading them as
+		// one switch means an operator who does not want a percentage on the
+		// page silently loses the bar as well.
+		if page.ShowUptimePercentage {
+			if ratios, err = s.store.UptimeRatios(ctx, ids, "90d"); err != nil {
+				return publicStatusPage{}, err
+			}
 		}
-		to := time.Now().UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
-		from := to.AddDate(0, 0, -page.UptimeBarDays)
-		if bars, err = s.store.DailyUptime(ctx, ids, from, to); err != nil {
+		if bars, err = s.store.DailyUptime(ctx, ids, barFrom, barTo); err != nil {
 			return publicStatusPage{}, err
 		}
 	}
@@ -697,7 +706,7 @@ func (s *Server) renderPublicPage(ctx context.Context, page model.StatusPage) (p
 				Description:      optional(monitor.Description),
 				Status:           monitor.Status,
 				UptimePercentage: percentage(ratios, monitor.ID),
-				UptimeBar:        toBar(bars[monitor.ID]),
+				UptimeBar:        toBar(bars[monitor.ID], barFrom, barTo),
 				ResponseTimeMs:   monitor.ResponseTimeMs,
 			})
 		}
@@ -759,22 +768,35 @@ func percentage(ratios map[model.ID]float64, id model.ID) *float64 {
 	return &value
 }
 
-// toBar renders the uptime stones. A day with no data carries a null ratio
-// rather than being reported as downtime — the single most common way a status
-// page lies.
-func toBar(days []store.DailyUptime) []publicBarEntry {
-	if len(days) == 0 {
-		return nil
-	}
-	out := make([]publicBarEntry, 0, len(days))
+// toBar renders the uptime stones: one per day across [from, to), oldest first.
+//
+// Dense rather than only the days that have data, which is what the schema
+// promises ("one entry per day over the page's configured window") and what the
+// page needs to be legible. A sparse bar is not merely shorter — the client
+// cannot tell a missing Tuesday from a Tuesday that has not happened, so it
+// either invents days or draws a bar whose stones do not line up with the dates
+// underneath them. A monitor with nothing recorded at all still gets its full
+// row of stones, all of them blank, which is the honest picture of "we have not
+// measured this yet" and is visible; an empty array is not.
+//
+// A day with no data carries a null ratio rather than being reported as
+// downtime — the single most common way a status page lies.
+func toBar(days []store.DailyUptime, from, to time.Time) []publicBarEntry {
+	byDay := make(map[string]*float64, len(days))
 	for _, day := range days {
-		entry := publicBarEntry{Date: day.Date.Format(time.DateOnly), UptimeRatio: day.Ratio}
-		if day.Ratio != nil {
+		byDay[day.Date.UTC().Format(time.DateOnly)] = day.Ratio
+	}
+
+	out := make([]publicBarEntry, 0, int(to.Sub(from)/(24*time.Hour)))
+	for at := from; at.Before(to); at = at.AddDate(0, 0, 1) {
+		date := at.Format(time.DateOnly)
+		entry := publicBarEntry{Date: date, UptimeRatio: byDay[date]}
+		if entry.UptimeRatio != nil {
 			status := "up"
 			switch {
-			case *day.Ratio < 0.99:
+			case *entry.UptimeRatio < 0.99:
 				status = "down"
-			case *day.Ratio < 1:
+			case *entry.UptimeRatio < 1:
 				status = "degraded"
 			}
 			entry.Status = &status

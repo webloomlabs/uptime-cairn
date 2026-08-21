@@ -289,6 +289,15 @@ func scanUptime(row *sql.Row, start time.Time) (store.HistoryBucket, error) {
 // are simply absent from the result, and the caller renders them as gaps —
 // filling them with zero would draw a year of downtime for a monitor created
 // last week.
+//
+// The tier alone is not enough, for the same reason History prefers raw over a
+// lagging tier: the pipeline only computes *closed* buckets, so the 1d tier
+// never holds today. Reading it on its own drops the rightmost stone from every
+// bar — and on an instance younger than a day it returns nothing at all, which
+// renders as a status page with no uptime bar rather than one with a short one.
+// So the days the tier cannot answer are aggregated from raw heartbeats, which
+// are always current, and the tier wins wherever it has a row: a day at the edge
+// of raw retention is complete in the tier and half-deleted in raw.
 func (s *Store) DailyUptime(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.DailyUptime, error) {
 	if len(ids) == 0 {
 		return map[model.ID][]store.DailyUptime{}, nil
@@ -331,5 +340,104 @@ func (s *Store) DailyUptime(ctx context.Context, ids []model.ID, from, to time.T
 		}
 		out[key] = append(out[key], day)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := s.fillDailyFromRaw(ctx, ids, from, to, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// fillDailyFromRaw adds the days the 1d tier has no row for — today, always, and
+// anything else the pipeline has not caught up on — aggregating raw heartbeats
+// the same way the rollup would, and leaves the days the tier answered alone.
+func (s *Store) fillDailyFromRaw(ctx context.Context, ids []model.ID, from, to time.Time, out map[model.ID][]store.DailyUptime) error {
+	const day = 24 * time.Hour
+
+	// Raw is kept for days, not months, so only the tail of the window can be
+	// answered from it. Starting the scan at the newest day the tier holds — or
+	// at `from` when it holds none — keeps this off the heartbeats table for the
+	// bulk of a 90-day bar.
+	scanFrom := from
+	if newest := newestBucket(out); !newest.IsZero() && newest.After(scanFrom) {
+		scanFrom = newest
+	}
+	if !scanFrom.Before(to) {
+		return nil
+	}
+
+	// Microseconds, matching heartbeats.time, and out again as milliseconds to
+	// match bucket_start — the conventions in data model §1.
+	args := []any{model.SentinelOrgID[:], scanFrom.UnixMicro(), to.UnixMicro()}
+	for _, id := range ids {
+		args = append(args, id[:])
+	}
+	rows, err := s.ro.QueryContext(ctx, fmt.Sprintf(`
+		SELECT monitor_id, ((time / %d) * %d) / 1000 AS bucket_start,
+		       SUM(status = 1) AS up_count,
+		       SUM(status = 0) AS down_count
+		FROM heartbeats
+		WHERE org_id = ?1 AND time >= ?2 AND time < ?3 AND monitor_id IN (`+placeholders(len(ids))+`)
+		GROUP BY monitor_id, bucket_start
+		ORDER BY bucket_start`, day.Microseconds(), day.Microseconds()), args...)
+	if err != nil {
+		return fmt.Errorf("daily uptime from raw: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			id       []byte
+			bucket   int64
+			up, down int
+		)
+		if err := rows.Scan(&id, &bucket, &up, &down); err != nil {
+			return err
+		}
+		var key model.ID
+		copy(key[:], id)
+
+		date := fromMillis(bucket)
+		if hasDay(out[key], date) {
+			continue
+		}
+		entry := store.DailyUptime{Date: date}
+		// unknown and skipped stay out of the denominator here too, so a day
+		// filled from raw and the same day once the tier catches up agree.
+		if observed := up + down; observed > 0 {
+			ratio := float64(up) / float64(observed)
+			entry.Ratio = &ratio
+		}
+		out[key] = append(out[key], entry)
+	}
+	return rows.Err()
+}
+
+// newestBucket is the latest day any monitor's tier rows reach — the point past
+// which the pipeline has not caught up and raw has to answer. Zero when nothing
+// was rolled up at all, which is the case this whole path exists for: an
+// instance younger than a day.
+func newestBucket(out map[model.ID][]store.DailyUptime) time.Time {
+	var newest time.Time
+	for _, days := range out {
+		if len(days) == 0 {
+			continue
+		}
+		// Ordered by bucket_start, so the last entry is the newest.
+		if last := days[len(days)-1].Date; last.After(newest) {
+			newest = last
+		}
+	}
+	return newest
+}
+
+func hasDay(days []store.DailyUptime, date time.Time) bool {
+	for _, d := range days {
+		if d.Date.Equal(date) {
+			return true
+		}
+	}
+	return false
 }

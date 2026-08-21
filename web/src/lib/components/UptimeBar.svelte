@@ -16,13 +16,19 @@
 	 * shades. 100% is up, anything that lost time in the day is degraded, and a
 	 * day that was mostly down is down.
 	 */
-	let { entries, days = 90 }: { entries: PublicBarEntry[]; days?: number } = $props();
+	let { entries, days }: { entries: PublicBarEntry[]; days?: number } = $props();
 
 	// Oldest to newest, left to right, padded at the front so a page younger than
 	// its window keeps a constant width rather than growing day by day.
+	//
+	// The window defaults to what the server sent rather than to a fixed 90:
+	// the API renders one entry per day across the page's own uptime_bar_days,
+	// so a hardcoded number here would pad sixty blank stones onto a thirty-day
+	// page and trim a year-long one down to a quarter.
 	const shown = $derived.by(() => {
-		const tail = entries.slice(-days);
-		const padding: (PublicBarEntry | null)[] = Array(Math.max(0, days - tail.length)).fill(null);
+		const window = days ?? entries.length;
+		const tail = entries.slice(-window);
+		const padding: (PublicBarEntry | null)[] = Array(Math.max(0, window - tail.length)).fill(null);
 		return [...padding, ...tail];
 	});
 
