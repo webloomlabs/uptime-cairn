@@ -150,7 +150,7 @@ exactly that regression in the dashboard's own listing query before v1.0 shipped
 docker run -d --restart=always -p 127.0.0.1:3000:3000 \
   -v uptime-cairn:/data \
   --name uptime-cairn \
-  uptimecairn/uptime-cairn:latest
+  webloomlabs/uptime-cairn:latest
 ```
 
 Then open `http://localhost:3000` and create the administrator account. One
@@ -161,7 +161,7 @@ Images are published to both Docker Hub and GitHub Container Registry, and they
 are the same image — pick whichever your environment already trusts:
 
 ```
-uptimecairn/uptime-cairn:latest          # Docker Hub
+webloomlabs/uptime-cairn:latest          # Docker Hub
 ghcr.io/webloomlabs/uptime-cairn:latest  # GHCR
 ```
 

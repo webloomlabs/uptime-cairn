@@ -21,14 +21,20 @@ permissions:
 env:
   # Two registries, deliberately. GHCR needs no secret and is what every
   # `docker-compose.yml` and install recipe in this repository points at; Docker
-  # Hub is where `docker run uptimecairn/uptime-cairn` resolves, which is the
+  # Hub is where `docker run webloomlabs/uptime-cairn` resolves, which is the
   # command in README.md and the one people actually type. Publishing to one and
   # documenting the other is how a quick start stops working.
+  #
+  # The two names coincide today — `webloomlabs` is both the GitHub owner and the
+  # Docker Hub account — but they are written out separately rather than derived
+  # from `github.repository`, because they are accounts on unrelated services
+  # that happen to agree. Deriving one from the other would silently retarget the
+  # push if this repository were ever transferred.
   #
   # The Docker Hub name is a repository variable so a fork can point it somewhere
   # it can actually push, falling back to the name the README promises.
   IMAGE: ghcr.io/${{ github.repository }}
-  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'uptimecairn/uptime-cairn' }}
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'webloomlabs/uptime-cairn' }}
 
 jobs:
   # The frontend is built once and shared. Building it inside each binary job
