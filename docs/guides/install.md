@@ -118,16 +118,22 @@ Every release publishes static binaries with checksums for five targets:
 | `darwin/amd64` | Intel Macs, for development |
 
 ```sh
-VERSION=v0.1.0
-ARCH=linux-amd64
+VERSION=v1.0.0
+TARGET=linux_amd64        # or linux_arm64, linux_armv7, darwin_arm64, darwin_amd64
+BASE=https://github.com/webloomlabs/uptime-cairn/releases/download/$VERSION
 
-curl -LO https://github.com/webloomlabs/uptime-cairn/releases/download/$VERSION/cairn-$ARCH.tar.gz
-curl -LO https://github.com/webloomlabs/uptime-cairn/releases/download/$VERSION/checksums.txt
-sha256sum --check --ignore-missing checksums.txt
+curl -LO $BASE/cairn_${VERSION}_${TARGET}.tar.gz
+curl -LO $BASE/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 
-tar xzf cairn-$ARCH.tar.gz
-sudo install -m 0755 cairn /usr/local/bin/cairn
+tar xzf cairn_${VERSION}_${TARGET}.tar.gz
+sudo install -m 0755 cairn_${VERSION}_${TARGET}/cairn /usr/local/bin/cairn
 ```
+
+The archive unpacks into a directory of its own name carrying the binary,
+`README.md`, `LICENSE`, and `SECURITY.md` — hence the path in the last line. The
+names come from the release workflow rather than from convention, so if a target
+above ever disagrees with what is attached to a release, the release is right.
 
 Verify the checksum. It is two commands and it is the difference between running
 what we published and running whatever a mirror handed you.

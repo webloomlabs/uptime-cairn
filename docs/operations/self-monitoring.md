@@ -9,7 +9,7 @@ Three endpoints, none of them under `/api/v1`:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /healthz` | Liveness. `{"status":"ok","version":"v0.1.0"}` |
+| `GET /healthz` | Liveness. `{"status":"ok","version":"v1.0.0"}` |
 | `GET /readyz` | Readiness. Same handler today |
 | `GET /metrics` | Prometheus text format |
 

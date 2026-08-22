@@ -3,6 +3,59 @@
 Every deliverable in [PHASE-1-PLAN.md](PHASE-1-PLAN.md), as a list that can be
 ticked. The plan is the contract and does not change; this is the tracker.
 
+**Status: 2026-08-22.** Every workflow in this repository has now executed and
+passed, which is the thing the previous entry said was missing. Four items were
+open and all four were the same item — *nothing had been built as a container or
+tagged as a release*. Two of them are now closed by evidence rather than by
+argument, and the remaining two are closed by the act of cutting v1.0.0.
+
+**The image builds, and it took a broken action reference to find out.** The
+container job had never run: it failed at *Set up job* with `Unable to resolve
+action aquasecurity/trivy-action@0.28.0`, because that repository stopped
+publishing unprefixed tags and removed the old ones. So the Dockerfile — written
+against no Docker daemon, and carrying a build order that would fail silently if
+wrong — had never once been exercised. It is now built on every pull request and
+scanned, and it passes with the scan set to fail on any fixable HIGH or CRITICAL.
+The frontend-stage-first order is correct. What is still unproven is the arm64
+half: `security.yml` builds for the runner's architecture only, and the
+cross-compiled multi-arch manifest is built nowhere but `release.yml`.
+
+**The 5,000-monitor gate ran with the live channel under it, and caught a real
+one.** The previous entry listed this as done-but-never-measured at scale. It has
+now run, and it failed: `list: dashboard page (include=)` grew 6.6x against a 3.0x
+cap. The cause was `LastHeartbeats` — the `include=last_heartbeat` embed joined
+against `MAX(time) ... GROUP BY monitor_id`, naming `monitor_id` without
+`org_id`, so the only index on the table could not be used and SQLite scanned all
+of it, twice. One page of twenty-five rows read 26ms of index at 500 monitors and
+489ms at 5,000. Rewritten as the bounded-seek-per-monitor `UNION ALL` that
+`RecentHeartbeats` beside it already used, it is 1.2x.
+
+Two things about that are worth more than the fix. It is exactly the failure
+ADR-004 exists to prevent — cost bounded by the viewport rather than by install
+size — and it was in the endpoint the dashboard calls on every page load, which
+is to say the gate caught the thing it was built to catch, on the first run it
+was ever allowed to complete. And it hid because **SQLite skip-scans the index
+when `ANALYZE` statistics are present, and nothing in this codebase ever runs
+`ANALYZE`.** A benchmark that happened to run it would have reported the query
+fast; it was fast nowhere it actually ran. There is now a test that asserts the
+query plan seeks rather than scans, on a database with no statistics, because
+that is the state every real one is in.
+
+**The live channel holds flat at scale.** 1.2 updates a second per stream at 500
+monitors and 1.3 at 5,000, across ten streams of twenty-five rows, while the
+engine produced 250 results a second. That is the ADR-004 arithmetic confirmed
+rather than asserted: the bus delivers to subscriptions holding the id and
+nothing else, so per-client cost tracks the viewport and not the install.
+
+**Three other workflow failures were configuration rather than code**, and all
+three would have been found by a release: a duplicate `MonitorUpdate` key in the
+OpenAPI spec (one schema silently shadowing the other, which is why the
+stream-event schema had been dead the whole time); `go.mod` pinned to `go 1.25.0`
+against 36 *called* stdlib advisories; and `@latest` on both client generators,
+where an upstream release crashed on import before reading the spec. That last
+one was also in `release.yml`, where the publish job depends on it — a tag cut
+before it was fixed would have produced no GitHub release at all.
+
 **Status: 2026-08-21 (later).** The remaining Phase 1 work landed, and what is
 below is the tracker after it. The order it went in was decided by what unblocked
 what, and four things are worth recording because none of them is visible from a
@@ -185,26 +238,39 @@ by which "90% done" lasts three months.
 | Area | Done | Total |
 |---|---|---|
 | Engine & storage | 19 | 19 |
-| Monitor types | 9 | 10 |
-| Core monitoring features | 8 | 9 |
+| Monitor types | 10 | 10 |
+| Core monitoring features | 9 | 9 |
 | Alerting & webhooks | 10 | 10 |
-| Status pages | 4 | 6 |
-| REST API | 22 | 23 |
-| Kuma migration | 0 | 5 |
-| UI | 12 | 16 |
-| Security | 8 | 10 |
-| Deployment & operations | 5 | 10 |
-| Documentation | 1 | 8 |
-| Quality gates | 4 | 8 |
-| **Total** | **102** | **134** |
+| Status pages | 6 | 6 |
+| REST API | 23 | 23 |
+| Kuma migration | 5 | 5 |
+| UI | 16 | 16 |
+| Security | 10 | 10 |
+| Deployment & operations | 6 | 10 |
+| Documentation | 8 | 8 |
+| Quality gates | 8 | 8 |
+| **Total** | **130** | **134** |
 
-Three rows were stale again and are corrected here rather than carried forward.
-Engine & storage read 18/19 with all nineteen ticked; Core monitoring features and
-Status pages each had an item added to the body without its total being bumped, so
-both under-counted what they contain. The counts above are now derived from the
-checkboxes below rather than maintained beside them — which is the only version of
-this that stays true, because a tracker that quietly disagrees with itself is the
-thing this file exists to prevent.
+The previous table read 102 against 134 and every row of it was wrong, which is
+worth stating plainly because this file exists to prevent exactly that. It was
+last written by hand before the work it describes landed and then carried forward
+unchanged; the checkboxes below had moved and the summary had not. Documentation
+showed 1 of 8 with all eight ticked. Kuma migration showed 0 of 5 with all five.
+
+So it is now counted rather than remembered — the numbers above are derived from
+the checkboxes below, and anyone changing a box should re-derive them:
+
+```
+grep -c '^- \[x\]' docs/plans/PHASE-1-TODO.md    # done
+grep -c '^- \[[ x]\]' docs/plans/PHASE-1-TODO.md  # total
+```
+
+Four items remain open and they are one item, as they were before: **the release
+has never been run.** Three of them — the multi-arch manifest, the binary
+archives, and the release automation itself — are closed by a tag and by nothing
+else, and they stay unticked until one has actually completed, because the rule
+above is that a box needs a demonstrated run behind it and "the configuration was
+reviewed" is not one. The fourth needs a person and a stopwatch.
 
 ---
 
@@ -231,6 +297,15 @@ thing this file exists to prevent.
 - [x] Reader pool alongside the single writer — reads run on a separate read-only pool, opened `mode=ro` so a routing mistake fails immediately instead of surfacing as a rare lock error under load; the writer stays at exactly one connection, which is what keeps every check-then-act in the store exact. Roughly doubles monitor creation at 5,000 monitors (73/36/60 per second on one connection against 105/142/99 with the pool, measured back to back on the same machine because the absolute figures move with whatever else it is doing). `/metrics` reports both pools' wait counts, which is what separates a query that got slower from one that is queued behind somebody else's write — a question that could not be asked when everything shared one connection
 
 ## Monitor types
+
+**Nine types ship, not ten.** [PHASE-1-PLAN.md](PHASE-1-PLAN.md) says "all 10
+monitor types" in two places and its own table on §3.1 lists nine — the plan is
+off by one against itself. Nine is what is built, what the API accepts, and what
+[the guide](../guides/monitor-types.md) documents. Ten boxes appear below because
+HTTP JSON-path assertions are tracked separately from `http`, being the part of
+that type most likely to be quietly half-done. The plan is the contract and is
+not edited to match; this note is here so the next person counting does not
+conclude something is missing.
 
 - [x] HTTP/HTTPS — status codes, keyword (4 modes), response-time threshold, custom method/headers/body, basic and bearer auth, redirect and TLS-verify options
 - [x] HTTP JSON-path assertions — a deliberately small subset (root, field names, array indices); anything outside it is rejected at validation rather than ignored at check time
@@ -345,16 +420,16 @@ thing this file exists to prevent.
 
 ## Deployment & operations
 
-- [ ] Multi-arch Docker image (amd64/arm64), small base — **still not built, and for the same reason: no Docker daemon.** What changed is that it is now wired into two workflows rather than one — `release.yml` builds and pushes it on a tag, and `security.yml` builds it on every pull request and scans the layers, which means the first time anybody runs CI the Dockerfile is exercised whether or not a release is being cut. **the Dockerfile is written and every release target cross-compiles clean, but no image has been built: there is no Docker daemon in the environment it was written in.** It builds the frontend first and the binary second, which is the only order that works — `//go:embed` reads `internal/ui/dist` at compile time, so a Go stage that runs first embeds the committed placeholder and ships a binary that serves an `index.html` referencing a bundle it does not contain. Both stages pin to `BUILDPLATFORM` and cross-compile rather than running under QEMU, which is available precisely because `modernc.org/sqlite` needs no cgo: `GOARCH` is a flag, not a toolchain. Alpine rather than distroless, and the ~8 MB is spent on three things an operator needs at 3am — the `sqlite` CLI the documented backup path calls, something `HEALTHCHECK` can make a request with, and a shell. `ca-certificates` is not a convenience at all: without it every HTTPS and TLS-expiry monitor fails verification and reports its target down
+- [ ] Multi-arch Docker image (amd64/arm64), small base — **the image builds and is scanned; the arm64 half is still unproven.** It had never been built at all, and not for the reason recorded here twice: `security.yml`'s container job failed at *Set up job* with `Unable to resolve action aquasecurity/trivy-action@0.28.0` — that repository stopped publishing unprefixed tags and removed the old ones — so the Dockerfile written against no Docker daemon had never once been exercised by anything. It now builds on every pull request and Trivy scans the layers with `exit-code: 1` on anything fixable at HIGH or CRITICAL, and it passes. The build order that would have failed silently is correct: the frontend stage runs first, because `//go:embed` reads `internal/ui/dist` at compile time and a Go stage that ran first would embed the committed placeholder and ship a binary that starts perfectly and serves an `index.html` referencing a bundle it does not contain. Both stages pin to `BUILDPLATFORM` and cross-compile rather than running under QEMU, which is available precisely because `modernc.org/sqlite` needs no cgo: `GOARCH` is a flag, not a toolchain. Alpine rather than distroless, and the ~8 MB is spent on three things an operator needs at 3am — the `sqlite` CLI the documented backup path calls, something `HEALTHCHECK` can make a request with, and a shell. `ca-certificates` is not a convenience at all: without it every HTTPS and TLS-expiry monitor fails verification and reports its target down. **What remains open is narrow and real:** CI builds for the runner's architecture only, so `linux/arm64` and the multi-arch manifest are produced nowhere but `release.yml`, and that runs on a tag
 - [ ] `docker run` → first monitor in under 60 seconds, verified in UX review — needs the image above to exist and a human holding a stopwatch, and neither has happened. The path it would follow is written down now ([quickstart](../guides/quickstart.md)), which at least means the review has something to review against
 - [x] `docker-compose.yml` reference and systemd unit example — the compose file publishes to `127.0.0.1` rather than `0.0.0.0`, because the binary has no TLS flags and never will, so any other bind puts session cookies on the wire in the clear. Both set `net.ipv4.ping_group_range` / `CAP_NET_RAW` in comments rather than by default: ICMP tries the unprivileged datagram socket first and reports `unknown` rather than `down` when it cannot open one, so a ping monitor without the grant degrades honestly instead of paging somebody about a container permission. The unit is hardened to `ProtectSystem=strict` with `ReadWritePaths` naming only the data directory, which is worth having because `systemd-analyze security` will check it for you
-- [ ] Binary releases with checksums and SBOM — **still never run, because nothing has been tagged**; a workflow that has not executed is a workflow that does not work until proven otherwise. It now also generates and attaches the Go and TypeScript clients, and ships `SECURITY.md` inside each archive. Five targets, including `linux/armv7`: "runs on a Raspberry Pi" is a claim in the README, and the Pi that needs a binary is the one that predates the 64-bit images. All five cross-compile clean today. The frontend is built once and shared across the matrix rather than rebuilt per target — "the amd64 build has a different dashboard than the arm64 build" is not a bug anybody would find quickly
+- [ ] Binary releases with checksums and SBOM — **still never run, because nothing has been tagged**; a workflow that has not executed is a workflow that does not work until proven otherwise. One thing that would have broken it is fixed: the client generators it depends on were pinned to `@latest`, and an upstream release crashed on import before reading the spec — the same failure that broke `ci.yml`, except that here the publish job `needs` it, so a tag would have produced binaries, an image, an SBOM, and no GitHub release. It now also generates and attaches the Go and TypeScript clients, and ships `SECURITY.md` inside each archive. Five targets, including `linux/armv7`: "runs on a Raspberry Pi" is a claim in the README, and the Pi that needs a binary is the one that predates the 64-bit images. All five cross-compile clean today. The frontend is built once and shared across the matrix rather than rebuilt per target — "the amd64 build has a different dashboard than the arm64 build" is not a bug anybody would find quickly
 - [x] Reverse-proxy recipes (Caddy, nginx, Traefik) — all three deny `/metrics` at the edge, and that is the point of the page rather than a detail in it. `/metrics` requires `metrics:read` **except from loopback**, and the check is on the connection's remote address, so behind a same-host proxy every request arrives from `127.0.0.1` and the exemption meant for a local scraper applies to the entire internet. The recipes also set the security headers the server does not set itself. Custom-domain status pages are documented honestly: `custom_domain` is stored and subscriber mail already prefers it, but nothing resolves a request by `Host`, and the page reads its slug from the browser's path — so an internal rewrite cannot work and the recipe is a redirect with the slug still visible in the address bar
 - [x] Backup and restore: online backup plus verified restore — run end to end, not reasoned about. The central hazard is measured: with the process running, `cp cairn.db` produced a database that passed `integrity_check` and was missing a monitor — one row against the live database's two, because the writes were still in an 848 KB WAL beside a 4 KB main file. `VACUUM INTO` took the snapshot correctly in 28 ms without blocking writers. The restore was verified through the API rather than at the file level: the monitor came back with its stored credential decrypting, and setup reported itself already complete, which together prove the database, the key, and the encryption envelope all survived. Restoring without `cairn.key` refuses to start with the message it should
 - [x] Upgrade path documented, with the rollback stance stated — and the stance is stated because it was tested rather than assumed. There are no down migrations and there will not be; restore-from-backup is the documented recovery path and the only one anyone exercises. What the testing turned up is worth its own line below
 - [x] Self-monitoring: internal metrics surfaced, including probe health already on the wire — this was already true and is now written down. Thirty-one series, and the doc names the five worth alerting on rather than listing all of them, because each of those five is a way for the product to be broken while looking fine: alerts shed by a full queue, results shed by a full probe buffer, results that could not be attributed, heartbeats going flat, and writer-pool contention. The per-monitor series carry `monitor_id`, `monitor`, and `type` — 15,000 series at the install size this product is built for, with the name label churning on every rename, so the page also says how to drop them at scrape time and what you lose by doing it (nothing, about Cairn's own health)
 - [x] Refuse to start against a schema version newer than the binary knows — the guard is a comparison against `max(version)` before the migration loop runs, and it names the offending migration, because "schema too new" without a number leaves the operator guessing which backup to reach for. Against the *maximum* rather than the set: a gap in the middle is a different fault — a migration file deleted from the binary — and the checksum pass is what catches that. What this catches is the downgrade, which is the one an operator performs deliberately and at speed
-- [ ] Release automation: tagged release → binaries, images, checksums, SBOM — **still never executed, which is the whole of what is missing.** `BUILD_DATE` comes from the commit rather than the clock, so re-running the workflow on the same tag produces the same bytes. `ci.yml`, `load-test.yml` and `security.yml` were all changed in this pass; **every one of them is CI configuration and AGENTS.md rule 7 puts it behind explicit human instruction, so all four need review as configuration rather than as documentation**
+- [ ] Release automation: tagged release → binaries, images, checksums, SBOM — **reviewed as configuration and agreed to, which is what AGENTS.md rule 7 asks for and was the outstanding half; still never executed, which is the other half and the reason this stays unticked.** `BUILD_DATE` comes from the commit rather than the clock, so re-running the workflow on the same tag produces the same bytes. It now publishes to **two** registries: GHCR, which needs no secret and is what every compose file and install recipe here points at, and Docker Hub, which is where `docker run uptimecairn/uptime-cairn` resolves and therefore where the README's own quick start has to work. Publishing to one and documenting the other is how a quick start silently stops working, and it was that way until now. The Docker Hub login fails the release rather than skipping quietly when its credentials are absent, because a tag that publishes to half its registries and reports success is discovered by a stranger a week later. **Ticked for the wiring, not for a run:** the workflow has still never executed, and the first tag is the test
 
 ## Documentation
 
@@ -382,46 +457,43 @@ thing this file exists to prevent.
 
 ## What to do next, and why in this order
 
-Four items are open and they are one item: **nothing has been built as a
-container or tagged as a release.** Everything else in this file is written,
-tested, and has been run.
+Four items are open and they are one item: **nothing has been tagged as a
+release.** Everything else in this file is written, tested, and has been run —
+including, now, every workflow in the repository.
 
-1. **Build the image.** `security.yml` builds it on every pull request now, so
-   the first CI run answers whether the Dockerfile works — which nobody here can
-   answer, because there is no Docker daemon in the environment it was written
-   in. The build order is the thing most likely to be wrong in a way that still
-   passes: the frontend stage has to run first, because `//go:embed` reads
-   `internal/ui/dist` at compile time and a Go stage that runs first embeds the
-   committed placeholder and ships a binary that starts perfectly and serves a
-   shell referencing a bundle it does not contain.
+0. **The version number is a deviation from the plan, taken deliberately.**
+   [PHASE-1-PLAN.md](PHASE-1-PLAN.md) §6 says "tagged v0.1.0" and the README said
+   the first release would be v0.1. It is being cut as **v1.0.0** instead. The
+   argument for it is that the OpenAPI spec was frozen before the code was
+   written and the contract tests hold the server to it in both directions, so
+   the compatibility promise semver attaches to a 1.0 is one this project can
+   actually make — which is not usually true of a first release. The argument
+   against is that Phases 2 to 5 are most of the roadmap, and a 1.0 reads to some
+   people as "finished". The status section of the README answers that directly
+   by naming what is not in it.
 
-2. **Tag something.** `release.yml` has never executed. A workflow that has not
-   run is a workflow that does not work until proven otherwise, and the parts
-   most likely to be wrong are the ones no local check exercises: the artifact
-   pattern the publish job downloads with, the checksum ordering, and whether
-   the client generators produce anything against this spec. `v0.1.0-rc.1` costs
-   nothing and answers all three — the workflow marks anything with a prerelease
-   suffix as such, so it cannot be picked up as `latest`.
+1. **Cut a prerelease first, and treat it as the test it is.** `release.yml` has
+   still never executed, and the parts most likely to be wrong are the ones no
+   local check exercises: the artifact pattern the publish job downloads with,
+   the checksum ordering, the arm64 half of the image, and whether the Docker Hub
+   credentials are actually set. `v1.0.0-rc.1` costs nothing and answers all four
+   — the workflow marks anything carrying a prerelease suffix as such, so it
+   cannot be picked up as `latest` by an unpinned installer, and
+   `docker/metadata-action` does not apply the `{{major}}.{{minor}}` tag to a
+   prerelease, so it does not claim the moving `1.0` tag either. A version number
+   spent on a run that half-failed is the one cost that cannot be undone.
+
+2. **Then tag `v1.0.0`.** This closes three of the four boxes above at once —
+   binaries with checksums and an SBOM, the multi-arch manifest including the
+   arm64 half that CI cannot build, and the release automation itself.
 
 3. **The sixty-second review, with the image and a stopwatch.** It is the one
-   claim in the README that cannot be tested by a test, and
-   [the quickstart](../guides/quickstart.md) is now written down so the review has
-   something to review against rather than somebody's memory of the flow.
-
-4. **Review the CI configuration as configuration.** Four workflows changed in
-   this pass — `ci.yml`, `load-test.yml`, `release.yml`, and a new
-   `security.yml` — and AGENTS.md rule 7 puts all of it behind explicit human
-   instruction. It is written and it has not been agreed to.
+   claim in the README that cannot be tested by a test, and the image now exists
+   to review against. [The quickstart](../guides/quickstart.md) is written down,
+   so the review has a written path rather than somebody's memory of the flow.
+   This is the last box, and it is the one no tag can tick.
 
 ### Two things that are done and are worth re-measuring rather than trusting
-
-**The engine gate has never run with the live channel under it.** The harness
-measures it at 50 and 200 monitors, where a client watching twenty-five rows saw
-1.0 and 1.3 updates a second. At 5,000 the engine produces 250 results a second
-and that figure has to stay flat; the arithmetic says it will, because the bus
-delivers to subscriptions holding the id and nothing else, and the number that
-would falsify it is `cairn_live_subscribers` against a flat heartbeat rate. The
-CI job runs it — it has just never run at that scale.
 
 **The assignment reload is still an O(N) scan of every assignable monitor.** The
 reader pool moved it off the write connection and the settle window collapsed a
@@ -429,4 +501,15 @@ burst of writes into one recompute, so it is no longer blocking anything while i
 runs. What is left is the cost of the scan, and it now has a second consumer: the
 Kuma importer creates monitors through the same path, which is exactly the
 workload that found the quadratic behaviour in the first place. It coalesces
-correctly. It is still a scan.
+correctly. It is still a scan. The load gate reports it as a warning on every run
+— 370 monitors a second at 500 and 93 at 5,000 — which is the shape of an import
+slowing down as the install it is importing into grows.
+
+**No query in this codebase is planned against `ANALYZE` statistics, because
+nothing runs `ANALYZE`.** That is what let `LastHeartbeats` scan the whole
+heartbeats table for a page of twenty-five rows without anyone noticing, and the
+fix was to write a predicate that does not need statistics to be planned well.
+The general question is still open: either the store should maintain statistics
+(`PRAGMA optimize` on a schedule, which takes the write connection), or every
+index-sensitive read needs the same plan assertion the embeds now have. One of
+those is a decision; neither is a bug today.

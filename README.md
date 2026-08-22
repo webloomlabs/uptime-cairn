@@ -7,26 +7,37 @@
 > like an uptime bar.
 
 [![Licence: AGPL v3](https://img.shields.io/badge/licence-AGPLv3-blue.svg)](LICENSE)
-[![Status: pre-release](https://img.shields.io/badge/status-pre--release%20(Phase%200)-orange.svg)](ROADMAP.md)
+[![Release](https://img.shields.io/github/v/release/webloomlabs/uptime-cairn?label=release)](https://github.com/webloomlabs/uptime-cairn/releases)
+[![CI](https://github.com/webloomlabs/uptime-cairn/actions/workflows/ci.yml/badge.svg)](https://github.com/webloomlabs/uptime-cairn/actions/workflows/ci.yml)
 
 ---
 
-## ⚠️ Project status: not yet installable
+## Project status: v1.0 — Phase 1 complete
 
-**There is no release yet.** Uptime Cairn is in **Phase 0 — Foundations**: we are
-writing the API specification and the architecture decision records *before*
-writing the code, deliberately. The first usable release (v0.1) lands at the end
-of Phase 1.
+**Uptime Cairn is installable.** Nine monitor types, thirteen alert channels plus
+Apprise, status pages, a complete REST API, and the Uptime Kuma importer all ship
+in v1.0. One binary, embedded probe, embedded dashboard, SQLite. See
+[Install](docs/guides/install.md) or jump to the [quick start](#quick-start)
+below.
 
-If you are here to run something today, you want
-[Uptime Kuma](https://github.com/louislam/uptime-kuma) — it is excellent, and
-when Cairn ships we will import your data from it in about thirty seconds.
+The headline claim is enforced rather than asserted: a 5,000-monitor gate runs in
+CI against a real engine on every change to the code it measures, and it fails the
+build on a regression. It has already caught one — a dashboard query whose cost
+grew with install size rather than with what was on screen, which is precisely the
+wall this project exists to avoid.
 
-If you are here to shape the thing before it sets, the timing is perfect. See
-[CONTRIBUTING.md](CONTRIBUTING.md) — reviewing the API spec is genuinely the
-highest-value thing anyone can do right now.
+**What v1.0 does not have yet**, so nobody discovers it after installing:
+scheduled PDF/CSV reports and SLA/error budgets are Phase 2; organisations, RBAC,
+SSO, and on-call scheduling are Phase 3; multi-region probing and HA are Phase 4.
+The control plane / probe split those depend on is built and shipping — in solo
+mode the probe is simply compiled in — so they arrive as a config change rather
+than as a different product. The [roadmap](ROADMAP.md) has the detail.
 
-Watch the repo or follow the [roadmap](ROADMAP.md) for release news.
+Coming from Uptime Kuma? `cairn import kuma /path/to/kuma.db` reproduces your
+monitors, tags, notifications, and status pages, and merges several instances
+into one install. Read
+[what does not come across](docs/guides/migrating-from-uptime-kuma.md) first —
+half that guide is the honest half.
 
 ---
 
@@ -127,29 +138,56 @@ Non-negotiable. Every proposed feature is tested against these.
 > **5,000 monitors on one install, and the UI stays fast.**
 
 No competitor in the open source space can say that today. It is enforced by an
-automated load test in CI from the first commit, and it must be true at v0.1 —
-not promised for later. Continuous load testing runs against a 10,000-monitor
-synthetic workload to catch regressions.
+automated load test in CI from the first commit, and it is true at v1.0 rather
+than promised for later. The gate runs a real engine at 500 and 5,000 monitors,
+compares the two, and fails the build when a per-page cost grows with install
+size instead of with the viewport. That is not a hypothetical guard: it caught
+exactly that regression in the dashboard's own listing query before v1.0 shipped.
 
-## Planned quick start
-
-> Not yet available — this is what v0.1 will look like.
+## Quick start
 
 ```bash
-docker run -d --restart=always -p 3000:3000 \
+docker run -d --restart=always -p 127.0.0.1:3000:3000 \
   -v uptime-cairn:/data \
   --name uptime-cairn \
   uptimecairn/uptime-cairn:latest
 ```
 
-Then open `http://localhost:3000`. One binary, embedded probe, embedded UI,
-SQLite. No external services, no Redis, runs on a Raspberry Pi.
+Then open `http://localhost:3000` and create the administrator account. One
+binary, embedded probe, embedded UI, SQLite. No external services, no Redis, runs
+on a Raspberry Pi.
+
+Images are published to both Docker Hub and GitHub Container Registry, and they
+are the same image — pick whichever your environment already trusts:
+
+```
+uptimecairn/uptime-cairn:latest          # Docker Hub
+ghcr.io/webloomlabs/uptime-cairn:latest  # GHCR
+```
+
+Pin the tag in anything you intend to keep. A release publishes three: `:1.0.0`
+is exact and never moves, `:1.0` follows the patch series, and `:latest` follows
+everything stable. There is deliberately no `:1` — a tag that silently carries
+you across a minor version is not a pin.
+
+The bind is `127.0.0.1:3000` rather than `0.0.0.0:3000` deliberately. The binary
+has no TLS flags and will not grow any, so anything reachable off the host
+belongs behind a reverse proxy — there are
+[recipes for Caddy, nginx, and Traefik](docs/operations/reverse-proxy.md), and
+all three deny `/metrics` at the edge.
+
+Prefer a binary, Compose, or a Pi? [Install](docs/guides/install.md) covers all
+four, and [first monitor](docs/guides/quickstart.md) takes you from an empty
+install to an alert you have watched fire.
 
 ### Migrating from Uptime Kuma
 
 ```bash
 cairn import kuma /path/to/kuma.db
 ```
+
+Run it against a stopped install — SQLite takes one writer, and `--dry-run`
+produces the whole report without writing anything.
 
 Reproduces your monitors, tags, notifications, and status pages. Point it at
 several Kuma databases and it merges them into one install — which is the
@@ -210,9 +248,9 @@ sidecar for browser checks, Typst for PDF reports.
 
 | Phase | What | When |
 |---|---|---|
-| **0 — Foundations** | Spec, ADRs, governance, data model, load-test harness | Weeks 1–4 ← *we are here* |
-| **1 — Solid Core** | 10 monitor types, 13 alert channels + Apprise, status pages, full REST API, 5,000-monitor gate | Months 1–4 |
-| **2 — Reporting** | Scheduled white-label PDF/HTML/CSV reports, SLA/SLO + error budgets, post-mortems | Months 4–7 |
+| **0 — Foundations** | Spec, ADRs, governance, data model, load-test harness | Weeks 1–4 · **done** |
+| **1 — Solid Core** | 9 monitor types, 13 alert channels + Apprise, status pages, full REST API, 5,000-monitor gate | Months 1–4 · **done — v1.0** |
+| **2 — Reporting** | Scheduled white-label PDF/HTML/CSV reports, SLA/SLO + error budgets, post-mortems | Months 4–7 ← *we are here* |
 | **3 — Teams** | Orgs, RBAC, SSO/SAML, audit log, automatic incidents, on-call & escalation | Months 7–11 |
 | **4 — Scale** | Multi-region consensus, private probes, HA, Terraform, YAML/GitOps, MCP server | Months 11–16 |
 | **5 — Depth** | Anomaly detection, plugin SDK, mobile apps, template gallery | Month 16+ |
@@ -222,9 +260,10 @@ Full detail in [ROADMAP.md](ROADMAP.md). Phase plans:
 
 ## Contributing
 
-Contributions are wanted, and right now the most valuable ones are not code —
-they are API spec review, ADR review, and honest reports of what breaks at your
-scale. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are wanted, and now that v1.0 is installable the most valuable ones
+have changed: honest reports of what breaks at your scale, and what the sixty-
+second onboarding actually felt like on your machine. Spec and ADR review are
+still welcome and still matter. Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 If you run 300+ monitors, shard several Kuma instances across hosts, or build
 client uptime reports by hand every month, we would especially like to hear from

@@ -19,7 +19,16 @@ permissions:
   contents: read
 
 env:
+  # Two registries, deliberately. GHCR needs no secret and is what every
+  # `docker-compose.yml` and install recipe in this repository points at; Docker
+  # Hub is where `docker run uptimecairn/uptime-cairn` resolves, which is the
+  # command in README.md and the one people actually type. Publishing to one and
+  # documenting the other is how a quick start stops working.
+  #
+  # The Docker Hub name is a repository variable so a fork can point it somewhere
+  # it can actually push, falling back to the name the README promises.
   IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'uptimecairn/uptime-cairn' }}
 
 jobs:
   # The frontend is built once and shared. Building it inside each binary job
@@ -122,10 +131,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Fails the release rather than skipping quietly when the credentials are
+      # missing. A tag that publishes to one of its two registries and reports
+      # success is the version of this that gets discovered by a user running the
+      # command in the README a week later.
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE }}
+          images: |
+            ${{ env.IMAGE }}
+            ${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -159,16 +179,22 @@ jobs:
       # would put thousands of lines of machine output in every spec diff, and a
       # reviewer skimming past generated code is a reviewer skimming past the
       # spec change that produced it.
+      #
+      # Pinned, and `typescript` supplied explicitly, for the reason spelled out
+      # in ci.yml: openapi-ts declares it as a *peer* dependency and npx does not
+      # install peers, so `@latest` fails on import with an undefined
+      # `ts.SyntaxKind`. It broke CI once. Here it would be worse — the publish
+      # job needs this one, so a tag would produce no release at all.
       - name: TypeScript
         run: |
-          npx --yes @hey-api/openapi-ts@latest \
+          npx --yes -p typescript@5.9.3 -p @hey-api/openapi-ts@0.99.0 openapi-ts \
             --input docs/api/openapi.yaml \
             --output clients/typescript \
             --client @hey-api/client-fetch
 
       - name: Go
         run: |
-          npx --yes @openapitools/openapi-generator-cli@latest generate \
+          npx --yes @openapitools/openapi-generator-cli@2.40.1 generate \
             -i docs/api/openapi.yaml \
             -g go \
             -o clients/go \
