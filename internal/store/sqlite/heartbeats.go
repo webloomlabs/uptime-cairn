@@ -9,6 +9,25 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
+// measuredResponseTime is the response-time expression every aggregate reads,
+// and the single place the rule lives: a response time counts only when the
+// check succeeded.
+//
+// A failing check still times something — the milliseconds to a refused
+// connection, a handshake that was rejected, a 500 that came back quickly — but
+// that is a time to a failure, not a latency of the service. Averaged in it
+// drags the mean down, and taken as a minimum it replaces it outright, which is
+// how a site answering in 200 ms comes to report a 3 ms fastest response.
+//
+// Only status 1 (up) qualifies. maintenance is deliberately out: the suppressed
+// verdict no longer records whether the check succeeded, so its timing cannot be
+// trusted in either direction. unknown and skipped never measured the target at
+// all, which is the same reason §5.2 keeps them out of uptime ratios.
+//
+// NULL rather than a filtered row, because the same sample feeds the status
+// counts: a WHERE would drop the down checks from down_count too.
+const measuredResponseTime = `CASE WHEN status = 1 THEN response_time_ms END`
+
 // WriteBatch writes results idempotently, in one transaction.
 //
 // Batch rather than row-at-a-time because this is the hottest write path in the

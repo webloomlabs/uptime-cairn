@@ -14,7 +14,19 @@ import type { FieldSpec } from './monitortypes';
  * can render.
  */
 
-export type ChannelFieldSpec = FieldSpec & { secret?: boolean; template?: boolean };
+export type ChannelFieldSpec = FieldSpec & {
+	secret?: boolean;
+	template?: boolean;
+	/**
+	 * What the server assumes when the key is absent from `config`.
+	 *
+	 * Only booleans carry one, and it is not cosmetic: an unset checkbox renders
+	 * as off, so a field the server defaults to *true* would show the opposite of
+	 * what it is about to do — and the user's first save fails on a setting they
+	 * can see is already the way they wanted it.
+	 */
+	default?: boolean;
+};
 
 export type ChannelSpec = {
 	label: string;
@@ -41,9 +53,15 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 				key: 'use_instance_smtp',
 				label: 'Use the instance SMTP settings',
 				kind: 'boolean',
-				hint: 'Turn this off to give the channel its own relay.'
+				default: true,
+				hint: 'Turn this off to give the channel its own relay, without configuring one for the whole instance.'
 			},
-			{ key: 'smtp_host', label: 'SMTP host', kind: 'text' },
+			{
+				key: 'smtp_host',
+				label: 'SMTP host',
+				kind: 'text',
+				hint: 'Required when the instance relay is off.'
+			},
 			{ key: 'smtp_port', label: 'SMTP port', kind: 'number', min: 1, max: 65535 },
 			{ key: 'smtp_username', label: 'SMTP username', kind: 'text' },
 			{ key: 'smtp_password', label: 'SMTP password', kind: 'secret', secret: true },
@@ -53,7 +71,12 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 				kind: 'select',
 				options: ['', 'none', 'starttls', 'tls']
 			},
-			{ key: 'from_address', label: 'From address', kind: 'text' },
+			{
+				key: 'from_address',
+				label: 'From address',
+				kind: 'text',
+				hint: 'Required when the instance relay is off.'
+			},
 			{ key: 'from_name', label: 'From name', kind: 'text' }
 		]
 	},
@@ -76,7 +99,13 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 				template: true,
 				hint: 'Leave empty for the default event envelope.'
 			},
-			{ key: 'verify_tls', label: 'Verify the TLS certificate', kind: 'boolean', advanced: true },
+			{
+				key: 'verify_tls',
+				label: 'Verify the TLS certificate',
+				kind: 'boolean',
+				default: true,
+				advanced: true
+			},
 			{ key: 'timeout_seconds', label: 'Timeout', kind: 'number', min: 1, max: 60, advanced: true }
 		]
 	},
@@ -192,7 +221,7 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 				options: ['', 'critical', 'error', 'warning', 'info']
 			},
 			{ key: 'region', label: 'Region', kind: 'select', options: ['', 'us', 'eu'] },
-			{ key: 'auto_resolve', label: 'Resolve on recovery', kind: 'boolean' }
+			{ key: 'auto_resolve', label: 'Resolve on recovery', kind: 'boolean', default: true }
 		]
 	},
 	opsgenie: {
@@ -207,7 +236,7 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 				kind: 'select',
 				options: ['', 'P1', 'P2', 'P3', 'P4', 'P5']
 			},
-			{ key: 'auto_close', label: 'Close on recovery', kind: 'boolean' }
+			{ key: 'auto_close', label: 'Close on recovery', kind: 'boolean', default: true }
 		]
 	},
 	twilio: {

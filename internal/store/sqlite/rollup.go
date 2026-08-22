@@ -37,7 +37,8 @@ func bucketExpr(column string, interval time.Duration) string {
 func (s *Store) RollUpRaw(ctx context.Context, from, to time.Time) (int64, error) {
 	const query = `
 WITH sample AS (
-    SELECT monitor_id, org_id, status, response_time_ms,
+    SELECT monitor_id, org_id, status,
+           ` + measuredResponseTime + ` AS response_time_ms,
            (time / 60000000) * 60000 AS bucket_start
     FROM heartbeats
     WHERE time >= ?1 AND time < ?2

@@ -96,7 +96,8 @@ func (s *Store) HistoryFromRaw(ctx context.Context, id model.ID, from, to time.T
 	micros := interval.Microseconds()
 	query := fmt.Sprintf(`
 WITH sample AS (
-    SELECT status, response_time_ms, ((time / %d) * %d) / 1000 AS bucket_start
+    SELECT status, `+measuredResponseTime+` AS response_time_ms,
+           ((time / %d) * %d) / 1000 AS bucket_start
     FROM heartbeats
     WHERE org_id = ?1 AND monitor_id = ?2 AND time >= ?3 AND time < ?4
 ),
@@ -208,7 +209,7 @@ func scanHistory(rows *sql.Rows) ([]store.HistoryBucket, error) {
 func (s *Store) UptimeFromRaw(ctx context.Context, id model.ID, from, to time.Time) (store.HistoryBucket, error) {
 	const query = `
 WITH sample AS (
-    SELECT status, response_time_ms FROM heartbeats
+    SELECT status, ` + measuredResponseTime + ` AS response_time_ms FROM heartbeats
     WHERE org_id = ?1 AND monitor_id = ?2 AND time >= ?3 AND time < ?4
 ),
 ranked AS (

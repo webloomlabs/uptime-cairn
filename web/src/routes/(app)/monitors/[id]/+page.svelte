@@ -21,7 +21,7 @@
 	import Button from '$lib/components/Button.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import StatusDial from '$lib/components/StatusDial.svelte';
-	import HeartbeatStrip from '$lib/components/HeartbeatStrip.svelte';
+	import HistoryBar from '$lib/components/HistoryBar.svelte';
 	import HistoryChart from '$lib/components/HistoryChart.svelte';
 
 	type UptimeSummary = {
@@ -44,6 +44,7 @@
 	let monitor = $state<Monitor | null>(null);
 	let beats = $state<Heartbeat[]>([]);
 	let history = $state<History | null>(null);
+	let day = $state<History | null>(null);
 	let uptime = $state<UptimeSummary | null>(null);
 	let certificate = $state<CertificateInfo | null>(null);
 	let error = $state<unknown>(null);
@@ -56,6 +57,12 @@
 		'7d': 604_800_000,
 		'30d': 2_592_000_000
 	};
+
+	// The uptime bar's own window, fixed at twenty-four hours in one-hour stones
+	// so that it says what the heading beside it says. It is a second request
+	// rather than a slice of `history`, because that one follows the chart's span
+	// picker and the bar must not change shape when somebody looks at an hour.
+	const BAR_HOUR = 3600_000;
 
 	async function loadCore() {
 		const [loaded, recent] = await Promise.all([
@@ -74,11 +81,19 @@
 		);
 	}
 
+	async function loadDay() {
+		const to = new Date();
+		const from = new Date(to.getTime() - SPANS['24h']);
+		day = await api.get<History>(
+			`/monitors/${id}/history?from=${from.toISOString()}&to=${to.toISOString()}&resolution=1h`
+		);
+	}
+
 	async function loadEverything() {
 		error = null;
 		try {
 			await loadCore();
-			await loadHistory();
+			await Promise.all([loadHistory(), loadDay()]);
 
 			// Both are supplementary: a monitor page that fails entirely because a
 			// certificate has never been observed would be useless for the several
@@ -275,7 +290,20 @@
 						</span>
 					</div>
 					<div class="mt-3">
-						<HeartbeatStrip {beats} limit={30} height={26} />
+						{#if day}
+							<HistoryBar
+								buckets={day.data}
+								from={day.from}
+								to={day.to}
+								interval={BAR_HOUR}
+								height={26}
+							/>
+						{:else}
+							<!-- Nothing rather than the last N checks: a strip of recent
+							     beats under this heading is the claim the bar exists to
+							     stop making. -->
+							<div style="height: 26px"></div>
+						{/if}
 					</div>
 					<p class="muted mt-2 text-xs">
 						{t('monitor.downChecks', { count: uptime?.windows?.['24h']?.down_checks ?? 0 })}

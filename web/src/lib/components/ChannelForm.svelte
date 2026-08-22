@@ -84,6 +84,20 @@
 		config = { ...config, [key]: value };
 	}
 
+	/**
+	 * What a boolean field is actually set to right now.
+	 *
+	 * An absent key does not mean off — it means the server will apply its own
+	 * default, and several of them default to on (`use_instance_smtp`,
+	 * `verify_tls`, `auto_resolve`). Rendering absence as an empty checkbox showed
+	 * the opposite of what was about to happen, and for the instance relay it made
+	 * the first save fail on a box the user could see was already unticked.
+	 */
+	function flag(field: ChannelFieldSpec): boolean {
+		const value = config[field.key];
+		return typeof value === 'boolean' ? value : (field.default ?? false);
+	}
+
 	function listValue(key: string): string {
 		const value = config[key];
 		return Array.isArray(value) ? value.join('\n') : '';
@@ -283,7 +297,7 @@
 						{id}
 						type="checkbox"
 						class="h-4 w-4"
-						checked={config[field.key] === true}
+						checked={flag(field)}
 						onchange={(e) => setConfig(field.key, e.currentTarget.checked)}
 						aria-describedby={describedBy}
 					/>

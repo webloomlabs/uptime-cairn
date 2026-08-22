@@ -725,3 +725,92 @@ func contains(haystack, needle string) bool {
 	}
 	return false
 }
+
+// A failing check still times something — the milliseconds to a refused
+// connection, a 500 that came back quickly — and that number is a time to a
+// failure, not a latency of the service. It must not reach any of the three
+// response-time figures, and the reason this test exists rather than a comment
+// is that the symptom is silent: a monitor answering in 200 ms simply starts
+// reporting a 3 ms fastest response, and nothing errors.
+func TestResponseTimesComeOnlyFromSuccessfulChecks(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	m := testMonitor("measured")
+	if err := s.CreateMonitor(t.Context(), m); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Four up checks at 200..500ms, and two failures that were fast about it.
+	// Every extreme is therefore decided by whether the failures count: the
+	// minimum is 3ms with them and 200ms without.
+	start := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	beats := []model.Heartbeat{
+		{Status: model.StatusUp, ResponseTime: ms(200)},
+		{Status: model.StatusDown, ResponseTime: ms(3)},
+		{Status: model.StatusUp, ResponseTime: ms(300)},
+		{Status: model.StatusMaintenance, ResponseTime: ms(9000)},
+		{Status: model.StatusUp, ResponseTime: ms(400)},
+		{Status: model.StatusUp, ResponseTime: ms(500)},
+	}
+	writeBeats(t, s, m, start, 5*time.Second, beats)
+	end := start.Add(time.Minute)
+
+	const (
+		wantCount = 4
+		wantSum   = 200.0 + 300 + 400 + 500
+		wantMin   = 200.0
+		wantMax   = 500.0
+	)
+
+	window, err := s.UptimeFromRaw(t.Context(), m.ID, start, end)
+	if err != nil {
+		t.Fatalf("uptime from raw: %v", err)
+	}
+	if window.Down != 1 {
+		t.Errorf("down count = %d, want 1 — the failure is still an observation", window.Down)
+	}
+	if window.ResponseTimeCount != wantCount || window.ResponseTimeSum != wantSum {
+		t.Errorf("window sum/count = %v/%d, want %v/%d",
+			window.ResponseTimeSum, window.ResponseTimeCount, wantSum, wantCount)
+	}
+	if window.ResponseTimeMin == nil || *window.ResponseTimeMin != wantMin {
+		t.Errorf("window min = %v, want %v", window.ResponseTimeMin, wantMin)
+	}
+	if window.ResponseTimeMax == nil || *window.ResponseTimeMax != wantMax {
+		t.Errorf("window max = %v, want %v", window.ResponseTimeMax, wantMax)
+	}
+	if window.ResponseTimeP95 == nil || *window.ResponseTimeP95 != wantMax {
+		t.Errorf("window p95 = %v, want %v — ranked over the four that count",
+			window.ResponseTimeP95, wantMax)
+	}
+
+	// The chart reads the same rule, so raw and rolled-up agree rather than the
+	// figures moving the moment the pipeline catches up.
+	buckets, err := s.HistoryFromRaw(t.Context(), m.ID, start, end, time.Minute)
+	if err != nil {
+		t.Fatalf("history from raw: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("produced %d buckets, want 1", len(buckets))
+	}
+	if b := buckets[0]; b.ResponseTimeCount != wantCount || b.ResponseTimeSum != wantSum ||
+		*b.ResponseTimeMin != wantMin || *b.ResponseTimeMax != wantMax {
+		t.Errorf("bucket = sum %v count %d min %v max %v, want %v/%d/%v/%v",
+			b.ResponseTimeSum, b.ResponseTimeCount, *b.ResponseTimeMin, *b.ResponseTimeMax,
+			wantSum, wantCount, wantMin, wantMax)
+	}
+
+	if _, err := s.RollUpRaw(t.Context(), start, end); err != nil {
+		t.Fatalf("roll up: %v", err)
+	}
+	rolled := readTier(t, s, "1m", m.ID)
+	if len(rolled) != 1 {
+		t.Fatalf("rolled %d buckets, want 1", len(rolled))
+	}
+	if b := rolled[0]; b.rtCount != wantCount || b.rtSum != wantSum ||
+		b.rtMin != wantMin || b.rtMax != wantMax || b.p95 != wantMax {
+		t.Errorf("1m tier = sum %v count %d min %v max %v p95 %v, want %v/%d/%v/%v/%v",
+			b.rtSum, b.rtCount, b.rtMin, b.rtMax, b.p95, wantSum, wantCount, wantMin, wantMax, wantMax)
+	}
+}

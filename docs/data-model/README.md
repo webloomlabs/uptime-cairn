@@ -601,6 +601,17 @@ data and make the API's three-way choice unimplementable. `unknown_count` and
 `skipped_count` never enter that expression, in either the numerator or the
 denominator.
 
+**The response-time columns count successful checks only** — heartbeats with
+`status = 1`. A failing check still times something (the milliseconds to a
+refused connection, a 500 that came back quickly), but that is a time to a
+failure rather than a latency of the service, and mixing the two makes the
+minimum in particular meaningless: a site answering in 200 ms reports a 3 ms
+fastest response. `maintenance` is excluded for a different reason — the
+suppressed verdict no longer records whether the check succeeded, so its timing
+cannot be trusted either way — and `unknown` and `skipped` never measured the
+target at all, exactly as in the uptime denominator. A bucket can therefore have
+a non-zero `down_count` and a null `response_time_min`, and that is correct.
+
 A bucket with no checks has **no row** — absence means "no data", which the API
 surfaces as a null `uptime_ratio`. That distinction matters: a gap is not
 downtime, and a status page that renders it as downtime is lying.
