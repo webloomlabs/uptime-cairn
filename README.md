@@ -165,7 +165,7 @@ webloomlabs/uptime-cairn:latest          # Docker Hub
 ghcr.io/webloomlabs/uptime-cairn:latest  # GHCR
 ```
 
-Pin the tag in anything you intend to keep. A release publishes three: `:1.0.0`
+Pin the tag in anything you intend to keep. A release publishes three: `:1.0.1`
 is exact and never moves, `:1.0` follows the patch series, and `:latest` follows
 everything stable. There is deliberately no `:1` — a tag that silently carries
 you across a minor version is not a pin.

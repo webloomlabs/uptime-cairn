@@ -118,7 +118,7 @@ Every release publishes static binaries with checksums for five targets:
 | `darwin/amd64` | Intel Macs, for development |
 
 ```sh
-VERSION=v1.0.0
+VERSION=v1.0.1
 TARGET=linux_amd64        # or linux_arm64, linux_armv7, darwin_arm64, darwin_amd64
 BASE=https://github.com/webloomlabs/uptime-cairn/releases/download/$VERSION
 

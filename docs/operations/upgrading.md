@@ -106,7 +106,7 @@ private, and nothing about the downgrade above.
 ## After the upgrade
 
 ```sh
-curl -s localhost:3000/healthz          # {"status":"ok","version":"v1.0.0"}
+curl -s localhost:3000/healthz          # {"status":"ok","version":"v1.0.1"}
 ```
 
 `version` there is the binary's own build identity, so it is also the check that
