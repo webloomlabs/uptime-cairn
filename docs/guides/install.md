@@ -131,9 +131,10 @@ sudo install -m 0755 cairn_${VERSION}_${TARGET}/cairn /usr/local/bin/cairn
 ```
 
 The archive unpacks into a directory of its own name carrying the binary,
-`README.md`, `LICENSE`, and `SECURITY.md` — hence the path in the last line. The
-names come from the release workflow rather than from convention, so if a target
-above ever disagrees with what is attached to a release, the release is right.
+`README.md`, `LICENSE`, `NOTICE`, and `SECURITY.md` — hence the path in the
+last line. The names come from the release workflow rather than from
+convention, so if a target above ever disagrees with what is attached to a
+release, the release is right.
 
 Verify the checksum. It is two commands and it is the difference between running
 what we published and running whatever a mirror handed you.

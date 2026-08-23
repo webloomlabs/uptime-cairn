@@ -13,7 +13,7 @@ preferences.**
 ## The project in brief
 
 **Uptime Cairn** is an all-in-one open source uptime monitoring and reporting
-platform, AGPLv3, designed to serve a freelancer with three sites and an
+platform, Apache 2.0, designed to serve a freelancer with three sites and an
 enterprise with SOC 2 auditors from the same install — no paywalled features, no
 separate editions.
 

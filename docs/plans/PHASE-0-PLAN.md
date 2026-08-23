@@ -32,7 +32,7 @@ Phase 0 produces **no product code** except the load-test harness. Everything el
 | Deliverable | Detail |
 |---|---|
 | GitHub org + repo | Org `uptimecairn`, monorepo (Go backend + probe, frontend, docs, importer) |
-| Licence | AGPLv3 with CLA. CLA bot wired into PR flow from the first external PR |
+| Licence | Apache 2.0 with CLA. CLA bot wired into PR flow from the first external PR |
 | `GOVERNANCE.md` | Documented succession plan; target of 3+ committers with merge rights before v1.0 stated explicitly |
 | `CODE_OF_CONDUCT.md` | Contributor Covenant |
 | `ROADMAP.md` | Public phase roadmap distilled from the project plan |

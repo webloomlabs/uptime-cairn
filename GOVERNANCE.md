@@ -23,8 +23,9 @@ Three commitments constrain every governance decision. They are not up for
 casual revision:
 
 1. **No feature is paywalled in the open source build.** RBAC, SSO, multi-region
-   probing, PDF reports, and audit logs all ship in the AGPL build. The project
-   earns money from hosting and support, never by crippling the software.
+   probing, PDF reports, and audit logs all ship in the open source build. The
+   project earns money from hosting and support, never by crippling the
+   software.
 2. **One codebase, one binary, progressive disclosure.** Complexity is revealed
    on demand, never imposed by default. We do not fork into "community" and
    "enterprise" editions.
@@ -179,8 +180,8 @@ they want it back.
 **Total maintainer loss.** If no maintainer remains reachable for 60 days, the
 active committers may, by two-thirds vote, appoint maintainers from among
 themselves and take control of the project assets. If the *committers* are also
-gone, the project is considered dormant: the AGPL guarantees anyone may fork and
-continue it, and the remaining assets should be handed to a recognised open
+gone, the project is considered dormant: the licence guarantees anyone may fork
+and continue it, and the remaining assets should be handed to a recognised open
 source foundation if one will take them.
 
 **Archival, not abandonment.** If the project is ever wound down, maintainers
@@ -204,10 +205,14 @@ obligations:
 
 ## 6. Licence, CLA, and relicensing
 
-Uptime Cairn is licensed under the **GNU Affero General Public License v3.0**
-(see [LICENSE](LICENSE)). AGPL is a deliberate choice: it prevents a hyperscaler
-strip-mining the work into a closed SaaS without contributing back, while
-protecting openness rather than monetising restriction.
+Uptime Cairn is licensed under the **Apache License, Version 2.0**
+(see [LICENSE](LICENSE)). Apache 2.0 is a deliberate choice: it puts no copyleft
+condition on people who run, embed, or build on Uptime Cairn, and its explicit
+patent grant makes the software safe to adopt inside a company without a legal
+review. The cost is real and worth stating plainly — unlike a copyleft
+licence, Apache 2.0 does not compel anyone, hyperscaler included, to contribute
+their changes back. What keeps this project open is therefore §1.1 and the
+governance around it, not a licence obligation.
 
 Contributions require signing a **Contributor License Agreement**. The CLA
 grants the project the right to license contributions, including the option to

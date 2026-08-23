@@ -151,7 +151,7 @@ cancelled.
       untouched by this decision.
 - [x] Nothing is paywalled in the open source build — TimescaleDB (Apache
       2.0 edition) ships as a required but fully open-source dependency of
-      the AGPL build; no capability sits behind a paid tier.
+      the open source build; no capability sits behind a paid tier.
 - [x] API-first — no privileged endpoints the dashboard uses and users
       cannot — unaffected; the storage backend sits behind the repository
       interface regardless of which backend is active.

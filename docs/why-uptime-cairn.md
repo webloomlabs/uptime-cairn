@@ -78,9 +78,9 @@ Non-negotiable. Every proposed feature is tested against these.
    running. If onboarding is harder than Uptime Kuma's, adoption dies no matter
    how good the rest is.
 2. **No feature is paywalled in the open source build.** RBAC, SSO,
-   multi-region, PDF reports, audit logs — all of it ships in the AGPL build.
-   Uptime Cairn earns money from hosting and support, never by crippling the
-   software.
+   multi-region, PDF reports, audit logs — all of it ships in the open source
+   build. Uptime Cairn earns money from hosting and support, never by crippling
+   the software.
 3. **API-first, literally.** The full surface is specified in OpenAPI *before*
    the UI exists. The dashboard is the first API client, not a privileged one.
 4. **Progressive disclosure.** Advanced surfaces stay hidden until you opt in.

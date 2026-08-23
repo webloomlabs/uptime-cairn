@@ -71,8 +71,8 @@ info:
     added, so clients must tolerate unknown values. Breaking changes go to
     `/api/v2`. See docs/api/README.md for the deprecation policy.
   license:
-    name: AGPL-3.0-or-later
-    identifier: AGPL-3.0-or-later
+    name: Apache-2.0
+    identifier: Apache-2.0
   contact:
     name: Uptime Cairn
     url: https://uptimecairn.dev
@@ -6110,7 +6110,7 @@ components:
           type: object
           description: |
             White-labelling — the client receives a report that looks like their agency
-            made it. Ships in the AGPL build like everything else.
+            made it. Ships in the open source build like everything else.
           properties:
             logo_url: { type: [string, "null"], format: uri }
             primary_color: { type: [string, "null"], pattern: "^#[0-9a-fA-F]{6}$" }

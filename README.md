@@ -10,7 +10,7 @@ customers a status page that says so.**
 Free, open source, and self-hosted. One Docker container, one file of data, no
 database server to set up. Running in about a minute.
 
-[![Licence: AGPL v3](https://img.shields.io/badge/licence-AGPLv3-blue.svg)](LICENSE)
+[![Licence: Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/webloomlabs/uptime-cairn?label=release)](https://github.com/webloomlabs/uptime-cairn/releases)
 [![CI](https://github.com/webloomlabs/uptime-cairn/actions/workflows/ci.yml/badge.svg)](https://github.com/webloomlabs/uptime-cairn/actions/workflows/ci.yml)
 
@@ -146,7 +146,7 @@ security@uptimecairn.dev.
 
 ## Licence
 
-[AGPLv3](LICENSE), with a Contributor License Agreement that
+[Apache License 2.0](LICENSE), with a Contributor License Agreement that
 [explicitly cannot](GOVERNANCE.md) be used to paywall a feature in the open
 build.
 

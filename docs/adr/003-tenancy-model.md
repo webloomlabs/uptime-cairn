@@ -176,7 +176,7 @@ design work into Phase 1 for no real benefit to the hosting business.
       sees an organisation concept exists.
 - [x] Nothing is paywalled in the open source build — the column, and
       whatever tenancy model Phase 3 builds on top of it, ships in the
-      AGPL build per §2.10.
+      open source build per §2.10.
 - [x] API-first — no privileged endpoints the dashboard uses and users
       cannot — unaffected; no tenancy-specific API surface exists yet.
 - [x] Progressive disclosure — no new complexity imposed on the solo user

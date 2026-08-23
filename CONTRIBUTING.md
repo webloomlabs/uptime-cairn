@@ -57,8 +57,9 @@ codebase is arranged and which import rules hold the architecture's seams open.
 
 ## Contributor License Agreement
 
-Uptime Cairn is licensed under [AGPLv3](LICENSE), and contributions require
-signing a CLA. A bot will prompt you on your first pull request.
+Uptime Cairn is licensed under the [Apache License 2.0](LICENSE), and
+contributions require signing a CLA. A bot will prompt you on your first pull
+request.
 
 The CLA lets the project relicense or dual-license in future if its needs
 change. Because that asks real trust of you, governance bounds it: relicensing

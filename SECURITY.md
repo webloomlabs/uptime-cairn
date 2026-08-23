@@ -29,8 +29,9 @@ and a key will come back.
 We will tell you before we publish, and we will not publish before a fixed
 release exists.
 
-This is an AGPL project with no bug bounty. What we can offer is that a report
-will be read by somebody who understands the code, and answered by a person.
+This is an Apache 2.0 project with no bug bounty. What we can offer is that a
+report will be read by somebody who understands the code, and answered by a
+person.
 
 ### Scope
 

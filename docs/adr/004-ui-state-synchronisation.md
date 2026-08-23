@@ -186,7 +186,7 @@ instead of one.
       updates, and reconciliation are all invisible to a solo user with a
       handful of monitors; nothing about this decision adds a setup step.
 - [x] Nothing is paywalled in the open source build — the entire
-      state-synchronisation model ships in the AGPL build; there is no
+      state-synchronisation model ships in the open source build; there is no
       "real-time updates" tier.
 - [x] API-first — no privileged endpoints the dashboard uses and users
       cannot — the paginated list endpoints and the membership-

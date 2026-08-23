@@ -380,8 +380,8 @@ private probes specifically.
       promised and what decision 14 keeps true.
 - [x] **Nothing is paywalled in the open source build.** Remote probes,
       multi-control-plane support, buffering and replay, and the protocol
-      specification itself all ship in the AGPL build. There is no "distributed
-      monitoring" tier.
+      specification itself all ship in the open source build. There is no
+      "distributed monitoring" tier.
 - [x] **API-first — no privileged endpoints the dashboard uses and users cannot.**
       The probe protocol is not REST and is deliberately absent from the OpenAPI
       spec, but it is not privileged: it is published to the standard that a

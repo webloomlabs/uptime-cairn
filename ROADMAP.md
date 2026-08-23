@@ -166,8 +166,8 @@ pages and report layouts.
 ## What is deliberately *not* on this roadmap
 
 - A paid tier that unlocks features. RBAC, SSO, multi-region, PDF reports, and
-  audit logs all ship in the AGPL build, in the phase listed above. Funding comes
-  from hosting and support.
+  audit logs all ship in the open source build, in the phase listed above.
+  Funding comes from hosting and support.
 - A separate "enterprise edition" codebase. One codebase, one binary.
 - Telemetry that is on by default.
 - A required Redis (or any other) dependency. Optional, never mandatory.

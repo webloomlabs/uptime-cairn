@@ -106,7 +106,7 @@ jobs:
           name="cairn_${version}_${GOOS}_${GOARCH}${GOARM:+v$GOARM}"
           mkdir -p "dist/${name}"
           mv cairn "dist/${name}/"
-          cp README.md LICENSE SECURITY.md "dist/${name}/"
+          cp README.md LICENSE NOTICE SECURITY.md "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           rm -rf "dist/${name}"
 
