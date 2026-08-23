@@ -73,7 +73,7 @@ commit.
 
 **A monitor** — uptime, response times, certificate expiry:
 
-<img src="./screenshots/moniter.png" width="700" alt="Monitor detail page with uptime percentages, a response time chart, and certificate information" />
+<img src="./screenshots/monitor.png" width="700" alt="Monitor detail page with uptime percentages, a response time chart, and certificate information" />
 
 **A status page** — what your customers see:
 
