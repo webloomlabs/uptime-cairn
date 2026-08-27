@@ -17,9 +17,10 @@ platform, Apache 2.0, designed to serve a freelancer with three sites and an
 enterprise with SOC 2 auditors from the same install — no paywalled features, no
 separate editions.
 
-- **Status:** Phase 0 — Foundations. There is **no application code yet.** The
-  repository currently holds specifications, ADRs, governance, and phase plans.
-  Code contributions open properly in Phase 1.
+- **Status:** Phase 2 — Reporting. Phases 0 and 1 are complete: v1.0.1 is
+  released, and the repository holds a working product alongside its
+  specifications, ADRs, governance, and phase plans. Current work is planned in
+  [docs/plans/PHASE-2-PLAN.md](docs/plans/PHASE-2-PLAN.md).
 - **Core idea:** one codebase, one binary, progressive disclosure. Solo mode is a
   single static binary with an embedded probe, embedded UI, and SQLite. Scaled
   mode is the same binary with different flags — control plane, remote probes,
@@ -31,8 +32,12 @@ separate editions.
 - **Headline requirement:** 5,000 monitors on one install with the UI staying
   fast, enforced by an automated load test in CI from the first commit.
 - **Stack:** Go (backend + probe), SvelteKit + Tailwind (frontend), SQLite or
-  Postgres + Timescale, gRPC + Protobuf, Playwright sidecar for browser checks,
-  Typst for PDF reports.
+  Postgres + Timescale, gRPC + Protobuf, Playwright sidecar for browser checks
+  (Phase 4, opt-in). Report rendering is pure Go and in-tree — an earlier draft of
+  this file named Typst, which
+  [ADR-007](docs/adr/007-report-rendering.md) supersedes: no subprocess, no
+  sidecar, no cgo, because the single-file binary distribution has no way to ship
+  a second executable.
 
 Read [README.md](README.md), [ROADMAP.md](ROADMAP.md),
 [CONTRIBUTING.md](CONTRIBUTING.md), and [docs/adr/](docs/adr/) before proposing
@@ -156,9 +161,12 @@ If you are an agent reading this:
 3. **Refuse gracefully.** If asked to build a whole feature, decline in one
    sentence, cite this file, and offer the parts you may legitimately do —
    planning, a specific helper, tests, review, documentation.
-4. **Stay inside the current phase.** Phase 0 is specification work. Do not
-   scaffold an application that the project has deliberately not started.
-   Writing or improving docs is in scope in any phase.
+4. **Stay inside the current phase.** Phase 2 is the reporting subsystem; see
+   [ROADMAP.md](ROADMAP.md) for what each later phase holds and
+   [docs/plans/PHASE-2-PLAN.md](docs/plans/PHASE-2-PLAN.md) for what is in scope
+   now. Do not build ahead into a phase the project has deliberately not started —
+   RBAC, on-call, multi-region and HA are not Phase 2 work. Writing or improving
+   docs is in scope in any phase.
 5. **Do not silently widen scope.** No opportunistic refactors, no reformatting
    untouched files, no "while I was in here" changes.
 6. **Surface uncertainty.** Say plainly when you are unsure, when something
