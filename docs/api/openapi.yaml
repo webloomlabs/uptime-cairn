@@ -3248,6 +3248,367 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  # --------------------------------------------------------------------------
+  # ADD — brand profiles.
+  #
+  # PHASE-2-PLAN §4.6 commits to a brand profile shared by report templates and
+  # status pages, "replacing the duplicated fields rather than adding a third
+  # set". Branding is currently inline on ReportTemplate and again on StatusPage;
+  # this is the shared resource both then reference.
+  # --------------------------------------------------------------------------
+  /api/v1/brand-profiles:
+    get:
+      tags: [Reports]
+      operationId: listBrandProfiles
+      summary: List brand profiles
+      x-cairn-phase: 2
+      x-cairn-scopes: [brand_profiles:read]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200":
+          description: A page of brand profiles.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/BrandProfile" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Reports]
+      operationId: createBrandProfile
+      summary: Create a brand profile
+      x-cairn-phase: 2
+      x-cairn-scopes: [brand_profiles:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BrandProfileWrite" }
+      responses:
+        "201":
+          description: Profile created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrandProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/v1/brand-profiles/{brandProfileId}:
+    parameters:
+      - $ref: "#/components/parameters/BrandProfileId"
+    get:
+      tags: [Reports]
+      operationId: getBrandProfile
+      summary: Retrieve a brand profile
+      x-cairn-phase: 2
+      x-cairn-scopes: [brand_profiles:read]
+      responses:
+        "200":
+          description: The profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrandProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Reports]
+      operationId: updateBrandProfile
+      summary: Update a brand profile
+      x-cairn-phase: 2
+      x-cairn-scopes: [brand_profiles:write]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BrandProfileWrite" }
+      responses:
+        "200":
+          description: The updated profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrandProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [Reports]
+      operationId: deleteBrandProfile
+      summary: Delete a brand profile
+      description: |
+        Refused while a report template or status page still references it — a report
+        that silently loses its client's branding on the first of the month is worse
+        than a refused delete.
+      x-cairn-phase: 2
+      x-cairn-scopes: [brand_profiles:write]
+      responses:
+        "204": { description: Profile deleted. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/brand-profiles/{brandProfileId}/logo:
+    parameters:
+      - $ref: "#/components/parameters/BrandProfileId"
+    put:
+      tags: [Reports]
+      operationId: uploadBrandProfileLogo
+      summary: Upload a brand profile logo
+      description: |
+        PNG or JPEG only, and the constraint is real rather than cautious: ADR-007
+        renders PDF with an in-tree writer that embeds raster images and has no SVG
+        path translator. An SVG is refused here, at upload, with an explanation —
+        not silently dropped from the PDF at 09:00 on the first of the month.
+      x-cairn-phase: 2
+      x-cairn-scopes: [brand_profiles:write]
+      requestBody:
+        required: true
+        content:
+          image/png:
+            schema: { type: string, format: binary }
+          image/jpeg:
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: The updated profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BrandProfile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+
+  # --------------------------------------------------------------------------
+  # ADD — artifact-addressed download.
+  #
+  # ADR-008 makes the artifact the addressable thing: it has an id, a checksum,
+  # a size and an expiry. The existing /report-runs/{id}/download?format= stays
+  # as the convenience path; this is what a share link and an audit trail point
+  # at.
+  # --------------------------------------------------------------------------
+  /api/v1/report-runs/{reportRunId}/artifacts/{artifactId}:
+    parameters:
+      - $ref: "#/components/parameters/ReportRunId"
+      - $ref: "#/components/parameters/ArtifactId"
+    get:
+      tags: [Reports]
+      operationId: downloadReportArtifactById
+      summary: Download one generated artifact
+      description: |
+        Streams the stored bytes. `ETag` carries the artifact's SHA-256, so a client
+        that has already fetched it can revalidate, and a caller checking that a
+        document is the one that was sent has the digest without downloading it —
+        `HEAD` returns the headers alone.
+      x-cairn-phase: 2
+      x-cairn-scopes: [reports:read]
+      responses:
+        "200":
+          description: The stored artifact.
+          headers:
+            ETag:
+              description: The artifact's SHA-256, quoted.
+              schema: { type: string }
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            text/html:
+              schema: { type: string }
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportDocument" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { $ref: "#/components/responses/Gone" }
+
+  # --------------------------------------------------------------------------
+  # ADD — share link lifecycle.
+  #
+  # The existing ReportRun carried read-only `share_url` and `share_expires_at`
+  # with no way to create or revoke one. ADR-008 requires revocable.
+  # --------------------------------------------------------------------------
+  /api/v1/report-runs/{reportRunId}/share:
+    parameters:
+      - $ref: "#/components/parameters/ReportRunId"
+    post:
+      tags: [Reports]
+      operationId: createReportShareLink
+      summary: Create a public share link for a run
+      description: |
+        Returns the link once. The token is stored hashed for lookup and sealed for
+        replay, following the unsubscribe-token precedent in `Subscriber` — so this
+        response is the only place the plaintext appears outside the sealed envelope.
+
+        Anyone holding the URL can read the report. The page is `noindex` and rate
+        limited, and the link can be revoked.
+      x-cairn-phase: 2
+      x-cairn-scopes: [reports:write]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReportShareLinkWrite" }
+      responses:
+        "201":
+          description: Link created. The `url` is shown once.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportShareLinkCreated" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: A link already exists for this run. Revoke it first, or PATCH its expiry.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [Reports]
+      operationId: revokeReportShareLink
+      summary: Revoke the share link for a run
+      description: The link stops resolving immediately. The artifacts are untouched.
+      x-cairn-phase: 2
+      x-cairn-scopes: [reports:write]
+      responses:
+        "204": { description: Link revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --------------------------------------------------------------------------
+  # ADD — the public read path.
+  #
+  # Unauthenticated, following the status page discipline: a separate public
+  # projection rather than a filter over the private shape.
+  # --------------------------------------------------------------------------
+  /api/v1/public/reports/{shareToken}:
+    parameters:
+      - $ref: "#/components/parameters/ShareToken"
+    get:
+      tags: [Public]
+      operationId: getPublicReport
+      summary: Read a shared report
+      description: |
+        Serves the stored artifact's metadata and available formats — never a
+        re-render. A client who bookmarked this link must not find the figures
+        changed underneath them because retention has since dropped a tier
+        (ADR-008).
+
+        Immutable once generated, so it caches hard.
+      security: []
+      x-cairn-phase: 2
+      responses:
+        "200":
+          description: The shared report.
+          headers:
+            Cache-Control:
+              schema: { type: string }
+            ETag:
+              schema: { type: string }
+            X-Robots-Tag:
+              description: Always `noindex, nofollow`.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicReport" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/public/reports/{shareToken}/download:
+    parameters:
+      - $ref: "#/components/parameters/ShareToken"
+    get:
+      tags: [Public]
+      operationId: downloadPublicReport
+      summary: Download a shared report in one format
+      security: []
+      x-cairn-phase: 2
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema: { $ref: "#/components/schemas/ReportFormat" }
+      responses:
+        "200":
+          description: The stored artifact.
+          headers:
+            ETag:
+              schema: { type: string }
+            X-Robots-Tag:
+              schema: { type: string }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            text/html:
+              schema: { type: string }
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportDocument" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  # --------------------------------------------------------------------------
+  # ADD — the forward-looking expiry calendar.
+  #
+  # PHASE-2-PLAN §4.8: "a forward-looking calendar, not an alert three days
+  # before it breaks", browsable and schedulable. /monitors/{id}/certificate
+  # answers for one monitor; this answers across the estate.
+  # --------------------------------------------------------------------------
+  /api/v1/expiries:
+    get:
+      tags: [Reports]
+      operationId: listUpcomingExpiries
+      summary: List upcoming certificate and domain expiries
+      x-cairn-phase: 2
+      x-cairn-scopes: [monitors:read]
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/CollectionLimit"
+        - name: within_days
+          in: query
+          description: Only entries expiring within this many days. Omit for everything known.
+          schema: { type: integer, minimum: 1, maximum: 3650 }
+        - name: kind
+          in: query
+          schema:
+            type: array
+            items: { type: string, enum: [certificate, domain] }
+          style: form
+          explode: true
+        - name: tag_id
+          in: query
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: A page of upcoming expiries, soonest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/UpcomingExpiry" }
+                  pagination: { $ref: "#/components/schemas/CursorPagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
 components:
 
   securitySchemes:
@@ -3380,6 +3741,22 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    BrandProfileId:
+      name: brandProfileId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ArtifactId:
+      name: artifactId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ShareToken:
+      name: shareToken
+      in: path
+      required: true
+      description: The opaque share token. Never a report or run identifier.
+      schema: { type: string, minLength: 22, maxLength: 128 }
 
   responses:
     BadRequest:
@@ -3427,6 +3804,20 @@ components:
         Retry-After:
           description: Seconds to wait before retrying.
           schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Gone:
+      description: |
+        The resource existed and no longer does — a report artifact reclaimed under the
+        retention policy, or a share link that was revoked. Distinguished from 404
+        because "it is gone" and "it was never here" are different answers to somebody
+        holding a bookmark, and only one of them is true.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    UnsupportedMediaType:
+      description: The content type is not one this endpoint accepts. The problem detail names those that are.
       content:
         application/problem+json:
           schema: { $ref: "#/components/schemas/Problem" }
@@ -3711,6 +4102,8 @@ components:
         - schedules:write
         - reports:read
         - reports:write
+        - brand_profiles:read
+        - brand_profiles:write
 
     ApiKey:
       type: object
@@ -3908,6 +4301,24 @@ components:
           description: Present when requested via `include=uptime`.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
+        slo_target_percent:
+          type: [number, "null"]
+          minimum: 0
+          exclusiveMaximum: 100
+          description: |
+            Target uptime percentage, read by reporting. Null means no target, which is the
+            default — the field is inert until set.
+
+            Reporting resolves a target first-match-wins: the report template's
+            `sla_target`, then this, then the group's value, then none, in which case the
+            SLA block is absent rather than defaulted to a number nobody chose.
+
+            Exclusive of 100 because a 100% target has an error budget of zero seconds,
+            which makes burn rate undefined and every report a breach report.
+
+            Stored here rather than on the report so that alerting can act on the same
+            number later without a second place to configure it. Nothing alerts on it in
+            Phase 2, and no monitor's status is affected by it.
 
     MonitorLiveUpdate:
       type: object
@@ -4054,6 +4465,24 @@ components:
             - $ref: "#/components/schemas/PushConfig"
             - $ref: "#/components/schemas/DockerConfig"
             - $ref: "#/components/schemas/GrpcConfig"
+        slo_target_percent:
+          type: [number, "null"]
+          minimum: 0
+          exclusiveMaximum: 100
+          description: |
+            Target uptime percentage, read by reporting. Null means no target, which is the
+            default — the field is inert until set.
+
+            Reporting resolves a target first-match-wins: the report template's
+            `sla_target`, then this, then the group's value, then none, in which case the
+            SLA block is absent rather than defaulted to a number nobody chose.
+
+            Exclusive of 100 because a 100% target has an error budget of zero seconds,
+            which makes burn rate undefined and every report a breach report.
+
+            Stored here rather than on the report so that alerting can act on the same
+            number later without a second place to configure it. Nothing alerts on it in
+            Phase 2, and no monitor's status is affected by it.
 
     MonitorBulkRequest:
       type: object
@@ -4669,6 +5098,24 @@ components:
           description: Worst status among the group's monitors — down beats pending beats up.
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
+        slo_target_percent:
+          type: [number, "null"]
+          minimum: 0
+          exclusiveMaximum: 100
+          description: |
+            Target uptime percentage, read by reporting. Null means no target, which is the
+            default — the field is inert until set.
+
+            Reporting resolves a target first-match-wins: the report template's
+            `sla_target`, then the monitor's own value, then this, then none, in which case the
+            SLA block is absent rather than defaulted to a number nobody chose.
+
+            Exclusive of 100 because a 100% target has an error budget of zero seconds,
+            which makes burn rate undefined and every report a breach report.
+
+            Stored here rather than on the report so that alerting can act on the same
+            number later without a second place to configure it. Nothing alerts on it in
+            Phase 2, and no monitor's status is affected by it.
 
     GroupWrite:
       type: object
@@ -4677,6 +5124,24 @@ components:
         name: { type: string, minLength: 1, maxLength: 200 }
         description: { type: [string, "null"], maxLength: 2000 }
         parent_group_id: { type: [string, "null"], format: uuid }
+        slo_target_percent:
+          type: [number, "null"]
+          minimum: 0
+          exclusiveMaximum: 100
+          description: |
+            Target uptime percentage, read by reporting. Null means no target, which is the
+            default — the field is inert until set.
+
+            Reporting resolves a target first-match-wins: the report template's
+            `sla_target`, then the monitor's own value, then this, then none, in which case the
+            SLA block is absent rather than defaulted to a number nobody chose.
+
+            Exclusive of 100 because a 100% target has an error budget of zero seconds,
+            which makes burn rate undefined and every report a breach report.
+
+            Stored here rather than on the report so that alerting can act on the same
+            number later without a second place to configure it. Nothing alerts on it in
+            Phase 2, and no monitor's status is affected by it.
 
     Tag:
       type: object
@@ -5819,6 +6284,18 @@ components:
             rollup_1h_days: { type: integer, minimum: 0, default: 365 }
             rollup_1d_days: { type: integer, minimum: 0, default: 0 }
             webhook_delivery_days: { type: integer, minimum: 1, default: 30 }
+            report_artifact_days:
+              type: integer
+              minimum: 0
+              default: 365
+              description: |
+                How long generated report artifacts are kept; zero keeps them indefinitely.
+
+                Deliberately independent of the rollup tiers, and exempt from the
+                coarser-outlives-finer rule above: an artifact is expected to outlive the
+                data it was computed from, which is the whole reason for keeping it. When
+                it expires the bytes are reclaimed and the row is kept, so a bookmarked
+                share link answers `410 Gone` rather than `404`.
         smtp:
           type: object
           description: Instance-wide SMTP, used by email channels that do not carry their own.
@@ -5864,6 +6341,60 @@ components:
           properties:
             enabled: { type: boolean, default: false }
             last_sent_at: { type: [string, "null"], format: date-time, readOnly: true }
+        report_storage:
+          type: object
+          description: |
+            Optional offsite mirror for generated report artifacts. Local storage under the
+            data directory is the source of truth and the only read path in every
+            configuration; this is a durability copy, and a failure to upload is recorded
+            rather than fatal.
+
+            Distinct from a report schedule's S3 *delivery*, which drops one run's files
+            for a recipient. They share a client and nothing else.
+          properties:
+            mirror_enabled: { type: boolean, default: false }
+            bucket: { type: [string, "null"] }
+            prefix: { type: [string, "null"] }
+            region:
+              type: [string, "null"]
+              description: Required for the request signature even where the provider ignores it.
+            endpoint:
+              type: [string, "null"]
+              format: uri
+              description: Override for S3-compatible providers — MinIO, R2, Backblaze, Garage, Ceph.
+            path_style:
+              type: boolean
+              default: false
+              description: |
+                Path-style addressing rather than virtual-host. MinIO, Garage and Ceph
+                commonly need it; AWS prefers the alternative. Selectable because
+                "S3-compatible" means little without it.
+            access_key_id: { type: [string, "null"] }
+            secret_access_key:
+              type: [string, "null"]
+              writeOnly: true
+              description: |
+                Sealed at rest exactly as `smtp.password` is — encrypted rather than hashed,
+                because it is replayed on every request.
+            secret_access_key_set:
+              type: boolean
+              readOnly: true
+              description: Whether a secret is stored. The value is never read back.
+            server_side_encryption:
+              type: [string, "null"]
+              enum: ["AES256", "aws:kms", null]
+              description: |
+                Passed through as `x-amz-server-side-encryption`. Client-side encryption is
+                not implemented: artifacts are not encrypted at rest, consistently with the
+                monitor names and uptime figures already in plaintext in the database.
+            max_artifact_bytes:
+              type: integer
+              minimum: 1
+              default: 104857600
+              description: |
+                Per-artifact ceiling, enforced with an error naming the limit and the size
+                reached. The case that hits it is not the PDF: a CSV over 5,000 monitors for
+                a year is roughly 1.8 million daily rows.
 
     UserRole:
       type: string
@@ -6083,7 +6614,10 @@ components:
             incident timeline.
         scope:
           type: object
-          description: What the report covers. Sources combine as a union.
+          description: |
+            What the report covers. Sources combine as a union, and are resolved at run
+            time rather than at save time: an agency that adds a monitor to a client's
+            tag expects it in that client's next report without editing the report.
           properties:
             monitor_ids: { type: array, items: { type: string, format: uuid } }
             group_ids: { type: array, items: { type: string, format: uuid } }
@@ -6096,33 +6630,83 @@ components:
           type: string
           enum: [day, week, month, quarter, year, custom]
           default: month
+        period_style:
+          type: string
+          enum: [calendar, rolling]
+          default: calendar
+          description: |
+            `calendar` cuts the last complete period in the schedule's timezone — what a
+            client invoiced monthly expects. `rolling` counts back from the run time.
         sla_target:
           type: [number, "null"]
           minimum: 0
-          maximum: 100
-          description: Target uptime percentage for `sla` reports.
+          exclusiveMaximum: 100
+          description: |
+            Target uptime percentage for `sla` reports, overriding whatever the monitors in
+            scope carry.
+
+            Resolution order, first match winning: this field; the monitor's
+            `slo_target_percent`; the monitor's group's `slo_target_percent`; then none, in
+            which case the report's SLA block is absent rather than defaulted.
+
+            Null here is "use the monitors' own targets", not "no target".
+        response_time_target_ms:
+          type: [integer, "null"]
+          minimum: 1
+          description: |
+            The threshold behind the response-time block's `days_over_target`. Distinct
+            from a monitor's own `response_time_threshold_ms`, which marks a check down
+            when breached; this one classifies days after the fact and changes no
+            monitor's status.
         maintenance_handling:
           type: string
           enum: [exclude, count_as_up, count_as_down]
           default: exclude
           description: How maintenance time counts toward the reported figure. Stated in the output.
-        branding:
-          type: object
-          description: |
-            White-labelling — the client receives a report that looks like their agency
-            made it. Ships in the open source build like everything else.
+        comparison:
+          type: [object, "null"]
+          description: For `comparative` reports. Null for every other type.
+          required: [mode]
           properties:
-            logo_url: { type: [string, "null"], format: uri }
-            primary_color: { type: [string, "null"], pattern: "^#[0-9a-fA-F]{6}$" }
-            company_name: { type: [string, "null"] }
-            footer_text: { type: [string, "null"] }
-            hide_powered_by: { type: boolean, default: false }
+            mode:
+              type: string
+              enum: [previous_period, monitors, groups]
+              description: |
+                `previous_period` compares the window against the one before it.
+                `monitors` and `groups` compare the named entities against each other over
+                the same window. Region-against-region is Phase 4 and is deliberately
+                absent — the shape accommodates it, the data does not exist yet.
+            monitor_ids: { type: array, items: { type: string, format: uuid } }
+            group_ids: { type: array, items: { type: string, format: uuid } }
+        brand_profile_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Null uses the default profile, which derives from `settings.appearance`, so an
+            install that never opens this screen still produces a report that does not look
+            unbranded.
         sections:
           type: array
-          description: Ordered content blocks. Omitting this uses the defaults for the report type.
+          description: |
+            Ordered content blocks. Omitting this uses the defaults for the report type.
+
+            `response_time` replaces the Phase 0 draft's `response_time_chart`: what it
+            renders is the five-figure block ADR-006 fixed — an average, the daily series,
+            best and worst day, days over target, and a trailing-seven-day p95 — of which
+            the chart is one part rather than the whole.
           items:
             type: string
-            enum: [summary, uptime_table, uptime_chart, response_time_chart, incident_log, sla_breakdown, error_budget, maintenance_log, certificate_expiry, comparison]
+            enum:
+              - summary
+              - uptime_table
+              - uptime_chart
+              - response_time
+              - incident_log
+              - sla_breakdown
+              - error_budget
+              - maintenance_log
+              - certificate_expiry
+              - comparison
         formats:
           type: array
           minItems: 1
@@ -6208,26 +6792,26 @@ components:
         id: { type: string, format: uuid }
         report_template_id: { type: string, format: uuid }
         report_schedule_id: { type: [string, "null"], format: uuid }
-        state: { type: string, enum: [queued, running, succeeded, failed] }
+        state: { $ref: "#/components/schemas/ReportRunState" }
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }
+        timezone:
+          type: string
+          description: |
+            The zone the period was cut in. A "monthly" report cut at midnight UTC for
+            an Australian agency is wrong by a working day, so the boundary that was
+            actually used is reported rather than assumed.
         artifacts:
           type: array
-          items:
-            type: object
-            required: [format]
-            properties:
-              format: { $ref: "#/components/schemas/ReportFormat" }
-              size_bytes: { type: [integer, "null"] }
-              download_url:
-                type: [string, "null"]
-                format: uri
-                description: Authenticated download path for this artefact.
-        share_url:
-          type: [string, "null"]
-          format: uri
-          description: Public shareable link, when the run was generated with sharing enabled.
-        share_expires_at: { type: [string, "null"], format: date-time }
+          items: { $ref: "#/components/schemas/ReportArtifact" }
+        share:
+          type: [object, "null"]
+          description: The active share link, if one exists. Never contains the token.
+          required: [created_at]
+          properties:
+            url: { type: string, format: uri }
+            expires_at: { type: [string, "null"], format: date-time }
+            created_at: { type: string, format: date-time }
         deliveries:
           type: array
           description: Delivery outcomes for this run.
@@ -6237,8 +6821,514 @@ components:
               type: { type: string, enum: [email, slack, webhook, s3] }
               outcome: { type: string, enum: [succeeded, failed, skipped] }
               error: { type: [string, "null"] }
+              attempts: { type: integer, minimum: 0 }
               delivered_at: { type: [string, "null"], format: date-time }
+        late:
+          type: boolean
+          default: false
+          description: |
+            The run started materially after its scheduled time — the instance was down
+            when it was due. PHASE-2-PLAN §4.2: a missed schedule is late, not lost, and
+            the UI has to be able to say which.
         error: { type: [string, "null"] }
         started_at: { type: [string, "null"], format: date-time }
         finished_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
+
+    ReportRunState:
+      type: string
+      enum: [queued, running, succeeded, partial, failed]
+      description: |
+        `partial` — at least one requested format was produced and at least one was
+        not. The run's `error` says what failed and why; each artifact carries its
+        own outcome. A schedule that produced HTML and CSV but not PDF has still
+        delivered something, and the operator needs to see both halves of that.
+
+        `failed` — nothing was produced.
+
+    ReportArtifact:
+      type: object
+      required: [id, format, state]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        format: { $ref: "#/components/schemas/ReportFormat" }
+        state:
+          type: string
+          enum: [rendered, expired, failed]
+          description: |
+            `expired` — retention reclaimed the bytes and kept the row as a tombstone, so a
+            bookmarked link answers `410 Gone` rather than `404` (Q5). The digest and size
+            survive the file: what the document was remains answerable after it is gone.
+        size_bytes: { type: [integer, "null"], minimum: 0 }
+        sha256:
+          type: [string, "null"]
+          pattern: "^[0-9a-f]{64}$"
+          description: |
+            Digest of the stored bytes. Present when `state` is `rendered`. This is
+            what makes an artifact evidence rather than a file — and what detects a
+            truncated write from a full disk instead of serving it silently.
+        error:
+          type: [string, "null"]
+          description: Why this format was not produced. Present when `state` is `failed`.
+        download_url:
+          type: [string, "null"]
+          format: uri
+          description: Authenticated download path for this artifact.
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            When retention will reclaim it, from `settings.retention.report_artifact_days`.
+            Null when artifacts are kept indefinitely.
+        mirror:
+          type: [object, "null"]
+          description: |
+            Offsite copy state, when a report storage mirror is configured. Null when it
+            is not. The mirror is a durability copy and never a read path (ADR-008
+            item 9), so a failure here does not affect `state`.
+          required: [state]
+          properties:
+            state: { type: string, enum: [pending, uploaded, failed] }
+            uploaded_at: { type: [string, "null"], format: date-time }
+            error: { type: [string, "null"] }
+        created_at: { type: string, format: date-time, readOnly: true }
+
+    ReportDocument:
+      type: object
+      description: |
+        The computed report. Every renderer consumes this — HTML, PDF, CSV and JSON are
+        siblings over one model, never a chain (ADR-007 item 1) — so this schema is
+        also the JSON artifact verbatim.
+      required: [meta, scope, monitors]
+      properties:
+        meta: { $ref: "#/components/schemas/ReportDocumentMeta" }
+        scope:
+          type: object
+          description: The monitors this document covers, resolved at run time.
+          required: [monitor_count]
+          properties:
+            monitor_count: { type: integer, minimum: 0 }
+            group_ids: { type: array, items: { type: string, format: uuid } }
+            tag_ids: { type: array, items: { type: string, format: uuid } }
+        summary:
+          type: [object, "null"]
+          description: |
+            Estate-wide figures across every monitor in scope. Uptime counts and
+            response-time sums are additive, so these are exact aggregations rather than
+            averages of averages — which is also why there is no estate-wide percentile
+            here and cannot be one (ADR-006).
+          properties:
+            uptime: { $ref: "#/components/schemas/ReportUptimeBlock" }
+            response_time: { $ref: "#/components/schemas/ReportResponseTimeBlock" }
+        monitors:
+          type: array
+          items: { $ref: "#/components/schemas/ReportMonitorSection" }
+        incidents:
+          type: array
+          description: Incidents overlapping the window, for the incident log and post-mortem sections.
+          items: { $ref: "#/components/schemas/ReportIncident" }
+        expiries:
+          type: array
+          description: Certificate and domain expiries ahead, for the `certificate_expiry` section.
+          items: { $ref: "#/components/schemas/UpcomingExpiry" }
+        comparison:
+          type: [object, "null"]
+          description: Present for `comparative` reports. Each series carries the same blocks as `summary`.
+          properties:
+            mode: { type: string, enum: [previous_period, monitors, groups] }
+            series:
+              type: array
+              items:
+                type: object
+                required: [label]
+                properties:
+                  label: { type: string }
+                  period_start: { type: [string, "null"], format: date-time }
+                  period_end: { type: [string, "null"], format: date-time }
+                  uptime: { $ref: "#/components/schemas/ReportUptimeBlock" }
+                  response_time: { $ref: "#/components/schemas/ReportResponseTimeBlock" }
+
+    ReportDocumentMeta:
+      type: object
+      required: [schema_version, generated_at, period_start, period_end, timezone, resolution]
+      properties:
+        schema_version:
+          type: integer
+          minimum: 1
+          default: 1
+          description: |
+            Version of the `ReportDocument` shape, incremented only on a change that could
+            break a consumer. A field rather than an envelope, per Q4: the artifact is the
+            document verbatim, and a BI tool parsing a stored JSON report years from now
+            still needs to know which shape it is holding.
+        generated_at: { type: string, format: date-time }
+        report_run_id: { type: string, format: uuid }
+        report_template_id: { type: string, format: uuid }
+        template_name: { type: string }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        timezone:
+          type: string
+          description: The zone the period boundaries were cut in.
+        resolution:
+          type: object
+          description: |
+            What actually answered, not what was asked for. PHASE-2-PLAN §3.2: retention
+            bounds resolution rather than existence — 1m for 30 days, 5m for 90, 1h for a
+            year, 1d indefinitely — and a request for finer detail over an older window
+            returns the coarsest tier that holds it, labelled, never silently upsampled.
+          required: [tier]
+          properties:
+            tier: { type: string, enum: ["raw", "1m", "5m", "1h", "1d"] }
+            requested_tier: { type: [string, "null"], enum: ["raw", "1m", "5m", "1h", "1d", "auto", null] }
+            downgraded:
+              type: boolean
+              default: false
+              description: True when retention forced a coarser tier than was requested.
+            covered_from:
+              type: [string, "null"]
+              format: date-time
+              description: |
+                The earliest point the data actually reaches, when retention has truncated
+                the window. The report states the range it covered, not the range asked for.
+        brand:
+          type: [object, "null"]
+          description: The brand profile as resolved at generation time, denormalised so the document renders standalone.
+          properties:
+            company_name: { type: [string, "null"] }
+            primary_color: { type: [string, "null"], pattern: "^#[0-9a-fA-F]{6}$" }
+            footer_text: { type: [string, "null"] }
+            logo_url: { type: [string, "null"], format: uri }
+            hide_powered_by: { type: boolean, default: false }
+
+    ReportMonitorSection:
+      type: object
+      required: [monitor_id, name, uptime]
+      properties:
+        monitor_id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string }
+        group_id: { type: [string, "null"], format: uuid }
+        tag_ids: { type: array, items: { type: string, format: uuid } }
+        uptime: { $ref: "#/components/schemas/ReportUptimeBlock" }
+        sla: { $ref: "#/components/schemas/ReportSlaBlock" }
+        response_time: { $ref: "#/components/schemas/ReportResponseTimeBlock" }
+
+    ReportUptimeBlock:
+      type: object
+      description: |
+        Uptime over the window, with its denominator stated. PHASE-2-PLAN §4.3: an SLA
+        computed over 60% observation is not an SLA, so the excluded share is reported
+        rather than buried.
+      required: [uptime_ratio, maintenance_handling, observed_checks]
+      properties:
+        uptime_ratio:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: Null when nothing was observed. A gap is not downtime.
+        maintenance_handling:
+          type: string
+          enum: [exclude, count_as_up, count_as_down]
+          description: How maintenance was treated. Carried on the figure, not only in the template.
+        denominator:
+          type: string
+          enum: [observed_checks, wall_clock]
+          default: observed_checks
+          description: What the ratio was computed over. Stated because the two disagree.
+        observed_checks:
+          type: integer
+          minimum: 0
+          description: up + down. The denominator when `denominator` is `observed_checks`.
+        up_checks: { type: integer, minimum: 0 }
+        down_checks: { type: integer, minimum: 0 }
+        maintenance_checks: { type: integer, minimum: 0 }
+        unknown_checks:
+          type: integer
+          minimum: 0
+          description: |
+            The probe could not perform the check. Never downtime, never in the
+            denominator (ADR-005), and reported so that a null ratio is explicable rather
+            than mysterious.
+        skipped_checks: { type: integer, minimum: 0, description: Shed under overload. Treated exactly as unknown. }
+        unobserved_share:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1
+          description: |
+            The proportion of scheduled checks that observed nothing — unknown plus
+            skipped over the total. The figure that says how much to trust the ratio above.
+        downtime_seconds: { type: integer, minimum: 0 }
+        maintenance_seconds: { type: integer, minimum: 0 }
+        incident_count: { type: integer, minimum: 0 }
+
+    ReportSlaBlock:
+      type: [object, "null"]
+      description: |
+        Present when a target is set. Error budget is computed from `up_count` and
+        `down_count`, which are additive at every tier, so the figures are exact rather
+        than estimated — and never from a percentile (ADR-006).
+      required: [target_percent, actual_percent, target_source]
+      properties:
+        target_percent: { type: number, minimum: 0, exclusiveMaximum: 100 }
+        target_source:
+          type: string
+          enum: [template, monitor, group]
+          description: |
+            Which target this figure was measured against. Reported because a client asking
+            "whose number is 99.9?" has a real question, and because a monitor silently
+            inheriting a group target is otherwise invisible on the report face.
+        actual_percent: { type: [number, "null"], minimum: 0, maximum: 100 }
+        met: { type: [boolean, "null"], description: Null when the actual figure is null. }
+        error_budget_seconds: { type: integer, minimum: 0 }
+        error_budget_consumed_seconds: { type: integer, minimum: 0 }
+        error_budget_remaining_seconds: { type: integer }
+        error_budget_consumed_ratio: { type: [number, "null"], minimum: 0 }
+        burn_rate:
+          type: [number, "null"]
+          minimum: 0
+          description: Consumption relative to the rate that would exhaust the budget exactly over the window. Above 1 is overspending.
+        breaches:
+          type: array
+          description: Contiguous periods counted against the budget, with timestamps.
+          items:
+            type: object
+            required: [started_at, duration_seconds]
+            properties:
+              started_at: { type: string, format: date-time }
+              ended_at: { type: [string, "null"], format: date-time }
+              duration_seconds: { type: integer, minimum: 0 }
+              incident_id: { type: [string, "null"], format: uuid }
+
+    ReportResponseTimeBlock:
+      type: object
+      description: |
+        The five figures ADR-006 fixed, and no others. Window-level minimum and maximum
+        are deliberately absent: over a month they are the single fastest and single
+        slowest successful check out of tens of thousands, and the maximum in particular
+        reads as alarming while carrying no signal. Day-level extremes replace them.
+
+        Response-time figures count successful checks only. A failing check still times
+        something, but that is a time to a failure rather than a latency of the service.
+      required: [average_ms]
+      properties:
+        average_ms:
+          type: [number, "null"]
+          description: |
+            Exact over any window at any tier, not an approximation: the rollup tiers
+            store a sum and a count rather than a mean, so this equals what a pass over
+            raw heartbeats would have produced.
+        sample_count: { type: integer, minimum: 0 }
+        daily:
+          type: array
+          description: One point per day, from the 1d tier. The report's primary latency exhibit.
+          items:
+            type: object
+            required: [date]
+            properties:
+              date: { type: string, format: date }
+              average_ms: { type: [number, "null"], description: "Null for a day with no observations, which renders as a gap rather than as zero." }
+              sample_count: { type: integer, minimum: 0 }
+        best_day:
+          type: [object, "null"]
+          description: The day with the lowest average. Null when no day was observed.
+          properties:
+            date: { type: string, format: date }
+            average_ms: { type: number }
+        worst_day:
+          type: [object, "null"]
+          description: |
+            The day with the highest average — a stable statistic, where a worst single
+            check moves on one garbage-collection pause.
+          properties:
+            date: { type: string, format: date }
+            average_ms: { type: number }
+        target_ms:
+          type: [integer, "null"]
+          description: From the template's `response_time_target_ms`. Null when unset, in which case `days_over_target` is null.
+        days_over_target:
+          type: [integer, "null"]
+          minimum: 0
+        dates_over_target:
+          type: array
+          items: { type: string, format: date }
+        p95:
+          type: [object, "null"]
+          description: |
+            A real nearest-rank percentile over the trailing seven days — **not** over the
+            report window. There is no true percentile over any window longer than a
+            single one-minute bucket except inside raw retention, and ADR-006 declines to
+            present the coarse-tier upper bound as one.
+
+            Rendered in a block visually separate from the window-length figures above,
+            because "average, 30 days: 180 ms" beside "p95: 940 ms" reads as a
+            contradiction otherwise.
+          required: [available]
+          properties:
+            available: { type: boolean }
+            value_ms: { type: [number, "null"] }
+            window_start: { type: [string, "null"], format: date-time }
+            window_end: { type: [string, "null"], format: date-time }
+            method:
+              type: [string, "null"]
+              enum: [nearest_rank, null]
+              description: Stated because a percentile quoted without its method is worse than no percentile.
+            unavailable_reason:
+              type: [string, "null"]
+              enum: [insufficient_raw_retention, no_successful_checks, null]
+              description: |
+                `insufficient_raw_retention` — `settings.retention.raw_days` is shorter than
+                the seven-day window, so a shorter figure would be reported under a
+                seven-day heading. It is omitted instead.
+
+    ReportIncident:
+      type: object
+      required: [id, title, state, started_at]
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string }
+        state: { $ref: "#/components/schemas/IncidentState" }
+        impact: { type: string }
+        started_at: { type: string, format: date-time }
+        detected_at: { type: [string, "null"], format: date-time }
+        acknowledged_at: { type: [string, "null"], format: date-time }
+        resolved_at: { type: [string, "null"], format: date-time }
+        auto_opened: { type: boolean }
+        monitor_ids: { type: array, items: { type: string, format: uuid } }
+        mttd_seconds:
+          type: [integer, "null"]
+          description: |
+            Time to detect. **Frequently null, and reported as unknown rather than
+            inferred.** `auto_opened` is never set before Phase 3, so an incident recorded
+            by hand often has no `detected_at`, and a post-mortem that invents a detection
+            time is worse than one with a blank in it.
+        mtta_seconds: { type: [integer, "null"], description: Time to acknowledge. Null when never acknowledged. }
+        mttr_seconds: { type: [integer, "null"], description: Time to resolve. Null while open. }
+        alerts_fired:
+          type: [integer, "null"]
+          description: |
+            From the notification delivery log, retained 90 days by design because
+            post-mortems cite these rows. Null for an incident older than that retention.
+
+    UpcomingExpiry:
+      type: object
+      required: [kind, monitor_id, expires_at, days_remaining]
+      properties:
+        kind: { type: string, enum: [certificate, domain] }
+        monitor_id: { type: string, format: uuid }
+        monitor_name: { type: string }
+        subject: { type: [string, "null"] }
+        issuer: { type: [string, "null"], description: "Certificate issuer, or domain registrar." }
+        expires_at: { type: string, format: date-time }
+        days_remaining: { type: integer }
+        observed_at: { type: string, format: date-time }
+
+    BrandProfile:
+      type: object
+      description: |
+        White-labelling for reports.
+
+        **Reports only.** PHASE-2-PLAN §4.6 originally had profiles replace the inline
+        branding on status pages too, so that branding lived in one place. That would
+        have turned `StatusPage.theme` / `logo_url` / `primary_color` / `footer_text`
+        into `brand_profile_id` — a breaking change to a Phase 1 schema — and the
+        decision (Q2, 2026-08-27) is to leave status pages untouched.
+
+        The cost is accepted rather than hidden: branding now lives in three places —
+        here, inline on `StatusPage`, and in `settings.appearance`. A status page and a
+        report for the same client are configured separately and can drift. Unifying
+        them is a later change, and profiles are shaped so status pages can adopt them
+        without reshaping this schema.
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid, readOnly: true }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        company_name:
+          type: [string, "null"]
+          maxLength: 200
+          description: Plain text. See `footer_text`.
+        primary_color: { type: [string, "null"], pattern: "^#[0-9a-fA-F]{6}$" }
+        accent_color: { type: [string, "null"], pattern: "^#[0-9a-fA-F]{6}$" }
+        footer_text:
+          type: [string, "null"]
+          maxLength: 2000
+          description: |
+            **Plain text, not HTML or markdown.** ADR-007 renders PDF from the report
+            model with an in-tree writer that has no rich-text pipeline, and a field that
+            renders in HTML and not in PDF is worse than one that renders nowhere.
+        cover_text: { type: [string, "null"], maxLength: 2000, description: "Plain text, as above." }
+        hide_powered_by: { type: boolean, default: false }
+        logo_url:
+          type: [string, "null"]
+          format: uri
+          readOnly: true
+          description: |
+            Set by `PUT /api/v1/brand-profiles/{id}/logo`. **PNG or JPEG only** — the PDF
+            writer embeds raster images and has no SVG path translator (ADR-007), so an
+            SVG is refused at upload rather than dropped at render time.
+        logo_content_type: { type: [string, "null"], enum: ["image/png", "image/jpeg", null], readOnly: true }
+        is_default:
+          type: boolean
+          default: false
+          description: Used where a template or status page names no profile. Exactly one profile may hold this.
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+
+    BrandProfileWrite:
+      description: Request body for creating or replacing a brand profile. The logo is uploaded separately.
+      $ref: "#/components/schemas/BrandProfile"
+
+    ReportShareLinkWrite:
+      type: object
+      properties:
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: Null never expires. Revocation is always available regardless.
+
+    ReportShareLinkCreated:
+      type: object
+      required: [url, created_at]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: |
+            **Shown once.** The token is stored hashed for lookup and sealed for replay,
+            following `Subscriber`'s unsubscribe token — "hash what you verify, encrypt
+            what you replay" — so this response is the only place the plaintext appears
+            outside the sealed envelope.
+        expires_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    PublicReport:
+      type: object
+      description: |
+        The public projection of a shared report — a separate shape rather than a filter
+        over `ReportRun`, following the status page discipline: a field cannot leak
+        through a projection that has no place to put it. There is no run id, no
+        template id, no delivery log and no monitor identifier here.
+      required: [title, period_start, period_end, generated_at, formats]
+      properties:
+        title: { type: string }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        timezone: { type: string }
+        generated_at: { type: string, format: date-time }
+        brand:
+          type: [object, "null"]
+          properties:
+            company_name: { type: [string, "null"] }
+            primary_color: { type: [string, "null"], pattern: "^#[0-9a-fA-F]{6}$" }
+            footer_text: { type: [string, "null"] }
+            logo_url: { type: [string, "null"], format: uri }
+            hide_powered_by: { type: boolean }
+        formats:
+          type: array
+          description: The formats available for download at this link.
+          items: { $ref: "#/components/schemas/ReportFormat" }
+        document:
+          type: [object, "null"]
+          description: The rendered document, when the run produced a JSON artifact. Null otherwise.
+          allOf:
+            - $ref: "#/components/schemas/ReportDocument"

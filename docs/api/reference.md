@@ -15,9 +15,9 @@ page is the index, not the introduction.
 
 | | Count |
 |---|---|
-| Operations | 128 |
+| Operations | 140 |
 | Phase 1 operations | 94 |
-| Phase 2 operations | 14 |
+| Phase 2 operations | 26 |
 | Phase 3 operations | 20 |
 
 ## Reading the tables
@@ -198,6 +198,8 @@ Unauthenticated read and ingest paths.
 
 | Operation | Scope | Phase | |
 |---|---|---|---|
+| `GET /api/v1/public/reports/{shareToken}` | **public** | 2 | Read a shared report |
+| `GET /api/v1/public/reports/{shareToken}/download` | **public** | 2 | Download a shared report in one format |
 | `GET /api/v1/public/status-pages/{slug}` | **public** | 1 | Read a published status page |
 | `POST /api/v1/public/status-pages/{slug}/authenticate` | **public** | 1 | Exchange a page password for a visitor token |
 | `POST /api/v1/public/status-pages/{slug}/subscribers` | **public** | 1 | Subscribe to status page updates |
@@ -288,9 +290,19 @@ Report templates, schedules, and generated runs. Ships in Phase 2.
 
 | Operation | Scope | Phase | |
 |---|---|---|---|
+| `GET /api/v1/brand-profiles` | `brand_profiles:read` | 2 | List brand profiles |
+| `POST /api/v1/brand-profiles` | `brand_profiles:write` | 2 | Create a brand profile |
+| `DELETE /api/v1/brand-profiles/{brandProfileId}` | `brand_profiles:write` | 2 | Delete a brand profile |
+| `GET /api/v1/brand-profiles/{brandProfileId}` | `brand_profiles:read` | 2 | Retrieve a brand profile |
+| `PATCH /api/v1/brand-profiles/{brandProfileId}` | `brand_profiles:write` | 2 | Update a brand profile |
+| `PUT /api/v1/brand-profiles/{brandProfileId}/logo` | `brand_profiles:write` | 2 | Upload a brand profile logo |
+| `GET /api/v1/expiries` | `monitors:read` | 2 | List upcoming certificate and domain expiries |
 | `GET /api/v1/report-runs` | `reports:read` | 2 | List report runs |
 | `GET /api/v1/report-runs/{reportRunId}` | `reports:read` | 2 | Retrieve a report run |
+| `GET /api/v1/report-runs/{reportRunId}/artifacts/{artifactId}` | `reports:read` | 2 | Download one generated artifact |
 | `GET /api/v1/report-runs/{reportRunId}/download` | `reports:read` | 2 | Download a generated report |
+| `DELETE /api/v1/report-runs/{reportRunId}/share` | `reports:write` | 2 | Revoke the share link for a run |
+| `POST /api/v1/report-runs/{reportRunId}/share` | `reports:write` | 2 | Create a public share link for a run |
 | `GET /api/v1/report-schedules` | `reports:read` | 2 | List report schedules |
 | `POST /api/v1/report-schedules` | `reports:write` | 2 | Create a report schedule |
 | `DELETE /api/v1/report-schedules/{reportScheduleId}` | `reports:write` | 2 | Delete a report schedule |

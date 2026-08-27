@@ -1,6 +1,6 @@
 # ADR-008: Report Artifact Storage — Local Files as the Source of Truth, an Optional S3 Mirror, and Share Links
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-27
 - **Deciders:** [Shakil Ilham](https://github.com/silham)
 - **Relationship to prior ADRs:** Independent. Consumes what [ADR-007](007-report-rendering.md) produces and stores what [ADR-006](006-report-latency-statistics.md) computes; supersedes neither.
@@ -107,6 +107,13 @@ mirror; local storage remains the source of truth in every configuration.**
    **outlive the data it was computed from**, which is the whole point of keeping
    it. `Retention.Validate`'s coarser-outlives-finer rule does not apply, because
    an artifact is not a tier.
+
+   **Retention reclaims the bytes and keeps the row.** An expired artifact remains
+   listed, with its digest and size intact, so a bookmarked share link answers
+   `410 Gone` rather than `404` — "this existed and is gone" and "no such thing" are
+   different answers to somebody holding a link, and only one of them is true. The
+   tombstone is a row, so the cost is bounded by artifact count rather than by bytes.
+   This was left open in the first draft of this ADR and settled on 2026-08-27.
 
 7. **A per-artifact size cap, enforced with a clear error.** The case that hits it
    is not the PDF: a CSV over 5,000 monitors for a year is roughly 1.8 million

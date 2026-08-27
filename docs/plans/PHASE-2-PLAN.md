@@ -19,7 +19,7 @@ Shipped **before** the enterprise controls in Phase 3, deliberately. The rule th
 | Formats | PDF, HTML, CSV, JSON, public shareable link | DOCX, XLSX, scheduled screenshots |
 | Delivery | Email, Slack, webhook, S3-compatible object drop | SFTP, Google Drive, per-recipient digests |
 | Artifacts | Files under the data directory, indexed in SQLite; optional S3 mirror; retention, checksums, size cap | S3 as primary store, local pruning after upload, remote DB/key backup (Phase 4) |
-| Branding | Brand profiles: logo, colours, footer, report cover — shared with status pages | Per-client branding bound to a tenant (Phase 3) |
+| Branding | Brand profiles for reports: logo, colours, footer, report cover | Status pages migrating onto profiles; per-client branding bound to a tenant (Phase 3) |
 | Report types | SLA/SLO, uptime summary, incident post-mortem, comparative, certificate & domain expiry calendar | Cost/capacity reporting, anomaly narratives (Phase 5) |
 | Builder | Pick metrics, group by tag/group, choose a window, save as a reusable template | Drag-and-drop layout design, custom chart types |
 | History | Full historical browsing with drilldown into arbitrary past ranges | Sub-daily history beyond the retention tiers |
@@ -39,7 +39,7 @@ Phase 2 is unusually cheap for what it delivers, because the load-bearing pieces
 - **Incidents already carry the MTT\* timestamps.** [`internal/model/incident.go`](../../internal/model/incident.go) has `DetectedAt`, `AcknowledgedAt`, `ResolvedAt`, `StartedAt` and `AutoOpened`, with a comment explaining that time-to-detect is the one figure that cannot be reconstructed after the fact. Post-mortem reports read these; they do not invent them.
 - **A hand-written five-field cron parser** ([`internal/maintenance/cron.go`](../../internal/maintenance/cron.go)) with the day-of-month/day-of-week union rule already correct and tested. Report schedules use it. It moves to a shared package; it is not written twice.
 - **A delivery discipline that already works.** [`internal/notify`](../../internal/notify) records every attempt, retries, and writes `last_error` where the UI shows it. [`internal/outbound`](../../internal/outbound) signs payloads, dedupes on a stable event id, and disables endpoints that fail repeatedly. Report delivery adopts both patterns rather than inventing a third.
-- **Branding fields already exist** on status pages (`Theme`, `LogoURL`, `PrimaryColor`, `FooterText` in [`internal/model/statuspage.go`](../../internal/model/statuspage.go)) and, separately, in appearance settings. Phase 2 makes that a **brand profile** referenced by both, rather than a third copy.
+- **Branding fields already exist** on status pages (`Theme`, `LogoURL`, `PrimaryColor`, `FooterText` in [`internal/model/statuspage.go`](../../internal/model/statuspage.go)) and, separately, in appearance settings. Phase 2 adds a **brand profile** for reports. It was to have replaced both, so that branding lived in one place; that would have meant a breaking change to a Phase 1 schema before the spec freezes, and the decision of 2026-08-27 is to leave status pages alone. **Branding therefore lives in three places, knowingly** — see §4.6.
 - **`OrgID` is on every model already.** Reports carry it from the first migration, so Phase 3 tenancy is a permission change and not a re-architecture.
 
 ---
@@ -119,7 +119,7 @@ The definitional work is the hard part and it is not optional:
 
 - **What counts against the SLO.** `down` does. `maintenance` does not, by default, and that default must be stated on the report face. `unknown` and `skipped` are not downtime and are excluded from the denominator — with the excluded share reported, because an SLA computed over 60% observation is not an SLA.
 - **The denominator is stated on the report.** Observed checks, not wall-clock, unless wall-clock is chosen explicitly.
-- **Targets** are per-monitor or per-group, expressed as a percentage over a window, stored on the monitor or the group so a single number can serve alerting later.
+- **Targets** are `slo_target_percent` on the monitor and on the group, expressed as a percentage, so a single number can serve alerting later without a second place to configure it. Phase 2 only reads it; nothing alerts on it yet and no monitor's status is affected. Resolution order is template override, then monitor, then group, then none — and the report states which of the three it used, because a monitor silently inheriting a group's target is otherwise invisible on the report face. A target of exactly 100% is rejected: its error budget is zero seconds, which makes burn rate undefined and every report a breach report.
 - **Error budgets come from `up_count` and `down_count`**, which are additive at every tier, so the budget over any window is exact rather than estimated. Per [ADR-006](../adr/006-report-latency-statistics.md), no SLO figure is derived from a percentile.
 
 **Response-time reporting**, per ADR-006. Five figures, and no others in the latency block:
@@ -151,7 +151,9 @@ Period over period (this month against last), monitor against monitor, and group
 ### 4.6 White-Label Branding
 
 - A **brand profile**: logo upload, primary and accent colours, footer text, report cover text, and a "prepared for" client name.
-- Referenced by report definitions and by status pages both, replacing the duplicated fields rather than adding a third set.
+- **Referenced by report definitions only.** An earlier version of this plan had status pages migrate onto profiles so that branding was not duplicated. Doing so turns `StatusPage.theme` / `logo_url` / `primary_color` / `footer_text` into a `brand_profile_id` — a breaking change to a Phase 1 schema — and the decision is not to make it in this phase.
+- **The cost, stated rather than softened:** branding lives in three places — the profile, inline on status pages, and `settings.appearance`. A status page and a report for the same client are configured separately and can drift apart. Profiles are shaped so status pages can adopt them later without reshaping the schema, which is what makes this a deferral rather than a dead end.
+- Logo uploads are **PNG or JPEG**, refused at upload with an explanation rather than dropped at render time — the PDF writer embeds rasters and has no SVG path translator ([ADR-007](../adr/007-report-rendering.md)).
 - Default profile derives from the existing appearance settings, so an install that never opens this screen still produces a report that does not look unbranded.
 
 ### 4.7 Formats and Share Links
@@ -191,7 +193,11 @@ Drilldown into arbitrary past ranges in the dashboard, at the best resolution re
 
 The Phase 0 rule is unchanged and is not softened for this phase: **the OpenAPI spec is extended and reviewed before any handler is written**, and agents do not add, rename, or reshape endpoints ([AGENTS.md](../../AGENTS.md) § 4).
 
-Phase 2 adds, at minimum: report definitions (CRUD), runs (list, get, trigger, cancel), artifacts (get, download), share links (create, revoke), brand profiles (CRUD), and SLO targets on monitors and groups. Cursor pagination and the problem-details error shape apply unchanged. Contract tests are green before the milestone is called done, and the generated Go and TypeScript clients are regenerated in the same PR as the spec change.
+**The spec already carries a Phase 2 reporting surface**, drafted in Phase 0 and tagged `x-cairn-phase: 2` — report templates, schedules, runs, and a per-run download. It predates ADR-006, ADR-007 and ADR-008 and contradicts them in four places. The work is therefore reconciliation, not invention, and it is drafted in [docs/api/drafts/phase-2-reports.yaml](../api/drafts/phase-2-reports.yaml) for review before merge.
+
+That delta corrects the four contradictions — a run state that cannot express a partial render, artifacts with no identity, digest or expiry, a share link that could not be created or revoked, and branding inline on the template — and adds what the decisions opened: the `ReportDocument` schema (the JSON artifact was untyped, and it is where the five figures, the SLA denominator and the resolution labelling become expressible), brand profiles, artifact-addressed download, the public share path, the expiry calendar, `slo_target_percent` on monitors and groups, and the settings for artifact retention and the S3 mirror.
+
+Cursor pagination and the problem-details error shape apply unchanged. Contract tests are green before the milestone is called done, and the generated Go and TypeScript clients are regenerated in the same PR as the spec change.
 
 ---
 
@@ -207,7 +213,7 @@ Phase 2 adds, at minimum: report definitions (CRUD), runs (list, get, trigger, c
 ### Month 5 — Rendering, branding, scheduling
 - The drawing primitive set and its SVG backend; HTML renderer as the canonical output; CSV and JSON from the same model. The PDF backend follows against the same primitives, so that if it runs long, HTML plus print CSS ships and PDF slips without disturbing anything else.
 - Golden-report visual regression test, standing up with the second renderer rather than after it.
-- Brand profiles, with status pages migrated onto them.
+- Brand profiles for reports, with PNG/JPEG logo upload. Status pages keep their inline branding; see §4.6.
 - Report definitions, scheduling on the shared cron parser, calendar windows in the configured timezone, the bounded worker pool, and run/artifact lifecycle.
 - Artifact storage per ADR-008: the dated directory layout, id-derived filenames, write-fsync-then-commit ordering, SHA-256 and size on the row, the orphan sweeper, and `ReportArtifactDays`.
 - **Checkpoint:** a monthly definition fires on schedule and produces a branded PDF and CSV on disk, indexed, checksummed, and reclaimed on expiry.
@@ -241,7 +247,8 @@ Phase 2 adds, at minimum: report definitions (CRUD), runs (list, get, trigger, c
 - [ ] Formats: PDF, HTML, CSV, JSON, and a revocable public share link on a separate public projection, serving the stored artifact rather than a re-render.
 - [ ] Artifacts are durable, indexed, checksummed, size-capped and expired on a retention policy; orphans are reclaimed; **the backup guide has been updated and the revised procedure tested end to end**.
 - [ ] Delivery: email, Slack, webhook, S3-compatible drop, each with recorded attempts, retry, and a visible failure.
-- [ ] Brand profiles shipped and shared with status pages; no duplicated branding fields remain.
+- [ ] Brand profiles shipped for reports, with raster logo upload refused-with-reason for SVG. Status pages unchanged, and the resulting three-way duplication documented rather than discovered.
+- [ ] `slo_target_percent` on monitors and groups, with the template-monitor-group resolution order applied and the source stated on the report.
 - [ ] Custom report builder: metrics, grouping, window, saved as a reusable template.
 - [ ] Certificate and domain expiry calendar, browsable and schedulable.
 - [ ] Full historical browsing with the resolution actually used labelled honestly.
