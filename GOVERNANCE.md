@@ -126,7 +126,8 @@ trade, and so is the reverse.
 ## 4. Releases
 
 - Semantic versioning. The `/api/v1` contract carries an explicit deprecation
-  policy; breaking it requires a major version and a migration path.
+  policy — [docs/api/COMPATIBILITY.md](docs/api/COMPATIBILITY.md) — and breaking it
+  requires a major version and a migration path.
 - No more than two consecutive weeks without a release, as a health target.
 - Any committer may cut a release; releases are reproducible and signed, and
   ship with an SBOM.

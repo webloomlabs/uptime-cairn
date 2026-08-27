@@ -4,9 +4,14 @@ openapi: 3.1.0
 # Uptime Cairn — REST API v1
 #
 # STATUS: DRAFT. Not frozen. See docs/api/README.md for the conventions this
-# spec follows, the open questions that still need a human decision, and the
-# freeze process. Once frozen, this file is immutable except through the
-# documented change process.
+# spec follows and the record of the decisions behind them — all eight open
+# questions were resolved on 2026-08-27.
+#
+# The change process this file's freeze rests on is docs/api/COMPATIBILITY.md.
+# Its first rule is the one to read before editing: the freeze binds *shipped*
+# surface, not the file. An operation is frozen once a release implements it;
+# operations tagged `x-cairn-phase: 2` or `3` that no release implements are a
+# design draft that happens to live here, and remain editable.
 #
 # Every operation carries an `x-cairn-phase` extension naming the roadmap phase
 # in which it ships. Phase 1 contract tests select `x-cairn-phase: 1`.
@@ -683,17 +688,25 @@ paths:
         - name: sort
           in: query
           description: |
-            Result ordering. Constrained to the cursor key, because ADR-004 fixes
-            cursor pagination on `(updated_at, id)` and a keyset cursor can only
-            paginate the ordering it is keyed on.
+            Result ordering. A keyset cursor can only paginate the ordering it is keyed
+            on, so this selects the cursor key as well as the sort — ADR-009 generalises
+            it from ADR-004's fixed `(updated_at, id)` to `(sort_field, id)`.
 
-            Sorting by name, status, or uptime is therefore **not offered** — see the
-            note in docs/api/README.md. Sorting a page client-side would order 25 rows
-            out of 5,000, which is worse than not offering it.
+            Sortable fields are stable, stored, non-null columns, and the set is closed.
+            **`status` and uptime are deliberately absent.** Ordering by a value that
+            changes while you paginate makes a row jump position, so the reader sees it
+            twice or never — the exact defect keyset pagination exists to remove. Uptime
+            is computed at read time and has no column to key a cursor on. Filter by
+            status instead; it answers the question sorting by it was reaching for.
+
+            Name ordering is case-insensitive and identical across storage backends.
+
+            **A `cursor` must be used with the `sort` it was issued for.** Changing sort
+            mid-pagination is a `400`, not a silent reset to the first page.
           schema:
             type: string
             default: -updated_at
-            enum: [updated_at, -updated_at]
+            enum: [updated_at, -updated_at, name, -name, created_at, -created_at]
         - name: status
           in: query
           description: Filter by current status.

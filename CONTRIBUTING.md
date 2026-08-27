@@ -12,7 +12,9 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 ## Where the project is right now
 
 **Phase 0 — Foundations.** We are writing specifications, not features. The
-OpenAPI spec is being written and frozen *before* the code, and the
+OpenAPI spec is being written and frozen *before* the code — see
+[docs/api/COMPATIBILITY.md](docs/api/COMPATIBILITY.md) for what that freeze binds
+and how the spec changes afterwards — and the
 architectural decisions that cannot be retrofitted are being made now.
 
 That makes this an unusually high-leverage moment to contribute, because the

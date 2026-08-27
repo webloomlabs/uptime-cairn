@@ -1,6 +1,6 @@
 # ADR-004: UI State Synchronisation — Server-Side Pagination with ID-Scoped Live Diffs and Periodic Reconciliation
 
-- **Status:** Accepted
+- **Status:** Accepted; the pagination key is superseded by [ADR-009](009-pagination-sort-key.md). The live-update, membership-reconciliation and load-test decisions below remain in force.
 - **Date:** 2026-08-05
 - **Deciders:** [Shakil Ilham](https://github.com/silham)
 

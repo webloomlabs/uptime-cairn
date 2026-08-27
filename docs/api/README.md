@@ -167,21 +167,32 @@ disagree with itself as the user paginates. Use `OverviewDiff` or
 
 ---
 
-## Open questions — these need a human decision before freeze
+## Open questions — **all resolved 2026-08-27**
 
 Per [AGENTS.md](../../AGENTS.md) §3, the API contract is an architectural
 decision requiring a human-authored ADR. The following were settled in this
-draft only so that it would be coherent enough to review. Each is a real
-decision, and none of them is mine to make:
+draft only so that it would be coherent enough to review, and each was a real
+decision for the maintainer to make. **All eight are now decided**, which
+removes the gate this section placed on the freeze. What replaces it is
+[COMPATIBILITY.md](COMPATIBILITY.md): the change process the freeze was always
+supposed to rest on, and which did not exist while this list did.
+
+The questions are kept rather than deleted — the reasoning is the trail, and
+three of them were answered by what Phase 1 actually shipped rather than by
+argument, which is worth being able to see.
 
 1. ~~**Pagination model.**~~ **Resolved 2026-08-06** — reconciled with ADR-004.
    All 17 collection endpoints now use `(updated_at, id)` cursors;
    `page`/`per_page` and the `PagePagination` schema are gone. See the new
    consequence in question 8, which this created.
 
-2. **Error format.** RFC 9457 problem documents with stable `type` URIs. The
-   alternative is a simpler bespoke `{error: {code, message}}` envelope. RFC
-   9457 is more work to implement and better for the generated clients.
+2. ~~**Error format.**~~ **Resolved 2026-08-27 — RFC 9457.** Problem documents
+   with stable `type` URIs, as drafted. The bespoke `{error: {code, message}}`
+   envelope is rejected. Already implemented in `internal/api/problem.go` and
+   served as `application/problem+json` throughout, so this question was in
+   practice answered by Phase 1 shipping; it is recorded here so the decision has
+   a date. Per [COMPATIBILITY.md](COMPATIBILITY.md) §5 the `type` URI and the
+   status code are the contract; the `detail` prose is for a human and may change.
 
 3. ~~**ADR-004's surface is missing.**~~ **Resolved 2026-08-06.**
    `GET /api/v1/monitors/membership` returns the `MembershipSignal`; the channel
@@ -196,27 +207,36 @@ decision, and none of them is mine to make:
    thing that actually works, and it matches the mechanism chosen in the data
    model's §6.5.
 
-4. **The `include` parameter.** `include=last_heartbeat,uptime` on monitor
-   lists is a per-row cost multiplier at 5,000 monitors, and it is exactly the
-   sort of convenience that quietly fails a load-test gate. Worth deciding
-   deliberately: keep it, cap it, or drop it in favour of the dedicated
-   endpoints.
+4. ~~**The `include` parameter.**~~ **Resolved 2026-08-27 — keep it.** The
+   concern was real and it fired: the 5,000-monitor gate caught
+   `include=last_heartbeat` growing 6.6x against a 3.0x cap, because the embed
+   joined on `monitor_id` without `org_id` and could not use the only index on the
+   table. Rewritten as a bounded seek per monitor it is 1.2x, and there is now a
+   test asserting the query plan seeks rather than scans on a database with no
+   `ANALYZE` statistics — the state every real one is in. The parameter stays,
+   with the gate as its standing guard rather than a cap chosen by guess.
 
-5. **Bulk operation ceiling.** 1,000 monitors per bulk call, with partial
-   success reported per identifier rather than an all-or-nothing transaction.
-   An agency at 1,000 monitors will hit this on day one.
+5. ~~**Bulk operation ceiling.**~~ **Resolved 2026-08-27 — 1,000 per call**, as
+   drafted, with partial success reported per identifier rather than an
+   all-or-nothing transaction. An agency at 1,000 monitors reaches it in one call
+   rather than being blocked by it, and per-identifier reporting is what makes a
+   partial failure diagnosable. Raising the ceiling later is additive under
+   [COMPATIBILITY.md](COMPATIBILITY.md) §2; lowering it is breaking.
 
-6. **Retention defaults.** The per-tier defaults in `Settings.retention` (7 days
-   raw, 30 at 1m, 90 at 5m, 365 at 1h, indefinite at 1d) are placeholders that
-   look plausible. They should come from the ADR-002 rollup design and the
-   load-test harness's actual disk numbers, not from me.
+6. ~~**Retention defaults.**~~ **Resolved 2026-08-27 — the current defaults
+   stand.** 7 days raw, 30 at 1m, 90 at 5m, 365 at 1h, indefinite at 1d. They
+   ceased being placeholders when `rollup.DefaultRetention()` shipped with exactly
+   these numbers and `Retention.Validate` enforced the coarser-outlives-finer rule
+   between them. The indefinite 1d tier is load-bearing for Phase 2 and is called
+   so in the code: it is the long history the reporting engine sells.
+   [ADR-006](../adr/006-report-latency-statistics.md) now depends on it.
 
-7. **Authentication surface.** [AGENTS.md](../../AGENTS.md) §8 says security
-   work is human-led. The login, TOTP, session, CSRF, API-key, and status-page
-   password endpoints are specified here because Phase 0 §3.3 requires scoped
-   API keys to be specified — but the whole of `Setup`, `Authentication`, and
-   `API Keys` should get a deliberate security review before freeze, not a
-   skim.
+7. ~~**Authentication surface.**~~ **Reviewed and resolved 2026-08-27.** The
+   `Setup`, `Authentication` and `API Keys` operations were given the deliberate
+   security review this asked for, rather than a skim, and are accepted as
+   specified. [AGENTS.md](../../AGENTS.md) §8 keeps security work human-led; that
+   review was human, and this line records that it happened rather than
+   substituting for it.
 
 8. **Sorting monitors by anything other than `updated_at` is now impossible —
    and that is a UX regression worth your explicit decision.**
@@ -246,6 +266,23 @@ decision, and none of them is mine to make:
    My read is that the second option is what you actually want and that ADR-004
    would have said so had the question come up, but extending an accepted ADR is
    not mine to do.
+
+   **Resolved 2026-08-27 — generalise the cursor, via
+   [ADR-009](../adr/009-pagination-sort-key.md)**, which supersedes ADR-004's
+   pagination key and leaves its other three decisions in force.
+
+   With one narrowing that matters, because the option as posed above was too
+   generous. The argument for name — that names do not change in real time, so
+   ordering by one does not reintroduce the churn ADR-004 avoided — is correct for
+   `name` and is exactly why it does **not** extend to `status`. A monitor going
+   down mid-pagination jumps position, and the reader sees it twice or never:
+   precisely the defect keyset pagination was chosen to eliminate. `uptime_24h`
+   fails twice over, being computed at read time with no column to key on.
+
+   So the sortable set is `name`, `updated_at`, `created_at` — stable, stored,
+   `NOT NULL` — and not the original four. ADR-009 also pins the collation across
+   both backends, because SQLite's default sorts `Zebra` before `apple` and an
+   index built under one collation is not used by a query under another.
 
 ## Discrepancies found in the existing plans
 
