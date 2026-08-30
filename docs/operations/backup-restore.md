@@ -1,7 +1,9 @@
 # Backup and restore
 
 Everything below has been run against the current build; the numbers and
-messages are real output, not illustrations.
+messages are real output, not illustrations. The one exception is
+[Report artifacts](#report-artifacts), which is marked as such: it describes a
+directory this release does not yet create.
 
 Two files matter, and they have different failure modes:
 
@@ -9,10 +11,14 @@ Two files matter, and they have different failure modes:
 |---|---|---|
 | `cairn.db` | Every monitor, heartbeat, incident, and status page | You are restoring from an older copy |
 | `cairn.key` | 45 bytes; the root key wrapping every stored secret | Every credential in the database is permanently unreadable |
+| `reports/` | Generated report artifacts, once reporting ships | The reports you sent clients are gone, and they cannot be reproduced — see [Report artifacts](#report-artifacts) |
 
-Back them up to **different places**. A backup that puts the key beside the
-database it protects has encrypted nothing against the threat that actually
-happens, which is somebody walking off with the backup.
+Back the key up **somewhere the database backup is not**. A backup that puts the
+key beside the database it protects has encrypted nothing against the threat
+that actually happens, which is somebody walking off with the backup. The
+reports directory is under no such constraint and may sit beside the database:
+it holds no credentials, and it is a rendering of data already in the file next
+to it.
 
 ## Do not copy `cairn.db` on its own
 
@@ -68,6 +74,85 @@ The key is a separate, one-time copy — it does not change:
 docker cp uptime-cairn:/data/cairn.key ./cairn.key   # then store it elsewhere
 ```
 
+## Report artifacts
+
+> **This section describes a directory the current release does not create.** It
+> is written against [ADR-008](../adr/008-report-artifact-storage.md), which
+> fixes the layout, and it is here ahead of the code so that a backup script
+> written today does not have to be found and changed later. The end-to-end
+> drill that the rest of this page reports has not been run for it.
+
+Generated reports are files under `<data-dir>/reports/<yyyy>/<mm>/`, named by
+artifact id, with the database holding the index and not the bytes. **Backing up
+`cairn.db` alone therefore leaves you with rows describing files you do not
+have.** That install starts, runs, and serves everything except a download,
+which is precisely why the omission is not noticed until somebody asks for one.
+
+**They cannot be regenerated, and this is the part worth reading before deciding
+to skip them.** A report over last March re-run in 2028 reads whatever rollup
+tier has survived retention and returns daily figures where it once returned
+hourly ones. A corrected incident timeline changes every post-mortem drawn from
+it. And the artifact is what was *sent to a client*: if an uptime claim is ever
+disputed, evidence that regenerates differently is not evidence.
+
+Copying them is ordinary, because artifacts are immutable once written — there
+is no equivalent of the WAL hazard above, and a plain recursive copy of a
+running install is sound:
+
+```sh
+sqlite3 /data/cairn.db "VACUUM INTO '/backups/cairn-$(date +%F-%H%M).db'"
+rsync -a --delete /data/reports/ /backups/reports/
+```
+
+**Take the database snapshot first, then the directory** — in that order, for a
+reason. The engine writes and fsyncs an artifact file before committing the row
+that points at it, so every row in a snapshot taken at the earlier instant
+already has its file on disk. Reversed, the window is a row without bytes.
+Neither ordering can corrupt anything; one of them can produce a download that
+404s.
+
+In Docker, the directory comes out the same way the database does:
+
+```sh
+docker cp uptime-cairn:/data/reports ./reports
+```
+
+Permissions are `0750` on the directories and `0640` on the files, matching what
+the rest of the data directory uses. `rsync -a` and `docker cp` both preserve
+that; `cp` without `-p` does not.
+
+### If the S3 mirror is enabled
+
+Where `settings.report_storage.mirror_enabled` is on, every artifact is already
+copied offsite as it is written, and the local `rsync` step above may be
+skipped. That is a real reason to enable it beyond durability — it removes the
+half of this procedure most likely to be forgotten.
+
+Two constraints come with it, and neither is optional:
+
+- **The bucket must not be public.** Artifacts contain client names, monitor
+  names, and uptime figures, and a share link is supposed to be the only
+  unauthenticated way to reach one.
+- **`cairn.key` does not go in that bucket.** Artifacts and a database backup may
+  share one; the key requires a different trust boundary, for the reason at the
+  top of this page. The bucket exists now, which is what makes the mistake
+  convenient rather than hypothetical.
+
+The mirror is a durability copy, not a read path: Cairn always serves artifacts
+from local disk, so a restore has to put the directory back rather than relying
+on the bucket. Remote backup of the database and key is a separate,
+not-yet-built thing (roadmap Phase 4); this is not it.
+
+### Retention
+
+Artifacts expire on `settings.retention.report_artifact_days` — 365 by default,
+zero meaning keep forever — independently of the rollup tiers, because an
+artifact is expected to outlive the data it was computed from. An expired
+artifact leaves its row behind as a tombstone, so a bookmarked link reports that
+the report existed and is gone rather than that it never existed. **Your backup
+retention should be at least as long as that setting**, or you will be pruning
+copies of reports the product still lists.
+
 ## Verify the backup, every time
 
 A backup nobody has restored is a hypothesis. These two are cheap enough to run
@@ -87,7 +172,9 @@ $ sqlite3 backup.db "SELECT version, name FROM schema_migrations ORDER BY versio
 
 `foreign_key_check` printing nothing is the pass. The migration list is the
 check that matters for restores: it tells you which build can open this file,
-which is the question you will be asking under pressure.
+which is the question you will be asking under pressure. That drill ran against
+a build whose highest migration was 5; a current install lists more, and what
+you are reading off it is the **highest number**, not the count.
 
 ## Restore
 
@@ -103,6 +190,19 @@ systemctl start uptime-cairn
 
 Delete any stale `-wal` and `-shm`: they belong to the database you just
 replaced, and SQLite will try to recover the new file with the old file's WAL.
+
+Where reports exist, the directory goes back in the same step, before the
+process starts:
+
+```sh
+rsync -a /backups/reports/ /var/lib/uptime-cairn/reports/
+chown -R uptime-cairn:uptime-cairn /var/lib/uptime-cairn/reports
+```
+
+Restoring the database without it is not corruption and does not fail: the
+install runs, the report history lists, and only the downloads are missing. It
+is the quietest half of a half-done restore, which is the argument for checking
+it deliberately rather than waiting to be told.
 
 A verified restore of the drill backup returned the monitor through the API with
 its stored credential decrypting correctly, and reported setup as already
@@ -178,3 +278,11 @@ There is no `cairn backup` subcommand and no scheduled backup inside the
 product. Both are worth having and neither is built; today this is a cron job
 you own. Schedule the `VACUUM INTO` above, keep the retention policy outside the
 data directory, and test a restore on a cadence you actually keep to.
+
+Once reporting ships, that cron job is **two** commands rather than one, and
+nothing in the product checks that you run the second. That is the known cost of
+holding artifacts as files rather than as blobs in the database, recorded in
+[ADR-008](../adr/008-report-artifact-storage.md) rather than discovered later —
+along with the honest statement that documentation, the S3 mirror, and a warning
+where artifacts exist with no mirror configured all reduce the risk and none of
+them makes it zero.

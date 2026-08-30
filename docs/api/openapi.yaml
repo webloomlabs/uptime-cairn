@@ -19,7 +19,7 @@ openapi: 3.1.0
 
 info:
   title: Uptime Cairn API
-  version: 1.0.0-draft
+  version: 1.0.0
   summary: All-in-one open source uptime monitoring and reporting platform.
   description: |
     The complete public surface of Uptime Cairn. The dashboard is the first
