@@ -6,14 +6,21 @@ same rule the Phase 1 list ran under applies here and is the reason that list
 stayed honest: **a box needs a demonstrated run behind it.** "The code is
 written" is not one, and neither is "the configuration was reviewed".
 
-**Status: 2026-08-28. The decisions are made and nothing is built.** All three
+**Status: 2026-08-30. The schema exists and nothing computes yet.** All three
 ADRs the plan said had to be settled first are accepted, the API surface they
 implied is merged into the frozen spec, and the process for changing that spec is
-written down. What does not exist is a single line of report code: there is no
-`internal/report`, no migration past `0007`, no `reports` directory under the data
-directory, and nothing in the dashboard. Month 4 is therefore half done and the
-half that is done is the expensive half — the questions that are cheap to answer
-on paper and ruinous to answer in code.
+written down. Migration `0008` has now landed the whole reporting schema, and
+`internal/report` holds the read-side contract and nothing else. What still does
+not exist is a single number: no computation, no renderer, no scheduler, no
+`reports` directory under the data directory, and nothing in the dashboard.
+
+**Three of the six methods on `report.Store` are already implemented** —
+`RawCovers`, `UptimeFromRaw` and `ListIncidents` are satisfied by `*sqlite.Store`
+today with identical signatures, which a compile-time assertion was used to prove
+rather than assume. The three that are not — `MonitorsInScope`, `WindowTotals`,
+`DailySeries` — are the batched ones, and they are batched deliberately: they are
+the queries fifty concurrent runs across 5,000 monitors will hammer, and a call
+per monitor is the fan-out the extended load gate exists to catch.
 
 **The backup guide is written ahead of the code, deliberately.**
 [ADR-008](../adr/008-report-artifact-storage.md) says in its own text that the
@@ -33,9 +40,9 @@ could write a backup script today that would silently need changing later.
 re-listed here.** The one operational consequence for this checklist: the rollup
 tiers store a sum and a count rather than an average, the 1d tier is kept
 indefinitely, and `HistoryBucket` keeps `unknown` and `skipped` apart from
-`down`. Every computation box below is a query against data that already exists.
-No box in this file is blocked on a schema change to Phase 1 tables except
-`slo_target_percent`, which adds one nullable column to two of them.
+`down`. Every computation box below is a query against data that already exists,
+and with `0008` applied, no box in this file is blocked on a schema change at
+all.
 
 ---
 
@@ -51,15 +58,15 @@ No box in this file is blocked on a schema change to Phase 1 tables except
 
 ## Schema and storage
 
-- [ ] Migration `0008`: report templates, schedules, runs, artifacts, deliveries, share links, and brand profiles. `org_id` on every table from this first migration, so Phase 3 tenancy is a permission change and not a re-architecture
-- [ ] `slo_target_percent` on monitors and groups — one nullable column each, `NULL` meaning no target. Exactly 100 is refused at validation: its error budget is zero seconds, which makes burn rate undefined and every report a breach report
-- [ ] `report_artifact_days` joins `RetentionSettings` at 365 by default, and is **exempt from the coarser-outlives-finer rule** that governs the rollup tiers — an artifact is expected to outlive the data behind it, which is the entire reason for keeping one
-- [ ] `report_storage` as an eighth settings section, with `secret_access_key` sealed through `internal/secrets` following the `SMTPSettings` precedent: encrypted rather than hashed, because it is replayed on every request
-- [ ] Artifact rows carry `sha256`, `size_bytes`, and a `state` of `rendered`, `expired` or `failed`. `expired` is a tombstone that outlives its bytes, so a bookmarked link answers `410` — "this existed and is gone" rather than "no such thing"
-- [ ] Repository interface first, SQLite behind it — the `internal/rollup` discipline. The contract lives in the package and the backend supplies only the queries, so Timescale later computes the same numbers rather than a second set
+- [x] Migration [`0008_reporting.sql`](../../migrations/sqlite/0008_reporting.sql) — **seven tables, not the four the data model named**: brand profiles, templates, schedules, schedule deliveries, runs, artifacts, share links, delivery attempts. `org_id` on every one from this first migration, so Phase 3 tenancy is a permission change and not a re-architecture. Applied over `0001`–`0007` against a real database with `integrity_check` and `foreign_key_check` clean, and each constraint exercised until it refused something: `sla_target = 100`, a second default brand profile, a second live share link on one run, a repeated `token_hash`, a second PDF for one run, `format = 'docx'`. Deleting a template cascades runs → artifacts → share links to zero. The three scheduled queries — due schedules, the expiry sweep, the share-token lookup — each plan onto their index as a `SEARCH`, with no scan
+- [x] `slo_target_percent` on monitors and groups — one nullable column each, `NULL` meaning no target, with the `< 100` bound enforced by a `CHECK` rather than only at the API: 100 refused and 99.95 accepted, tested against a real monitor row and a real group row. **Schema only.** Nothing reads it, the template → monitor → group resolution order is not written, and no API field exposes it
+- [ ] Four things whose **column landed in `0008` and whose Go half is not written**: `report_artifact_days` inside the existing `retention` JSON (365 default, and exempt from the coarser-outlives-finer rule, because an artifact is expected to outlive the data behind it); `report_storage` as an eighth settings section with `secret_access_key_sealed` following `SMTPSettings.PasswordSealed`; the artifact row's `sha256`, `size_bytes` and `state` with `expired` as the tombstone behind a `410`; and `path`, stored rather than derived. No further migration is needed for any of them
+- [ ] The SQLite half of [`report.Store`](../../internal/report/report.go) — `MonitorsInScope`, `WindowTotals`, `DailySeries`. The other three methods are already implemented; see the status note above
+- [ ] **Data model §4.13 updated.** It lists four Phase 2 tables and `0008` creates seven. The three it does not name are each a consequence of a decision taken after that list was written — brand profiles (spec Q2), share links (ADR-008), and the configured-target/attempt split that mirrors `notification_channels` and `notification_deliveries`. The migration header says so; the data model does not yet
 
 ## The report model (`internal/report`)
 
+- [x] The read-side contract, [`report.Store`](../../internal/report/report.go), named by the consumer rather than declared centrally — which is what `internal/store/store.go` asks for in as many words: the non-heartbeat interfaces are "deliberately not declared yet" because "each one's method set follows from the OpenAPI operations that use it". **There is no single repository interface in this codebase and this does not add one.** The file also records what is deliberately absent, so the gaps read as decisions: no window percentile, no window min/max, no expiries until `/api/v1/expiries` has a type to return, and nothing that writes
 - [ ] Computation produces a backend-independent `ReportDocument` from the repository interface. **Renderers consume the model; none consumes another's output** — the plan's §5 and ADR-007 item 1, and the single decision that keeps the phase from turning into an HTML-to-PDF project
 - [ ] Window resolution in a stated timezone. Calendar windows cut the last complete period in `GeneralSettings.Timezone`, overridable per definition. A monthly report that starts at midnight UTC for an Australian agency is wrong by a working day and will be reported as a bug
 - [ ] Scope resolves **at run time, not at save time** — monitor ids, groups and tags as a union. An agency that adds a monitor to a client's tag expects it in that client's next report without editing the report
@@ -227,18 +234,28 @@ change goes through [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 first.
    because the write-fsync-then-commit rule means the reverse order can produce a
    row whose bytes are not in the backup.
 
-2. **Write migration `0008` and the repository interface, in that order and
-   before any computation.** Everything below the API depends on the shape of
-   these tables, and the one thing Phase 1 proved repeatedly is that a schema
-   decided late gets decided twice. `org_id` on every table from this migration.
+2. ~~**Write migration `0008` and the repository interface.**~~ Both landed
+   2026-08-30, and the interface turned out to be the smaller half: three of its
+   six methods already existed on `*sqlite.Store`. **Four schema calls are open
+   for review rather than settled**, each argued at its site in the migration —
+   the brand logo stored in the database rather than on disk (an artifact's three
+   objections do not apply to a capped image, and it keeps branding inside the
+   backup procedure); `report_artifacts.path` stored rather than recomputed;
+   schedule deliveries as a child table rather than JSON, because a sealed key
+   needs a row to bind its AAD to; and `slo_target_percent` riding in `0008`
+   rather than taking a number of its own. Any of the four is cheap to reverse
+   now and expensive after the first tagged release, per data model §8.
 
-3. **Then `internal/report` computing the SLA and uptime model, with the
+3. **Next: `internal/report` computing the SLA and uptime model, with the
    denominator tests written first.** The plan's Month 4 checkpoint is the target
    and it is a good one: `curl` a computed SLA report as JSON for a monitor over
    an arbitrary past month, with a stated denominator, honest nulls, and a latency
    block that omits what it cannot compute. Nothing renders yet. Nothing is
    scheduled yet. If the numbers are wrong, everything downstream is a faster way
-   to be wrong.
+   to be wrong. The three unimplemented `report.Store` methods are the gate on
+   it, and `WindowTotals` and `DailySeries` should be written batched from the
+   first line rather than made batched later — the per-monitor version passes
+   every test and fails the load gate.
 
 4. **Then the primitive set and the SVG backend**, because HTML is canonical and
    because standing the golden test up against the first renderer is what makes
