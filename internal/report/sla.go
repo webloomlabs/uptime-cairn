@@ -40,29 +40,32 @@ type SLA struct {
 // function derives from a percentile** (ADR-006), which is the direct answer to
 // the instruction data model §11.5 left for this phase.
 //
-// # The one judgement in it: what a second is
+// # What a second is
 //
-// Uptime is a ratio of observed checks. A budget is quoted in seconds. Turning
-// one into the other is a choice, and this function makes it explicitly:
+// Uptime is a ratio of observed checks; a budget is quoted in seconds. The
+// conversion is a choice, and it is made in one place — DowntimeSeconds, which
+// sums the observed down proportion of each **day** — with the result passed in
+// here rather than re-derived.
 //
-//	consumed = (1 - uptime ratio) × window
+// Two consequences worth stating, because both were wrong in an earlier cut of
+// this function and the second reached a rendered report.
 //
-// The observed down proportion is projected onto the window's wall-clock length.
-// It is exact when observation is complete, and it overstates in proportion to
-// the share of the window that observed nothing — which is why Uptime carries
-// UnobservedShare and why the report prints it beside this number rather than
-// leaving the reader to assume completeness.
+// A day nobody observed contributes nothing. Projecting the window-level down
+// proportion onto the window's whole length instead would attribute the observed
+// failure rate to days the probe was off — inventing downtime on a day nothing
+// is known about, which is exactly what the denominator rules refuse one layer
+// up. The budget denominator is still the whole window, because a contractual
+// 99.9% of a month is 43m12s however much of it was observed; UnobservedShare is
+// what tells the reader how much to trust the numerator.
+//
+// And the breach log and the budget agree by construction, because they are the
+// same sum. A report reading "budget used 3h 36m" above a table of breaches
+// totalling 2h 24m is an internal contradiction an auditor finds immediately.
 //
 // The alternative, multiplying down checks by the monitor's interval, was not
-// taken. It reads more directly off the data and is wrong in the case that
-// matters: an interval changed mid-window, or checks that were never made,
-// produce a confident figure with no relationship to the time the service was
-// actually unavailable — and a month with a gap in it is exactly when somebody
-// disputes an SLA.
-//
-// This is the only place the conversion happens. Changing the decision is
-// changing this function.
-func ComputeSLA(u Uptime, target Target, window time.Duration) SLA {
+// taken: an interval changed mid-window, or checks never made, produce a
+// confident figure with no relationship to the time the service was unavailable.
+func ComputeSLA(u Uptime, target Target, window time.Duration, downtimeSeconds int) SLA {
 	s := SLA{
 		TargetPercent: target.Percent,
 		TargetSource:  target.Source,
@@ -102,8 +105,8 @@ func ComputeSLA(u Uptime, target Target, window time.Duration) SLA {
 	met := actual >= target.Percent-1e-9
 	s.Met = &met
 
-	consumed := (1 - *u.Ratio) * windowSeconds
-	s.ErrorBudgetConsumedSeconds = int(math.Round(consumed))
+	consumed := float64(downtimeSeconds)
+	s.ErrorBudgetConsumedSeconds = downtimeSeconds
 	s.ErrorBudgetRemainingSeconds = s.ErrorBudgetSeconds - s.ErrorBudgetConsumedSeconds
 
 	if budget > 0 {

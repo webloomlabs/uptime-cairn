@@ -16,13 +16,33 @@ func uptimeAt(upPercent float64) Uptime {
 	return ComputeUptime(store.HistoryBucket{Up: up, Down: 10000 - up}, MaintenanceExclude)
 }
 
+// downFor is the downtime a fully observed window of `days` at the given uptime
+// works out to, computed through the one conversion the product has rather than
+// restated here — a test that hard-codes the number it is checking proves only
+// that somebody can multiply.
+func downFor(upPercent float64, days int) int {
+	up := int(upPercent * 100)
+	daily := make([]store.HistoryBucket, 0, days)
+	for i := range days {
+		// The same ratio every day, at full precision per day rather than a
+		// per-day share of a total — integer division of a small down count
+		// across thirty days rounds it to nothing.
+		daily = append(daily, store.HistoryBucket{
+			Start: day0.AddDate(0, 0, i),
+			Up:    up,
+			Down:  10000 - up,
+		})
+	}
+	return DowntimeSeconds(daily, MaintenanceExclude)
+}
+
 // The headline arithmetic, checked against figures somebody can verify by hand:
 // 99.9% of thirty days is 43m12s of budget, and 99.8% observed spends exactly
 // twice that.
 func TestErrorBudgetIsExactAndOverspendGoesNegative(t *testing.T) {
 	t.Parallel()
 
-	s := ComputeSLA(uptimeAt(99.8), Target{Percent: 99.9, Source: TargetFromMonitor}, month)
+	s := ComputeSLA(uptimeAt(99.8), Target{Percent: 99.9, Source: TargetFromMonitor}, month, downFor(99.8, 30))
 
 	if s.ErrorBudgetSeconds != 2592 {
 		t.Errorf("budget = %ds, want 2592 (43m12s: 0.1%% of 30 days)", s.ErrorBudgetSeconds)
@@ -52,7 +72,7 @@ func TestTargetMetExactlyIsMet(t *testing.T) {
 	t.Parallel()
 
 	u := ComputeUptime(store.HistoryBucket{Up: 8991, Down: 9}, MaintenanceExclude)
-	s := ComputeSLA(u, Target{Percent: 99.9, Source: TargetFromMonitor}, month)
+	s := ComputeSLA(u, Target{Percent: 99.9, Source: TargetFromMonitor}, month, 2592)
 
 	if s.Met == nil || !*s.Met {
 		t.Fatalf("met = %v at exactly 99.9%%, want true (actual %v)", s.Met, *s.ActualPercent)
@@ -67,7 +87,7 @@ func TestNothingObservedConsumesNothing(t *testing.T) {
 	t.Parallel()
 
 	u := ComputeUptime(store.HistoryBucket{Unknown: 5000}, MaintenanceExclude)
-	s := ComputeSLA(u, Target{Percent: 99.9, Source: TargetFromGroup}, month)
+	s := ComputeSLA(u, Target{Percent: 99.9, Source: TargetFromGroup}, month, 0)
 
 	if s.ActualPercent != nil {
 		t.Errorf("actual = %v, want nil", *s.ActualPercent)
@@ -93,7 +113,7 @@ func TestNothingObservedConsumesNothing(t *testing.T) {
 func TestImpossibleTargetOmitsTheRatioRatherThanReturningInfinity(t *testing.T) {
 	t.Parallel()
 
-	s := ComputeSLA(uptimeAt(99.0), Target{Percent: 100, Source: TargetFromTemplate}, month)
+	s := ComputeSLA(uptimeAt(99.0), Target{Percent: 100, Source: TargetFromTemplate}, month, downFor(99.0, 30))
 
 	if s.ErrorBudgetSeconds != 0 {
 		t.Errorf("budget = %d, want 0", s.ErrorBudgetSeconds)
@@ -117,7 +137,7 @@ func TestTargetSourceIsCarriedOntoTheBlock(t *testing.T) {
 	t.Parallel()
 
 	for _, source := range []string{TargetFromTemplate, TargetFromMonitor, TargetFromGroup} {
-		s := ComputeSLA(uptimeAt(99.95), Target{Percent: 99.9, Source: source}, month)
+		s := ComputeSLA(uptimeAt(99.95), Target{Percent: 99.9, Source: source}, month, downFor(99.95, 30))
 		if s.TargetSource != source {
 			t.Errorf("source = %q, want %q", s.TargetSource, source)
 		}
@@ -129,7 +149,7 @@ func TestTargetSourceIsCarriedOntoTheBlock(t *testing.T) {
 func TestMetTargetLeavesBudgetRemaining(t *testing.T) {
 	t.Parallel()
 
-	s := ComputeSLA(uptimeAt(99.95), Target{Percent: 99.9, Source: TargetFromMonitor}, month)
+	s := ComputeSLA(uptimeAt(99.95), Target{Percent: 99.9, Source: TargetFromMonitor}, month, downFor(99.95, 30))
 
 	if s.Met == nil || !*s.Met {
 		t.Fatal("met = false at 99.95 against 99.9")
@@ -153,8 +173,10 @@ func TestConsumedDependsOnTheRatioNotTheCheckCount(t *testing.T) {
 	t.Parallel()
 
 	target := Target{Percent: 99, Source: TargetFromMonitor}
-	many := ComputeSLA(ComputeUptime(store.HistoryBucket{Up: 9950, Down: 50}, MaintenanceExclude), target, month)
-	few := ComputeSLA(ComputeUptime(store.HistoryBucket{Up: 199, Down: 1}, MaintenanceExclude), target, month)
+	manyDaily := []store.HistoryBucket{{Start: day0, Up: 9950, Down: 50}}
+	fewDaily := []store.HistoryBucket{{Start: day0, Up: 199, Down: 1}}
+	many := ComputeSLA(ComputeUptime(manyDaily[0], MaintenanceExclude), target, month, DowntimeSeconds(manyDaily, MaintenanceExclude))
+	few := ComputeSLA(ComputeUptime(fewDaily[0], MaintenanceExclude), target, month, DowntimeSeconds(fewDaily, MaintenanceExclude))
 
 	if many.ErrorBudgetConsumedSeconds != few.ErrorBudgetConsumedSeconds {
 		t.Errorf("consumed differs by sample size: %d vs %d", many.ErrorBudgetConsumedSeconds, few.ErrorBudgetConsumedSeconds)
@@ -171,8 +193,10 @@ func TestMaintenancePolicyReachesTheBudget(t *testing.T) {
 	b := store.HistoryBucket{Up: 9900, Down: 100, Maintenance: 5000}
 	target := Target{Percent: 99, Source: TargetFromMonitor}
 
-	excluded := ComputeSLA(ComputeUptime(b, MaintenanceExclude), target, month)
-	asDown := ComputeSLA(ComputeUptime(b, MaintenanceCountAsDown), target, month)
+	daily := []store.HistoryBucket{b}
+	daily[0].Start = day0
+	excluded := ComputeSLA(ComputeUptime(b, MaintenanceExclude), target, month, DowntimeSeconds(daily, MaintenanceExclude))
+	asDown := ComputeSLA(ComputeUptime(b, MaintenanceCountAsDown), target, month, DowntimeSeconds(daily, MaintenanceCountAsDown))
 
 	if excluded.Met == nil || !*excluded.Met {
 		t.Error("excluding maintenance: 99% observed against a 99% target should be met")

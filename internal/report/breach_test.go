@@ -141,11 +141,12 @@ func TestBreachTotalAgreesWithConsumedBudget(t *testing.T) {
 	}
 
 	u := ComputeUptime(Sum(daily), MaintenanceExclude)
-	sla := ComputeSLA(u, Target{Percent: 99, Source: TargetFromMonitor}, 3*24*time.Hour)
+	sla := ComputeSLA(u, Target{Percent: 99, Source: TargetFromMonitor}, 3*24*time.Hour,
+		DowntimeSeconds(daily, MaintenanceExclude))
 
-	// Both are the observed down proportion projected onto time; over equal-length
-	// days with equal check counts they are the same number.
-	if diff := total - sla.ErrorBudgetConsumedSeconds; diff > 1 || diff < -1 {
+	// They are the same sum, so they agree exactly rather than approximately —
+	// which is the point of there being one conversion instead of two.
+	if diff := total - sla.ErrorBudgetConsumedSeconds; diff != 0 {
 		t.Errorf("breach total %ds disagrees with consumed budget %ds", total, sla.ErrorBudgetConsumedSeconds)
 	}
 }

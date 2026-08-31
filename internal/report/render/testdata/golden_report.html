@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Acme monthly — Smith &amp; Co &lt;Ltd&gt;</title>
+<style>
+
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 32px 24px;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: #1a1f2b; background: #f6f7f9;
+}
+.report { max-width: 760px; margin: 0 auto; background: #fff; padding: 40px; border-radius: 6px; }
+.cover { border-bottom: 2px solid #1a1f2b; padding-bottom: 20px; margin-bottom: 24px; }
+.cover .logo { max-height: 56px; max-width: 240px; margin-bottom: 16px; display: block; }
+h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: -0.01em; }
+h2 { font-size: 17px; margin: 32px 0 10px; padding-bottom: 6px; border-bottom: 1px solid #e2e5ea; }
+h3 { font-size: 14px; margin: 22px 0 8px; color: #6b7284; text-transform: uppercase; letter-spacing: 0.06em; }
+p { margin: 0 0 10px; }
+.client { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.period { color: #6b7284; margin: 0; }
+.generated { color: #6b7284; font-size: 12px; margin: 2px 0 0; }
+.muted, .note { color: #6b7284; font-size: 12px; }
+.figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px 20px; margin: 0 0 18px; }
+.figures > div { border-left: 3px solid #e2e5ea; padding-left: 10px; }
+dt { font-size: 12px; color: #6b7284; margin-bottom: 2px; }
+dd { margin: 0; font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+dd .note { display: block; font-weight: 400; font-size: 11px; margin-top: 2px; }
+table { border-collapse: collapse; width: 100%; margin: 0 0 18px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #e2e5ea; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #6b7284; }
+.num { text-align: right; }
+.chart { margin: 0 0 18px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart-title { font-size: 12px; color: #6b7284; margin-bottom: 6px; }
+footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid #e2e5ea; color: #6b7284; font-size: 12px; }
+@media print {
+  body { background: #fff; padding: 0; }
+  .report { max-width: none; padding: 0; border-radius: 0; }
+  h2, h3 { break-after: avoid-page; }
+  .figures, .chart, tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+}
+</style>
+</head>
+<body>
+<main class="report">
+<header class="cover">
+<h1>Acme monthly</h1>
+<p class="client">Prepared for Smith &amp; Co &lt;Ltd&gt;</p>
+<p class="period">1 Mar – 3 Mar 2026</p>
+<p class="generated">Generated 1 April 2026</p>
+</header>
+<p>Monthly availability summary for the services covered by your agreement.</p>
+<p class="muted">Uptime is the share of observed checks that succeeded. Checks the probe could not make are excluded from the figure and reported separately: a gap in observation is not an outage. Declared maintenance is excluded. Figures are read at daily resolution, which is coarser than requested because retention no longer holds finer data for this period.</p>
+<h2>Summary</h2>
+<dl class="figures">
+<div>
+<dt>Uptime</dt>
+<dd>95%<span class="note">of 2,000 observed checks</span></dd>
+</div>
+<div>
+<dt>Successful checks</dt>
+<dd>1,900</dd>
+</div>
+<div>
+<dt>Failed checks</dt>
+<dd>100</dd>
+</div>
+<div>
+<dt>Not observed</dt>
+<dd>1,000<span class="note">33.333% of the period; excluded from the figure above</span></dd>
+</div>
+</dl>
+<dl class="figures">
+<div>
+<dt>Average response</dt>
+<dd>131.6ms<span class="note">over 1,900 successful checks</span></dd>
+</div>
+<div>
+<dt>Best day</dt>
+<dd>111.1ms<span class="note">1 March</span></dd>
+</div>
+<div>
+<dt>Worst day</dt>
+<dd>150ms<span class="note">3 March</span></dd>
+</div>
+<div>
+<dt>Days over target</dt>
+<dd>0<span class="note">target 500ms</span></dd>
+</div>
+</dl>
+<h2>checkout</h2>
+<figure class="chart">
+<figcaption class="chart-title">Daily availability</figcaption>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 22" width="660" height="22" role="img"><rect x="0" y="0" width="218.67" height="22" rx="1" fill="#c0392b"/><rect x="220.67" y="0" width="218.67" height="22" rx="1" fill="#c7ccd4"/><rect x="441.33" y="0" width="218.67" height="22" rx="1" fill="#1a8f5a"/></svg>
+<figcaption class="note">Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage.</figcaption>
+</figure>
+<dl class="figures">
+<div>
+<dt>Uptime</dt>
+<dd>95%<span class="note">of 2,000 observed checks</span></dd>
+</div>
+<div>
+<dt>Successful checks</dt>
+<dd>1,900</dd>
+</div>
+<div>
+<dt>Failed checks</dt>
+<dd>100</dd>
+</div>
+<div>
+<dt>Not observed</dt>
+<dd>1,000<span class="note">33.333% of the period; excluded from the figure above</span></dd>
+</div>
+</dl>
+<h3>Service level</h3>
+<dl class="figures">
+<div>
+<dt>Target</dt>
+<dd>99.9%<span class="note">set on the monitor</span></dd>
+</div>
+<div>
+<dt>Achieved</dt>
+<dd>95%<span class="note">target missed</span></dd>
+</div>
+<div>
+<dt>Error budget</dt>
+<dd>4m<span class="note">for the period</span></dd>
+</div>
+<div>
+<dt>Budget used</dt>
+<dd>2h 24m</dd>
+</div>
+<div>
+<dt>Over budget by</dt>
+<dd>2h 19m</dd>
+</div>
+<div>
+<dt>Burn rate</dt>
+<dd>33.33×<span class="note">1× spends the budget exactly over the period</span></dd>
+</div>
+</dl>
+<table>
+<thead>
+<tr><th>From</th><th>To</th><th class="num">Downtime</th></tr>
+</thead>
+<tbody>
+<tr><td>1 Mar 2026</td><td>2 Mar 2026</td><td class="num">2h 24m</td></tr>
+</tbody>
+</table>
+<h3>Response time</h3>
+<figure class="chart">
+<figcaption class="chart-title">Daily average</figcaption>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 120" width="660" height="120" role="img"><line x1="34" y1="98" x2="656" y2="98" stroke="#e2e5ea" stroke-width="1"/><line x1="34" y1="6" x2="656" y2="6" stroke="#e2e5ea" stroke-width="1"/><rect x="32.5" y="76.47" width="3" height="3" fill="#3b5bdb"/><rect x="654.5" y="24.53" width="3" height="3" fill="#3b5bdb"/><text x="28" y="14" font-size="8" font-weight="400" fill="#6b7284" text-anchor="end">165ms</text><text x="28" y="98" font-size="8" font-weight="400" fill="#6b7284" text-anchor="end">96ms</text><text x="34" y="114" font-size="8" font-weight="400" fill="#6b7284" text-anchor="start">1 Mar</text><text x="656" y="114" font-size="8" font-weight="400" fill="#6b7284" text-anchor="end">3 Mar</text></svg>
+<figcaption class="note">The line breaks where nothing was measured rather than joining across it.</figcaption>
+</figure>
+<dl class="figures">
+<div>
+<dt>Average response</dt>
+<dd>131.6ms<span class="note">over 1,900 successful checks</span></dd>
+</div>
+<div>
+<dt>Best day</dt>
+<dd>111.1ms<span class="note">1 March</span></dd>
+</div>
+<div>
+<dt>Worst day</dt>
+<dd>150ms<span class="note">3 March</span></dd>
+</div>
+<div>
+<dt>Days over target</dt>
+<dd>0<span class="note">target 500ms</span></dd>
+</div>
+<div>
+<dt>95th percentile</dt>
+<dd>—<span class="note">not computed for a report of this size</span></dd>
+</div>
+</dl>
+<footer>
+<p>Confidential — prepared under MSA 2024/17.</p>
+<p class="note">Generated by Uptime Cairn</p>
+</footer>
+</main>
+</body>
+</html>

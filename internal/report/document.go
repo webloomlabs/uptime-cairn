@@ -75,6 +75,17 @@ type ScopeSummary struct {
 	TagIDs       []model.ID
 }
 
+// DayUptime is one day's uptime for one monitor, at the grain the tiers store.
+//
+// Carried for the CSV, which promises a row per bucket per monitor and would
+// otherwise emit days with a latency and no uptime beside it. The JSON artifact
+// does not include it: ReportMonitorSection in the contract has no field for a
+// daily uptime array, and CSV column layout is not part of the API.
+type DayUptime struct {
+	Date   time.Time
+	Uptime Uptime
+}
+
 // MonitorSection is one monitor's figures.
 type MonitorSection struct {
 	MonitorID model.ID
@@ -83,6 +94,7 @@ type MonitorSection struct {
 	GroupID   *model.ID
 
 	Uptime       Uptime
+	DailyUptime  []DayUptime
 	SLA          *SLA
 	ResponseTime Latency
 	Breaches     []Breach
@@ -200,11 +212,20 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 		daily := series[m.ID] // computes to a null ratio rather than to zero
 
 		section.Uptime = ComputeUptime(total, spec.MaintenanceHandling)
+		for _, b := range daily {
+			section.DailyUptime = append(section.DailyUptime, DayUptime{
+				Date:   b.Start,
+				Uptime: ComputeUptime(b, spec.MaintenanceHandling),
+			})
+		}
 		section.ResponseTime = ComputeLatency(total, daily, spec.ResponseTimeTargetMs)
 		section.Breaches = ComputeBreaches(daily, spec.MaintenanceHandling)
 
 		if target, ok := resolveTarget(spec, targets, m.ID); ok {
-			sla := ComputeSLA(section.Uptime, target, length)
+			// The same total the breach table above shows, so the two cannot
+			// disagree on the face of one document.
+			sla := ComputeSLA(section.Uptime, target, length,
+				DowntimeSeconds(daily, spec.MaintenanceHandling))
 			section.SLA = &sla
 		}
 		doc.Monitors = append(doc.Monitors, section)

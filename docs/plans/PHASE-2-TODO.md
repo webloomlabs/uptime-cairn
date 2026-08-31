@@ -22,6 +22,21 @@ compute. All of that exists as a Go value; what is missing is the endpoint that
 serves it, which is `POST /report-templates/{id}/generate` and therefore needs
 the template CRUD underneath it.
 
+**Three of the four formats are done.** JSON and CSV render from the model as siblings, never as a chain.
+HTML is canonical and renders from the bounded seven-element model, with charts
+drawn against the primitives rather than against SVG — so the PDF backend, when
+it lands, gets the same elements and the same charts without a second
+implementation, and a golden report to be measured against from its first day.
+
+**The golden report caught a defect the unit tests could not.** The rendered
+page read "Budget used 3h 36m" above a breach table summing to 2h 24m: the error
+budget projected the window-level down proportion onto the window's whole
+length, attributing the observed failure rate to a day the probe was off. That
+is the same invention the denominator rules refuse one layer up, and no test of
+either figure alone could see it — only the two side by side on a page. Consumed
+budget is now the sum of the breach durations, so the two agree by construction
+rather than by arithmetic coincidence.
+
 **The percentile is wired, and it cost one spec change.** `unavailable_reason`
 gained `scope_too_large` on explicit instruction (2026-08-31), classified under
 [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 as **breaking-but-unshipped** —
@@ -99,16 +114,19 @@ all.
 
 ## Rendering
 
-- [ ] The drawing primitive set — text run, rectangle, line, path, image — and nothing else. Every primitive added is one both backends implement forever, which is why the set stays small
-- [ ] SVG backend, and the HTML renderer as the canonical output
-- [ ] CSV and JSON from the same model: one row per bucket per monitor plus a machine-readable summary. These are the data, not the layout, and they are what a client's BI tool consumes
-- [ ] The JSON artifact is `ReportDocument` verbatim, no envelope, carrying `meta.schema_version` — a BI tool parsing a stored report years from now needs to know which shape it is holding
+- [x] The drawing primitive set — [`draw.go`](../../internal/report/render/draw.go): text run, rectangle, line, path, image, and nothing else. A test fails the moment a sixth appears, so adding one means deleting that line and meaning it. The text primitive takes a `Run` rather than a string (ADR-007 item 5), so a shaping layer inserts later without changing a caller; no alpha channel, because transparency costs a PDF `ExtGState` resource per value and a lighter colour does the job
+- [x] SVG backend — [`svg.go`](../../internal/report/render/svg.go). Self-contained: no stylesheet, no script, no font reference, because an artifact has to render years from now from a saved file with no network. Text is escaped (a client called `Smith & Co <Ltd>` gets a report, not a parse error), stroke-only shapes state `fill="none"` rather than inheriting SVG's black default, and coordinates are rounded before printing so determinism does not depend on float formatting
+- [x] The charts, written once against the primitives and drawn by both backends — [`chart.go`](../../internal/report/render/chart.go). **The latency line breaks at a day with no measurement rather than interpolating across it**, the Phase 1 monitor-chart rule carried onto the client's page; an isolated observed day still gets a mark, because a month with one measurement is not a month with none. The uptime strip draws an unobserved day **grey, not red**. A test drives one chart into two backends and asserts they receive identical calls, which is the whole of ADR-007 item 2
+- [x] The bounded document model of ADR-007 item 3 — [`element.go`](../../internal/report/render/element.go): cover, heading, paragraph, key–value block, table, chart, footer, and a test that fails if `Compose` emits an eighth. [`compose.go`](../../internal/report/render/compose.go) is the one place the report's *face* is decided, and it discharges §4.3's two obligations there rather than in a template: **the denominator and the maintenance policy are on the face**, in a methodology note placed before any figure, because a denominator explained after the number has already been misread
+- [x] The HTML renderer as the canonical output — [`html.go`](../../internal/report/render/html.go). Self-contained by construction: inline styles, inline SVG charts, a data-URI logo, `noindex`, and a test that fails on `<script>`, `<link>`, `url(`, or any remote URL. Canonical in ADR-007's sense — the format the PDF is *measured against*, never the one it is made from
+- [x] CSV and JSON from the same model — [`render/`](../../internal/report/render/), 8 tests. CSV is one well-formed file with a `row_type` discriminator (`daily`, `monitor_total`, `estate_total`) rather than a header block above the data, because a CSV with a second table above the header is not a CSV. **A null is an empty field, never a zero** — the single most likely way a figure from this product ends up wrong in front of a client is a null uptime ratio charted as a day of total downtime. Numbers are formatted `'f'` rather than `'g'`: `9.99e-01` in a spreadsheet column is a support conversation
+- [x] The JSON artifact is `ReportDocument` verbatim, no envelope, carrying `meta.schema_version`. Wire shapes are hand-written against the spec following [`internal/api/dto.go`](../../internal/api/dto.go) and its stated reasoning, so the domain types stay tag-free. Key names are pinned by a test, since a BI tool binds to them and outlives several releases
 - [ ] PDF backend over the same primitives. It follows the SVG one deliberately: if it runs long, HTML plus print CSS ships and **PDF slips without disturbing anything else**
 - [ ] One embedded TrueType family, regular and bold, subset into the file
-- [ ] Deterministic output — creation date and `/ID` derived from the run rather than the clock, which is what makes re-runnable generation a property rather than an aspiration
+- [ ] Deterministic output — creation date and `/ID` derived from the run rather than the clock. **Held for JSON and CSV today**: both render byte-identically five times over, and `Build` takes `now` and the run id as parameters so nothing downstream can consult the clock. The PDF half arrives with the PDF backend
 - [ ] **The golden-report visual regression test stands up with the second renderer, not after it.** Two renderers over one model is two layouts that can drift, and the drift is invisible until a client sees a PDF that disagrees with the page they were shown
 - [ ] Table page-breaking, budgeted as the known time-sink it is
-- [ ] Print CSS on the HTML report as a complement, never as the substitute
+- [x] Print CSS on the HTML report as a complement, never as the substitute — page-break rules that keep a figure block or a table row from splitting, and a repeating table header. It does not pretend to be the PDF
 - [ ] Render failure degrades the run to `partial` with the reason recorded per artifact, and the formats that succeeded are still delivered
 
 ## Branding
@@ -218,7 +236,7 @@ change goes through [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 first.
 ## Quality gates and scale
 
 - [ ] Contract tests green for `x-cairn-phase: 2`, in both directions: every Phase 2 operation has a handler, and nothing is served that the spec does not describe
-- [ ] Golden-report visual regression, standing up with the second renderer
+- [x] Golden-report regression — [`testdata/golden_report.html`](../../internal/report/render/testdata/golden_report.html), standing up **with the first renderer** as ADR-007 requires, so the PDF backend arrives with something to be measured against on its first day. `-update` rewrites it; the failure message says to read the diff rather than accept it
 - [ ] Determinism test: the same model rendered twice is byte-identical
 - [ ] Denominator tests over maintenance, unknown and skipped, written before the code they check
 - [ ] **The 5,000-monitor gate extended: 50 concurrent report runs with check scheduling latency unchanged.** A regression blocks merge, not release. This is CI configuration and needs reviewing as such (AGENTS.md rule 7)

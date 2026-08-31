@@ -1,6 +1,7 @@
 package report
 
 import (
+	"math"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
@@ -58,12 +59,19 @@ func ComputeBreaches(daily []store.HistoryBucket, handling string) []Breach {
 	var (
 		out     []Breach
 		current *Breach
+		seconds float64
 	)
 
+	// Accumulated as a float and rounded once, at the end of a run. Rounding
+	// each day and adding the results loses up to half a second a day — twelve
+	// seconds over a month, which is enough to make a breach table and an error
+	// budget disagree in the last digit and enough for somebody to ask why.
 	flush := func() {
 		if current != nil {
+			current.DurationSeconds = int(math.Round(seconds))
 			out = append(out, *current)
 			current = nil
+			seconds = 0
 		}
 	}
 
@@ -88,22 +96,52 @@ func ComputeBreaches(daily []store.HistoryBucket, handling string) []Breach {
 			continue
 		}
 
-		// The same projection the error budget uses, applied to one day: the
-		// observed down proportion over the day's length. It is the only
-		// conversion in the product from checks to seconds, and using a second
-		// one here would let the breach durations disagree with the budget they
-		// are supposed to explain.
-		seconds := int(float64(down) / float64(observed) * (24 * time.Hour).Seconds())
+		seconds += dayDowntimeSeconds(down, observed)
 
 		end := b.Start.AddDate(0, 0, 1)
 		if current == nil {
-			current = &Breach{StartedAt: b.Start, EndedAt: end, DurationSeconds: seconds}
+			current = &Breach{StartedAt: b.Start, EndedAt: end}
 			continue
 		}
 		current.EndedAt = end
-		current.DurationSeconds += seconds
 	}
 	flush()
 
 	return out
+}
+
+// dayDowntimeSeconds converts one day's counts into seconds of downtime.
+//
+// **The only conversion in the product from checks to time**, and everything
+// that reports a duration goes through it: the breach log, and the error budget
+// the breach log is there to explain. Two conversions would let a report say
+// "budget used 3h 36m" above a table of breaches summing to 2h 24m, which is the
+// kind of internal contradiction an auditor finds in thirty seconds.
+//
+// Per day rather than per window, and that is the substantive part. Projecting a
+// window-level down proportion onto the window's whole length attributes the
+// observed failure rate to days **nobody observed** — inventing downtime on a
+// day the probe was off, which is precisely what the denominator rules refuse
+// one layer up. A day with no observations contributes nothing here, because
+// nothing is what is known about it.
+func dayDowntimeSeconds(down, observed int) float64 {
+	if observed <= 0 || down <= 0 {
+		return 0
+	}
+	return float64(down) / float64(observed) * (24 * time.Hour).Seconds()
+}
+
+// DowntimeSeconds totals the downtime the breach log accounts for. It is what
+// the error budget is measured against.
+//
+// Defined as the sum of the breaches rather than as a second pass over the same
+// days, so the total under a table can never disagree with the rows in it. Two
+// implementations of one sum is how a report ends up contradicting itself in a
+// way that survives review, because both halves look right on their own.
+func DowntimeSeconds(daily []store.HistoryBucket, handling string) int {
+	var total int
+	for _, b := range ComputeBreaches(daily, handling) {
+		total += b.DurationSeconds
+	}
+	return total
 }
