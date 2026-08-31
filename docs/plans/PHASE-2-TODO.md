@@ -64,12 +64,33 @@ poll, download, and it needs the runs table, artifact storage on disk and the
 download path before it works. The paragraph below said "one handler away" and
 that was optimistic; it is the artifact-storage section away.
 
-**The Month 4 checkpoint is one handler away.** The plan asks to `curl` a
-computed SLA report as JSON for a monitor over an arbitrary past month, with a
-stated denominator, honest nulls, and a latency block that omits what it cannot
-compute. All of that exists as a Go value; what is missing is the endpoint that
-serves it, which is `POST /report-templates/{id}/generate` and therefore needs
-the template CRUD underneath it.
+**The Month 4 checkpoint is met, by `curl` against a running instance
+(2026-08-31).** A monitor, a month of seeded history, `POST
+/report-templates/{id}/generate` over March 2026, a `202` with a run to poll, and
+the JSON downloaded from `/report-runs/{id}/download?format=json`. The figures
+verify by hand: 8,582 of 8,592 observed checks is 99.884%; the error budget is
+0.1% of 31 days, 2,678 seconds; consumed is 3,000 seconds, which is exactly the
+sum of the two breaches; remaining is **−322** rather than floored at zero; the
+burn rate is 1.12; and the p95 is absent with `insufficient_raw_retention` beside
+it. The `X-Cairn-SHA256` header matched `shasum -a 256` of the downloaded file.
+
+The same run produced HTML and CSV, and **failed the PDF with a stated reason** —
+"no embedded font family" — leaving the run `partial` with three artifacts
+rendered and one failed row carrying its own error. That is ADR-007 item 7 taking
+a real case rather than a hypothetical one on the first instance it ever ran on.
+
+**And the run found a defect no unit test had.** The first attempt seeded only the
+`1d` tier, so the window totals (read at `1h`, which retention legitimately
+covers for a March window) came back empty while the breach log came back full:
+the document said *two breaches, fifty minutes* beside *budget consumed: 0*.
+`ComputeSLA` returned early on the window bucket, discarding the downtime the
+daily series had already established. This is the **same contradiction the golden
+report caught once already, arriving through a different door** — and the rule
+that fixed it then holds now: consumed is the breach total on every path through
+that function. It is reachable in production wherever the two tiers disagree
+about what is known, which an install that imported daily history or pruned its
+hourly rows does. The rendered page now reads "Budget used 50m" above a table of
+40m and 10m.
 
 **All four formats render.** JSON and CSV come off the model as siblings, never
 as a chain. HTML is canonical, and the PDF is a pure-Go writer over the same
@@ -137,8 +158,8 @@ all.
 
 - [x] Migration [`0008_reporting.sql`](../../migrations/sqlite/0008_reporting.sql) — **seven tables, not the four the data model named**: brand profiles, templates, schedules, schedule deliveries, runs, artifacts, share links, delivery attempts. `org_id` on every one from this first migration, so Phase 3 tenancy is a permission change and not a re-architecture. Applied over `0001`–`0007` against a real database with `integrity_check` and `foreign_key_check` clean, and each constraint exercised until it refused something: `sla_target = 100`, a second default brand profile, a second live share link on one run, a repeated `token_hash`, a second PDF for one run, `format = 'docx'`. Deleting a template cascades runs → artifacts → share links to zero. The three scheduled queries — due schedules, the expiry sweep, the share-token lookup — each plan onto their index as a `SEARCH`, with no scan
 - [x] `slo_target_percent` on monitors and groups — one nullable column each, `NULL` meaning no target, with the `< 100` bound enforced by a `CHECK` rather than only at the API: 100 refused and 99.95 accepted, tested against a real monitor row and a real group row. The resolution order now reads it as far as monitor-then-group; the template's override and the API field are still unwritten
-- [ ] Four things whose **column landed in `0008` and whose Go half is not written**: `report_artifact_days` inside the existing `retention` JSON (365 default, and exempt from the coarser-outlives-finer rule, because an artifact is expected to outlive the data behind it); `report_storage` as an eighth settings section with `secret_access_key_sealed` following `SMTPSettings.PasswordSealed`; the artifact row's `sha256`, `size_bytes` and `state` with `expired` as the tombstone behind a `410`; and `path`, stored rather than derived. No further migration is needed for any of them
-- [ ] **CRUD for the definitions — brand profiles and templates — landed and tested; schedules, runs and artifacts have not.** [`report.go`](../../internal/model/report.go) holds the domain types for all seven tables; [`report_brands.go`](../../internal/store/sqlite/report_brands.go) and [`report_templates.go`](../../internal/store/sqlite/report_templates.go) are the two write paths that exist. Fifteen tests, and three of them are about decisions rather than plumbing: a colour round-trips **exactly as written**, because a brand colour is a string pasted from a brand guide and handing it back in a different case is what makes a white-label feature feel like somebody else's; the scope stores **readable UUIDs** rather than base64 bytes, because the reader of that column is a human in a support conversation about why a monitor is or is not in a client's report; and the logo is **not carried on the profile read**, because a list of twelve clients would otherwise move twelve megabytes to render twelve names. Marking a profile default demotes the previous one in the same transaction rather than letting the unique index refuse the write — "there is already a default" is not something an operator can act on when making this one the default is exactly what they asked for
+- [ ] Of the four things whose **column landed in `0008` and whose Go half was not written**, three are now written: `report_artifact_days` inside the existing `retention` JSON, exempt from the coarser-outlives-finer rule as ADR-008 requires; the artifact row's `sha256`, `size_bytes` and `state`, with `expired` as the tombstone behind a `410`; and `path`, stored rather than derived. **`report_storage` remains**, as an eighth settings section with `secret_access_key_sealed` following `SMTPSettings.PasswordSealed`, and it waits on the S3 client
+- [ ] **CRUD for brand profiles, templates, runs and artifacts is landed and tested; schedules are not.** [`report.go`](../../internal/model/report.go) holds the domain types for all seven tables; [`report_brands.go`](../../internal/store/sqlite/report_brands.go) and [`report_templates.go`](../../internal/store/sqlite/report_templates.go) are the two write paths that exist. [`report_runs.go`](../../internal/store/sqlite/report_runs.go) adds runs, artifacts and the delivery log. Thirty tests, and several are about decisions rather than plumbing. **Starting a run is conditional on it still being queued**, which is the property a bounded worker pool rests on: two workers that pick up the same run cannot both render it, one updates a row and the other gets `ErrConflict`, and the pool needs no lock — a lock being a thing to get wrong at 09:00 on the first of the month. Expiry is a **tombstone**, so a bookmarked link answers 410 rather than 404, and the path goes with the bytes because a path that no longer resolves invites the next reader to go looking. A `skipped` delivery is recorded rather than omitted, for the same reason a suppressed notification is: silence with no row behind it is indistinguishable from a system that is not running. Three more are about decisions rather than plumbing: a colour round-trips **exactly as written**, because a brand colour is a string pasted from a brand guide and handing it back in a different case is what makes a white-label feature feel like somebody else's; the scope stores **readable UUIDs** rather than base64 bytes, because the reader of that column is a human in a support conversation about why a monitor is or is not in a client's report; and the logo is **not carried on the profile read**, because a list of twelve clients would otherwise move twelve megabytes to render twelve names. Marking a profile default demotes the previous one in the same transaction rather than letting the unique index refuse the write — "there is already a default" is not something an operator can act on when making this one the default is exactly what they asked for
 - [x] The SQLite half of [`report.Store`](../../internal/report/report.go) — [`reports.go`](../../internal/store/sqlite/reports.go): `MonitorsInScope` unions ids, groups (reaching child groups) and tags in one predicate so a monitor selected three ways appears once, and includes paused monitors, which still have history in the window; `WindowTotals` and `DailySeries` are batched, seek per monitor by the `(monitor_id, bucket_start)` primary key, and return `NULL` for p95 at every tier including `1m`. Absent monitors stay absent rather than arriving zero-valued, because zero up and zero down is a real state meaning "observed nothing" and a report has to tell the two apart. Nine tests, `-race` clean
 - [ ] **Data model §4.13 updated.** It lists four Phase 2 tables and `0008` creates seven, and it now also has to record the soft-delete rule — `deleted_at` on templates and schedules, `RESTRICT` from runs, and the reasoning that a run is a record which outlives its definition. The three it does not name are each a consequence of a decision taken after that list was written — brand profiles (spec Q2), share links (ADR-008), and the configured-target/attempt split that mirrors `notification_channels` and `notification_deliveries`. The migration header says so; the data model does not yet
 
@@ -198,22 +219,22 @@ all.
 - [ ] Templates, schedules and runs kept as three things. That separation is what makes "re-send last month's", "regenerate it after we corrected the incident record" and "the PDF failed but the HTML went out" all expressible. **And the separation has to survive a deletion**, which is what the soft delete above is for: three things that vanish together are one thing wearing three names
 - [ ] The five-field cron parser moves out of `internal/maintenance` into a shared package and is used by both. It is written once, with the day-of-month/day-of-week union rule already correct and tested; a second copy would agree on the day it was written
 - [ ] Daily, weekly, monthly, quarterly, and cron, each at `send_at` in the schedule's own timezone
-- [ ] A bounded worker pool with an explicit concurrency limit, off the check path. **Fifty PDFs at 09:00 on the 1st must not delay a single check, and the load test says so rather than the author**
-- [ ] Generation is idempotent and re-runnable: a template plus a window plus a data snapshot yields the same artifact, and a re-run after a correction is a first-class action with both artifacts kept
+- [ ] A bounded worker pool with an explicit concurrency limit, off the check path. **The pool is written and tested** — [`pool.go`](../../internal/report/runner/pool.go), two workers by default, a bounded queue that refuses rather than grows, and a `Submit` that does not block because the handler answering `202` must not wait for a worker. A full queue is a `503` naming the reason; an unbounded backlog would turn a bad morning into memory pressure and then into an OOM kill, taking the monitoring down with the reporting. **The box stays open because the exit criterion is the load test**: fifty PDFs at 09:00 on the 1st must not delay a single check, and *the load test says so rather than the author*
+- [x] Generation is re-runnable, and **the run's recorded window wins over the template's period** — which is what makes it first-class rather than approximate: a report regenerated after a correction covers the same window as the one it replaces, not whatever "last month" resolves to on the day somebody presses the button. Both artifacts are kept, because a run is a separate row and nothing overwrites another. The determinism half is held by the renderers, which take `now` and the run id as parameters and read no clock
 - [ ] `late` is set and shown. If the instance was down at 09:00 on the 1st, the run is late, not lost, and the UI says which
-- [ ] `partial` is a real state end to end — one format produced, another not, both halves visible. Collapsing it into `succeeded` or `failed` is how somebody concludes a delivery went out whole
+- [x] `partial` is a real state end to end — one format produced, another not, both halves visible. **Demonstrated on a running instance**, not reasoned about: a template asking for all four formats produced JSON, CSV and HTML, failed the PDF for want of an embedded font, and left the run `partial` with a failed artifact row carrying its own reason. Asking to download that format is a `409` naming the cause rather than a `404`. Collapsing it into `succeeded` or `failed` is how somebody concludes a delivery went out whole
 - [ ] A run cancelled mid-flight leaves no half-written artifact
 
 ## Artifact storage (ADR-008)
 
-- [ ] `<data-dir>/reports/<yyyy>/<mm>/<artifact-id>.<ext>`, directories `0750` and files `0640`, matching what the codebase already chooses elsewhere
-- [ ] **The on-disk name derives from the artifact id and format, never the template title**, so a template called `../../etc` has nowhere to go
-- [ ] **Write the file, fsync, then commit the row** — in that order, so a crash leaves an inert orphan rather than an artifact the UI offers and the disk cannot supply
-- [ ] SHA-256 and size on every row
-- [ ] The orphan sweeper, for the files the ordering above deliberately leaves behind
+- [x] `<data-dir>/reports/<yyyy>/<mm>/<artifact-id>.<ext>`, directories `0750` and files **`0600`** — [`internal/artifact`](../../internal/artifact/store.go). The line here previously said `0640`; [ADR-008](../adr/008-report-artifact-storage.md) item 3 says `0600`, "consistent with the `0600` the root key is written with", and the ADR is the one that is immutable. Checked on the disk rather than on the return value
+- [x] **The on-disk name derives from the artifact id and format, never the template title.** There is no sanitisation step to get wrong because there is no user input on the path — a stronger property than any amount of escaping, and the test says so in those terms. `Open` and `Remove` clamp to the root anyway; the naive `filepath.Join` version of that function opens *and deletes* the database file, which is what the test catches
+- [x] **Write the file, fsync, then commit the row** — in that order, and the directory entry is fsynced too, because a rename is not durable until its parent is. Bytes go to a temporary name and are renamed in, so a file at the final path is always complete: a crash mid-write cannot leave something that reads as a real artifact to anything short of the digest
+- [x] SHA-256 and size on every row, and the digest is offered to the downloader as `X-Cairn-SHA256`. Verified end to end against `shasum -a 256` of the file a client actually receives. This is what makes an artifact evidence rather than a file: "is this the document we sent?" is answerable, and a truncated write from a full disk is detectable rather than served silently
+- [ ] The orphan sweeper, for the files the ordering above deliberately leaves behind. **`Orphans` is written and tested and nothing runs it yet**, which is why the box is open. The part worth keeping is the grace period: ADR-008 writes the file before the row, so there is always an interval in which a good artifact has bytes and no row — a sweeper with no grace races a running report and deletes the file out from under it, and the failure looks like a disk fault rather than like a bug in the sweeper. It is a correctness requirement, not a tuning knob
 - [ ] Retention on `report_artifact_days`: bytes reclaimed, row kept as an `expired` tombstone, `410` on the download path
-- [ ] A per-artifact size cap enforced with an error naming the limit and the size reached. The case that hits it is a CSV over 5,000 monitors for a year — roughly 1.8 million daily rows — not a PDF
-- [ ] Disk-full and write failure degrade the run and record the reason rather than aborting the schedule
+- [x] A per-artifact size cap enforced with an error naming the limit and the size reached — "csv is 4.0 KB, limit is 1.0 KB", asserted on all three of those. The case that hits it is a CSV over 5,000 monitors for a year — roughly 1.8 million daily rows — not a PDF. A refused write leaves no residue for the sweeper to find
+- [x] Disk-full and write failure degrade the run and record the reason rather than aborting the schedule, taking the **same path a render failure does** — from the client's side they are one event: a format that did not arrive. Tested by making the artifact store fail on one format and asserting the other still shipped and the run's error carries "no space left on device"
 
 ## The S3 client, the mirror, and the drop
 
@@ -255,17 +276,17 @@ Spec-first is unchanged and is not softened for this phase: the surface below is
 already in the frozen spec, and no handler reshapes it. Anything that needs to
 change goes through [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 first.
 
-- [ ] `/api/v1/report-templates` — list, create, get, update, delete
-- [ ] `/api/v1/report-templates/{id}/generate` — run now, with an optional window and format override
+- [x] `/api/v1/report-templates` — list, create, get, update, delete. `PATCH` tells **absent from null**, which needed `json.RawMessage` rather than the `**T` the first cut used: `encoding/json` flattens both to nil, so the double pointer compiles, looks right, and quietly makes "remove this SLA target" impossible. A test that patches a null and reads the value back is what found it
+- [x] `/api/v1/report-templates/{id}/generate` — `202` with a run to poll, per the spec, queued onto the bounded pool rather than rendered inside the request. An instance with no worker answers `501` rather than recording a run nothing will execute: a row stuck at `queued` forever reads as a hung report rather than as a missing feature
 - [ ] `/api/v1/report-schedules` — list, create, get, update, delete, with `next_run_at` computed and a schedule that will never fire refused at write time rather than discovered by its silence
-- [ ] `/api/v1/report-runs` and `/{id}` — cursor-paginated history with artifacts, deliveries, share state and `late`
-- [ ] `/api/v1/report-runs/{id}/download` and `/artifacts/{artifactId}` — artifact-addressed download, `410` on an expired tombstone
+- [x] `/api/v1/report-runs` and `/{id}` — cursor-paginated history with artifacts, deliveries and `late`, filtered by template and by state. Artifacts for a page come back in **one query rather than one per run**. Share state waits on share links, which are human-led work (AGENTS.md rule 8). The list keys on `created_at`: a run has no `updated_at`, and a state change an hour later has not made it newer history
+- [x] `/api/v1/report-runs/{id}/download` and `/artifacts/{artifactId}` — both paths, with the right content type per format, a `Content-Disposition` naming the artifact id, and the digest in a header. `410` on an expired tombstone and `409` on a format that failed to render, each naming what happened; an artifact addressed under the wrong run is a `404`, because the pair is the address and honouring a mismatch would make the run id decorative on a path a share link resolves
 - [ ] `/api/v1/report-runs/{id}/share` — create and revoke
 - [ ] `/api/v1/public/reports/{shareToken}` and `/download` — the unauthenticated pair, on the public projection
 - [ ] `/api/v1/brand-profiles` — list, create, get, update, delete, plus `/logo` upload
 - [ ] `/api/v1/expiries` — the expiry calendar as a queryable collection
-- [ ] `settings.retention.report_artifact_days` and `settings.report_storage` on the settings surface, with `secret_access_key_set` read back in place of the secret
-- [ ] `brand_profiles:read` / `brand_profiles:write` added to the API key scopes, and enforced
+- [ ] `settings.retention.report_artifact_days` **is on the settings surface** — validated with a minimum of zero, which means "keep indefinitely" as every other field in that section does, and deliberately **not** fed into the rollup runner's coherence check, because an artifact is not a tier and is expected to outlive the data it was computed from (ADR-008 item 6). `settings.report_storage` and `secret_access_key_set` are not, and wait on the S3 client
+- [ ] `brand_profiles:read` / `brand_profiles:write` added to the API key scopes, and enforced. **Blocked on a human, and this is the reason the brand-profile handlers are not written either**: [AGENTS.md](../../AGENTS.md) rule 8 puts access-control code with a person, and a new scope constant plus its enforcement is exactly that. `reports:read` and `reports:write` already existed, which is why the rest of the surface could land. The store half of brand profiles is done and waiting
 - [ ] Cursor pagination and RFC 9457 problem details unchanged across the new surface
 - [ ] Go and TypeScript clients regenerated in the same PR as any spec change, and never committed
 

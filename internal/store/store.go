@@ -282,6 +282,17 @@ type IncidentFilter struct {
 	Search string
 }
 
+// ReportRunFilter narrows a report run listing. Every field is optional.
+type ReportRunFilter struct {
+	// ReportTemplateID asks "what has this definition produced", which is the
+	// question the run history is opened from a template to answer.
+	ReportTemplateID *model.ID
+
+	// States OR within themselves and AND with everything else, the same rule
+	// the monitor and incident lists follow.
+	States []string
+}
+
 // StatusPageFilter narrows a status page listing.
 type StatusPageFilter struct {
 	Search string

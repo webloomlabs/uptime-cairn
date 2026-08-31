@@ -287,6 +287,11 @@ func applyRetention(into *model.RetentionSettings, body model.RetentionSettings)
 		{"/retention/rollup_1h_days", body.Rollup1hDays, &into.Rollup1hDays, 0},
 		{"/retention/rollup_1d_days", body.Rollup1dDays, &into.Rollup1dDays, 0},
 		{"/retention/webhook_delivery_days", body.WebhookDeliveryDays, &into.WebhookDeliveryDays, 1},
+		// Zero is legal here and means "keep indefinitely", so the minimum is 0
+		// rather than 1. It is also the one field in this list that is **not**
+		// fed into retentionFrom below: the rollup runner's coherence rule is
+		// about tiers, and an artifact is not a tier (ADR-008 item 6).
+		{"/retention/report_artifact_days", body.ReportArtifactDays, &into.ReportArtifactDays, 0},
 	} {
 		if field.supplied == nil {
 			continue

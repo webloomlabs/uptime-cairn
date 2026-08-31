@@ -87,11 +87,30 @@ func ComputeSLA(u Uptime, target Target, window time.Duration, downtimeSeconds i
 	}
 	s.ErrorBudgetSeconds = int(math.Round(budget))
 
+	// **Consumed is always the breach total, on every path through this
+	// function.** It is set before the nothing-observed branch below rather than
+	// after it, because the two figures come from different reads: the ratio is
+	// the window bucket at whatever tier retention chose, and the downtime is the
+	// daily series, which is always the 1d tier. Those two can disagree about
+	// whether anything is known — an install whose 1h rows were pruned while its
+	// 1d rows survived, or one that imported daily history — and when they did,
+	// this function reported a consumed budget of zero above a breach log listing
+	// fifty minutes of downtime.
+	//
+	// That is the same contradiction the golden report caught once already,
+	// arriving through a different door. The rule it produced holds here too: the
+	// breach log and the budget are the same sum, so they agree by construction
+	// rather than by both happening to be computed from the same input.
+	consumed := float64(downtimeSeconds)
+	s.ErrorBudgetConsumedSeconds = downtimeSeconds
+	s.ErrorBudgetRemainingSeconds = s.ErrorBudgetSeconds - s.ErrorBudgetConsumedSeconds
+
 	if u.Ratio == nil {
-		// Nothing observed. The actual figure is unknown, so nothing derived
-		// from it is reported — and in particular the budget is *not* recorded
-		// as fully consumed. A probe that could not look has not spent anything.
-		s.ErrorBudgetRemainingSeconds = s.ErrorBudgetSeconds
+		// Nothing was observed over the window, so there is no percentage to
+		// state and no rate to state it against — but whatever downtime the
+		// daily series does know about has still been spent. The budget is not
+		// recorded as *fully* consumed: a probe that could not look has not
+		// spent the whole of it.
 		return s
 	}
 
@@ -104,10 +123,6 @@ func ComputeSLA(u Uptime, target Target, window time.Duration, downtimeSeconds i
 	// that hit its target exactly must not be reported as having missed it.
 	met := actual >= target.Percent-1e-9
 	s.Met = &met
-
-	consumed := float64(downtimeSeconds)
-	s.ErrorBudgetConsumedSeconds = downtimeSeconds
-	s.ErrorBudgetRemainingSeconds = s.ErrorBudgetSeconds - s.ErrorBudgetConsumedSeconds
 
 	if budget > 0 {
 		ratio := consumed / budget

@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/webloomlabs/uptime-cairn/internal/api"
+	"github.com/webloomlabs/uptime-cairn/internal/artifact"
 	"github.com/webloomlabs/uptime-cairn/internal/config"
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
 	"github.com/webloomlabs/uptime-cairn/internal/live"
@@ -39,6 +40,8 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/outbound"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
+	"github.com/webloomlabs/uptime-cairn/internal/report"
+	"github.com/webloomlabs/uptime-cairn/internal/report/runner"
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
@@ -241,12 +244,32 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		}
 	}()
 
+	// Reporting. The pool is bounded and owns its own goroutines, which is what
+	// keeps fifty PDFs at 09:00 on the first of the month off the check path —
+	// the property the load-test gate exists to hold rather than to assume.
+	//
+	// **No TrueType family is embedded in this build**, so render.Family is
+	// zero and PDF fails with a stated reason while HTML, CSV and JSON render.
+	// That is the ADR-007 item 7 degradation path taking a real case rather than
+	// a hypothetical one, and it is why the failure path was built before the
+	// font: choosing and vendoring a licensed face is a maintainer decision, and
+	// nothing else waits on it.
+	artifacts := artifact.New(cfg.DataDir, artifact.DefaultMaxBytes)
+	reportPool := runner.NewPool(
+		runner.New(store, artifacts, runner.Options{
+			Retention:    reportRetention(rollup.DefaultRetention()),
+			ArtifactDays: model.DefaultReportArtifactDays,
+		}),
+		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports"))
+	reportPool.Start(ctx)
+
 	apiServer := api.New(store, publisher, sweeps, cp, events, registry, keeper,
 		log.With("component", "api"), cfg.InstanceName).
 		WithOutbound(webhooks).
 		WithRetuner(rollups).
 		WithSubscribers(subscribers).
 		WithLive(updates).
+		WithReporting(reportPool, artifacts, time.UTC).
 		WithImports(store)
 
 	// Refused before the listener opens rather than at the first scrape: a
@@ -574,3 +597,20 @@ func (f *fanout) Test(ctx context.Context, channel model.NotificationChannel, ev
 func (f *fanout) SampleEvent(eventType string) notify.Event { return f.notify.SampleEvent(eventType) }
 
 func (f *fanout) AppriseAvailable() bool { return f.notify.AppriseAvailable() }
+
+// reportRetention translates the rollup runner's policy into the shape the
+// report window resolver reads.
+//
+// Two types for one policy, and deliberately: the rollup runner owns the
+// coarser-outlives-finer rule and the report package owns "which tier can answer
+// this window", and neither should have to import the other to ask its own
+// question.
+func reportRetention(r rollup.Retention) report.Retention {
+	return report.Retention{
+		RawDays:      r.RawDays,
+		Rollup1mDays: r.Rollup1mDays,
+		Rollup5mDays: r.Rollup5mDays,
+		Rollup1hDays: r.Rollup1hDays,
+		Rollup1dDays: r.Rollup1dDays,
+	}
+}
