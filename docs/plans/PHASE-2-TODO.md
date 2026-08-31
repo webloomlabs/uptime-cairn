@@ -6,14 +6,14 @@ same rule the Phase 1 list ran under applies here and is the reason that list
 stayed honest: **a box needs a demonstrated run behind it.** "The code is
 written" is not one, and neither is "the configuration was reviewed".
 
-**Status: 2026-08-31. The report computes; nothing renders it.** All three ADRs
+**Status: 2026-08-31. The report computes and all four formats render.** All three ADRs
 are accepted, the API surface they implied is merged into the frozen spec, and
 the process for changing that spec is written down. Migration `0008` landed the
 schema, `report.Store` is satisfied, and `Build` now produces a whole
 `Document` — window cut in a stated zone, scope resolved at run time, uptime
 with its denominator, SLA with its error budget and breach log, ADR-006's
-latency figures, and `meta.resolution` labelling what actually answered. 52
-tests in the package, `-race` clean.
+latency figures, and `meta.resolution` labelling what actually answered. 116
+tests across the two packages, `-race` clean.
 
 **The Month 4 checkpoint is one handler away.** The plan asks to `curl` a
 computed SLA report as JSON for a monitor over an arbitrary past month, with a
@@ -22,11 +22,16 @@ compute. All of that exists as a Go value; what is missing is the endpoint that
 serves it, which is `POST /report-templates/{id}/generate` and therefore needs
 the template CRUD underneath it.
 
-**Three of the four formats are done.** JSON and CSV render from the model as siblings, never as a chain.
-HTML is canonical and renders from the bounded seven-element model, with charts
-drawn against the primitives rather than against SVG — so the PDF backend, when
-it lands, gets the same elements and the same charts without a second
-implementation, and a golden report to be measured against from its first day.
+**All four formats render.** JSON and CSV come off the model as siblings, never
+as a chain. HTML is canonical, and the PDF is a pure-Go writer over the same
+seven elements and the same five primitives — never a converted page, which is
+[ADR-007](../adr/007-report-rendering.md) item 1. The charts were written once
+against the primitives and both backends draw them from the same calls, so the
+uptime strip and the latency line arrived on the PDF side as a by-product rather
+than as a second implementation. **One thing is missing and only a human can
+supply it: the font file.** The reader, the embedder and the two-weight family
+are written and tested against a synthetic face; which TrueType family to vendor
+is a licence choice and a visual identity commitment, and it is the maintainer's.
 
 **The golden report caught a defect the unit tests could not.** The rendered
 page read "Budget used 3h 36m" above a breach table summing to 2h 24m: the error
@@ -121,11 +126,11 @@ all.
 - [x] The HTML renderer as the canonical output — [`html.go`](../../internal/report/render/html.go). Self-contained by construction: inline styles, inline SVG charts, a data-URI logo, `noindex`, and a test that fails on `<script>`, `<link>`, `url(`, or any remote URL. Canonical in ADR-007's sense — the format the PDF is *measured against*, never the one it is made from
 - [x] CSV and JSON from the same model — [`render/`](../../internal/report/render/), 8 tests. CSV is one well-formed file with a `row_type` discriminator (`daily`, `monitor_total`, `estate_total`) rather than a header block above the data, because a CSV with a second table above the header is not a CSV. **A null is an empty field, never a zero** — the single most likely way a figure from this product ends up wrong in front of a client is a null uptime ratio charted as a day of total downtime. Numbers are formatted `'f'` rather than `'g'`: `9.99e-01` in a spreadsheet column is a support conversation
 - [x] The JSON artifact is `ReportDocument` verbatim, no envelope, carrying `meta.schema_version`. Wire shapes are hand-written against the spec following [`internal/api/dto.go`](../../internal/api/dto.go) and its stated reasoning, so the domain types stay tag-free. Key names are pinned by a test, since a BI tool binds to them and outlives several releases
-- [ ] PDF backend over the same primitives. It follows the SVG one deliberately: if it runs long, HTML plus print CSS ships and **PDF slips without disturbing anything else**
-- [ ] One embedded TrueType family, regular and bold, subset into the file
-- [ ] Deterministic output — creation date and `/ID` derived from the run rather than the clock. **Held for JSON and CSV today**: both render byte-identically five times over, and `Build` takes `now` and the run id as parameters so nothing downstream can consult the clock. The PDF half arrives with the PDF backend
-- [ ] **The golden-report visual regression test stands up with the second renderer, not after it.** Two renderers over one model is two layouts that can drift, and the drift is invisible until a client sees a PDF that disagrees with the page they were shown
-- [ ] Table page-breaking, budgeted as the known time-sink it is
+- [x] PDF backend over the same primitives — [`pdf.go`](../../internal/report/render/pdf.go) writes the objects, cross-reference table and content streams by hand; [`pdflayout.go`](../../internal/report/render/pdflayout.go) flows the seven elements onto A4 in one pass. Validated by something other than its own tests: **poppler parses the file, reports it as a 3-page A4 PDF 1.7, and extracts its text**, and the rasterised pages were looked at. Coordinates are converted from the primitives' top-left space at each emission rather than through a flipping CTM, which would mirror every glyph and then need a second flip inside every text object
+- [ ] **One embedded TrueType family — the code is written and the font file is not, and only a human can supply it.** [`truetype.go`](../../internal/report/render/truetype.go) reads the table directory, `head`, `hhea`, `hmtx`, `maxp`, `cmap` (formats 4, 6 and 12), `OS/2`, `post` and `name`; [`font.go`](../../internal/report/render/font.go) is the two-weight `Family` the writer takes, and the writer embeds a face **whole** as a CID-keyed Type0 font with `/FontFile2`, an Identity-H encoding and a `ToUnicode` CMap. Whole rather than subset is [ADR-007](../adr/007-report-rendering.md) item 4's own wording for the first cut; the line above previously said "subset" and the ADR wins. What is missing is the **choice of family**, which that item calls a binary-size commitment and a visual identity commitment in one — changing it reflows every future report — and [AGENTS.md](../../AGENTS.md) puts the vendoring of a licensed binary asset with the maintainer, not with an agent. The suite builds a synthetic face rather than checking one in, so nothing here is blocked on the decision except the decision
+- [x] Deterministic output — creation date and `/ID` derived from the run rather than the clock, now held for all four formats. Nothing in the PDF writer reads a clock or a random source: object numbers are assigned in emission order, page resources are sorted before they are written, colours and coordinates go through the same rounding formatter the SVG backend uses, and the `/ID` array is derived from the run id and the run's timestamp. A test renders the same model four times and compares bytes, and a second asserts that two runs *generated at different times* differ — determinism that cannot tell two runs apart is a constant, not a property
+- [x] **The drift guard, which ADR-007 calls required rather than optional.** Two pieces: the golden HTML report, which stood up with the first renderer rather than after the second; and a test that takes every figure the composition produced and asserts it appears in **both** documents — reading the PDF back by decoding the glyph ids in its content streams through the face's `cmap`, which checks the mapping as well as the text. A figure present in one artifact and missing from the other now fails the suite rather than reaching a client
+- [x] Table page-breaking — the time-sink the ADR said to budget for, and all four of its named hazards are handled and each is tested. Header repetition on every page a table reaches; the header never orphaned at a page foot, since it needs itself **and at least one row** or the whole table starts overleaf; widow control, so a continuation page is never a repeated header and one line; and a row taller than the page made impossible by clamping a cell to three lines with an ellipsis, because that row has to either overflow the margin or lose text and losing it visibly is the lesser harm. Every break rule was checked by **deleting it and watching the test fail** — two of the first drafts passed against the mutated code, because a fixture that cannot reach a page boundary tests nothing, and both were rewritten to drive the cursor across the boundary directly. Above them sits one invariant rather than a rule per element: **nothing is drawn below the bottom margin**, swept over sixty layouts
 - [x] Print CSS on the HTML report as a complement, never as the substitute — page-break rules that keep a figure block or a table row from splitting, and a repeating table header. It does not pretend to be the PDF
 - [ ] Render failure degrades the run to `partial` with the reason recorded per artifact, and the formats that succeeded are still delivered
 
