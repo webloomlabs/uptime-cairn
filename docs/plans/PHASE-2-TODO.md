@@ -6,31 +6,26 @@ same rule the Phase 1 list ran under applies here and is the reason that list
 stayed honest: **a box needs a demonstrated run behind it.** "The code is
 written" is not one, and neither is "the configuration was reviewed".
 
-**Status: 2026-08-31. The numbers are computed and nothing renders them.** All
-three ADRs the plan said had to be settled first are accepted, the API surface
-they implied is merged into the frozen spec, and the process for changing that
-spec is written down. Migration `0008` landed the whole reporting schema,
-`report.Store` is satisfied, and the three blocks of §4.3 — uptime with its
-denominator, the SLA and its error budget, and ADR-006's five latency figures —
-compute against 26 tests. What does not exist yet is anything that *assembles*
-them: no window resolution in a timezone, no `ReportDocument`, no renderer, no
-scheduler, no `reports` directory, and nothing in the dashboard.
+**Status: 2026-08-31. The report computes; nothing renders it.** All three ADRs
+are accepted, the API surface they implied is merged into the frozen spec, and
+the process for changing that spec is written down. Migration `0008` landed the
+schema, `report.Store` is satisfied, and `Build` now produces a whole
+`Document` — window cut in a stated zone, scope resolved at run time, uptime
+with its denominator, SLA with its error budget and breach log, ADR-006's
+latency figures, and `meta.resolution` labelling what actually answered. 52
+tests in the package, `-race` clean.
 
-**The arithmetic is done and the composition is not**, which is the right way
-round. The three blocks are pure functions over `store.HistoryBucket`, so every
-rule that decides a number is testable without a database, and the tests are
-written to fail with the reason rather than with a diff — the denominator ones
-name the two wrong answers beside the right one.
+**The Month 4 checkpoint is one handler away.** The plan asks to `curl` a
+computed SLA report as JSON for a monitor over an arbitrary past month, with a
+stated denominator, honest nulls, and a latency block that omits what it cannot
+compute. All of that exists as a Go value; what is missing is the endpoint that
+serves it, which is `POST /report-templates/{id}/generate` and therefore needs
+the template CRUD underneath it.
 
-**`report.Store` is now satisfied in full**, and `var _ report.Store =
-(*Store)(nil)` in the SQLite tests is what keeps it that way. Three of its six
-methods already existed — `RawCovers`, `UptimeFromRaw` and `ListIncidents`, with
-signatures that matched without adjustment. The three added are the batched ones,
-batched deliberately: they are the queries fifty concurrent runs across 5,000
-monitors will hammer, and a call per monitor is the fan-out the extended load gate
-exists to catch. A query-plan test asserts both seek per monitor rather than scan
-the tier, which is the invariant that does not show up in any result and the one
-that regressed once already.
+**What is deliberately not wired: the trailing p95.** See the latency section —
+it is written, tested, and left uncalled because calling it per monitor at
+estate scale is the fan-out this design exists to avoid, and the honest fix
+needs a spec change.
 
 **The backup guide is written ahead of the code, deliberately.**
 [ADR-008](../adr/008-report-artifact-storage.md) says in its own text that the
@@ -77,16 +72,16 @@ all.
 ## The report model (`internal/report`)
 
 - [x] The read-side contract, [`report.Store`](../../internal/report/report.go), named by the consumer rather than declared centrally — which is what `internal/store/store.go` asks for in as many words: the non-heartbeat interfaces are "deliberately not declared yet" because "each one's method set follows from the OpenAPI operations that use it". **There is no single repository interface in this codebase and this does not add one.** The file also records what is deliberately absent, so the gaps read as decisions: no window percentile, no window min/max, no expiries until `/api/v1/expiries` has a type to return, and nothing that writes
-- [ ] Computation produces a backend-independent `ReportDocument` from the repository interface. **Renderers consume the model; none consumes another's output** — the plan's §5 and ADR-007 item 1, and the single decision that keeps the phase from turning into an HTML-to-PDF project
-- [ ] Window resolution in a stated timezone. Calendar windows cut the last complete period in `GeneralSettings.Timezone`, overridable per definition. A monthly report that starts at midnight UTC for an Australian agency is wrong by a working day and will be reported as a bug
-- [ ] Scope resolves **at run time, not at save time** — monitor ids, groups and tags as a union. An agency that adds a monitor to a client's tag expects it in that client's next report without editing the report
-- [ ] `meta.resolution` is filled from what actually answered: the tier used, the tier requested, `downgraded`, and `covered_from` where retention truncated the window. Reads extend `resolveHistoryTier`'s existing contract rather than bypassing it, and nothing is ever silently upsampled
-- [ ] Reads go through the rollup tiers, never raw, except inside raw retention where a real percentile is being computed. A report that scans a year of heartbeats is the failure ADR-004 exists to prevent, one layer up
+- [x] Computation produces a backend-independent `Document` from the repository interface — [`document.go`](../../internal/report/document.go). **Four reads regardless of scope size**, held by a test that runs 200 monitors through a counting fake: the fan-out fifty concurrent runs cannot afford is the kind that would be invisible in every result and fatal in the gate. `now` and the run id are parameters rather than read from the clock, because ADR-007 requires the same model rendered twice to be identical, and the estate series is sorted for the same reason — map iteration is randomised and would otherwise be the one place that quietly is not
+- [x] Window resolution in a stated timezone — [`window.go`](../../internal/report/window.go). Day, week, month, quarter and year, calendar or rolling. A monthly report for a Sydney agency starts at 2026-02-28T13:00Z, and the test says so in both zones. Weeks start Monday (Sunday is weekday 0 in Go and the *last* day of an ISO week). `Duration` is the difference between the instants rather than 30 × 24 hours, so April in Sydney is 30 days and one hour and the error budget follows the clocks back — otherwise the budget is an hour wrong twice a year in a number people check. An unknown zone is refused by name rather than falling back to UTC
+- [x] Scope resolves **at run time, not at save time** — monitor ids, groups and tags as a union, resolved in one predicate so a monitor selected three ways appears once. An empty scope produces a document rather than an error: a client whose monitors were all deleted still gets a report saying so, which beats a failed run nobody looks at until the invoice goes out
+- [x] `meta.resolution` is filled from what actually answered — tier, requested tier, `downgraded`, and `covered_from` where retention truncated the window. **The figures are read over the covered window rather than the requested one**, so a truncated range cannot return the same rows under a period the data does not reach
+- [x] Reads go through the rollup tiers, never raw. `ResolveTier` does not offer raw as a candidate at all, so the failure ADR-004 exists to prevent cannot be reached from a report by configuration
 - [x] The denominator rules of §4.3 — [`uptime.go`](../../internal/report/uptime.go), nine tests, and the tests carry the reasoning rather than the code alone. `down` counts and nothing else does; `unknown` and `skipped` leave the denominator entirely (90 up, 10 down and 100 unmade checks is 90% over half the window — never 45% and never 95%); `pending` is a third thing again and is never counted; `maintenance` is excluded by default, and the policy is carried **on the figure** rather than only on the template, because one bucket yields 80%, 90% or 40% under the three settings. Excluding maintenance deliberately does not improve `unobserved_share`, which is taken over everything scheduled — otherwise the exclusion would flatter the quality of the observation as well as the uptime
 - [x] `maintenance_handling` honoured as `exclude`, `count_as_up`, or `count_as_down`, with an empty value defaulting to `exclude` and *saying* that it did. Whichever was used appears on the figure, not only in the template
 - [x] Target resolution reaches the computation, by the smaller of the two routes: [`SLOTargets`](../../internal/store/sqlite/reports.go) resolves monitor-then-group in one `COALESCE` and returns **which level answered**, so §4.3's requirement to print the source is satisfied by the same call that finds the number. `model.Monitor` gains no field, so nothing outside reporting can act on a target this phase says nothing may act on yet. Resolution deliberately stops at the monitor's own group: groups nest, the spec's order has no fourth step, and climbing would print "inherited from group" for a number set two levels up
 - [x] Error budgets from `up_count` and `down_count` — [`sla.go`](../../internal/report/sla.go), eight tests. Target versus actual, budget consumed and remaining, burn rate. **No figure derives from a percentile.** Remaining goes negative rather than flooring at zero, because "41 minutes past" is the number somebody wants; a window that observed nothing consumes *nothing* rather than everything, since a probe that never looked has not spent budget; and a 100% target omits the ratio and burn rate rather than returning an infinity that would render as `+Inf` on a client's PDF. A target met exactly is met — 99.9% arrives as 8991/9000, which is not exactly 99.9 in binary, and a naive comparison turns a met SLA into a breach
-- [ ] Target resolution — template, then monitor, then group, then none — with **the source stated on the report**. The store half is done and the two lower levels resolve; what is left is the template's override winning over both, and the source reaching the rendered face. None means the SLA block is absent, never a number nobody chose — a monitor with no target at any level is already absent from the map rather than present with a zero
+- [x] Target resolution — template, then monitor, then group, then none — with the source carried onto every figure. All four levels resolve, and a monitor with no target at any of them gets **no SLA block** rather than one computed against a number nobody chose. What remains is the source reaching the rendered face, which needs a renderer
 
 ## The latency block (ADR-006)
 
@@ -94,7 +89,7 @@ all.
 - [x] Daily average series from the 1d tier — the report's primary latency exhibit. A day with no successful checks stays on the series with a null average, so the chart breaks rather than dipping to zero
 - [x] Best and worst day, taken from that series, over observed days only — a day the probe could not run is not the fastest day the service ever had
 - [x] Days over target, with their dates, present only when `response_time_target_ms` is set. No target yields null rather than zero: an absence of a rule and a clean sheet are different claims, and only one of them is a compliment. A day exactly at the target is not over it
-- [x] A real nearest-rank p95 over the **trailing seven days only**, gated by `RawCovers` and carrying its own window and method — `TrailingP95` distinguishes *no retention* from *no successful checks*, because those are different absences and a percentile of nothing is not zero. The store call that feeds it is wired when the document is assembled
+- [ ] A real nearest-rank p95 over the **trailing seven days only**. `TrailingP95` is written and tested — it carries its own window and method, and distinguishes *no retention* from *no successful checks*, because a percentile of nothing is not zero — but **`Build` does not call it yet, and that is a decision rather than an oversight.** `UptimeFromRaw` is per monitor by nature, so a report over 5,000 monitors would issue 5,000 raw queries ranking roughly ten thousand rows each, which is precisely the fan-out the rest of this design avoids. A scope bound is the obvious answer and it needs a third `unavailable_reason` the spec's enum does not have — a spec change, and therefore not mine to make
 - [x] **No window-level minimum or maximum anywhere**, held by two tests rather than by discipline: `Sum` refuses to carry them across monitors, and the latency block has no field for them even when the input bucket does. Adding one later is a deliberate act against a failing test
 - [ ] A test asserts `HistoryFromTier` still substitutes `NULL` for the coarse-tier percentile, and a second asserts the weekly p95 is absent when coverage is short. ADR-006 removes the mechanism rather than policing it, and these two tests are what keep it removed
 - [ ] The response-time SLI is described as *"met the response-time target"* and never as *"was slow"*. A threshold breach already marks a check down, but `Class` is not persisted, so stored history cannot distinguish "too slow" from "did not answer"
@@ -257,31 +252,28 @@ change goes through [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 first.
    rather than taking a number of its own. Any of the four is cheap to reverse
    now and expensive after the first tagged release, per data model §8.
 
-3. **Next: `internal/report` computing the SLA and uptime model, with the
-   denominator tests written first.** The plan's Month 4 checkpoint is the target
-   and it is a good one: `curl` a computed SLA report as JSON for a monitor over
-   an arbitrary past month, with a stated denominator, honest nulls, and a latency
-   block that omits what it cannot compute. Nothing renders yet. Nothing is
-   scheduled yet. If the numbers are wrong, everything downstream is a faster way
-   to be wrong. The store half is done and is no longer the gate; what is left is
-   arithmetic and policy, in `internal/report`, over data the tests can seed
-   directly.
+3. ~~**`internal/report` computing the SLA and uptime model.**~~ Done, with the
+   denominator tests written first as the plan asks. Two decisions were taken
+   rather than referred, both because the question had stood open across
+   turns and the phase could not proceed without an answer; both are isolated
+   so that reversing either is a small edit.
 
-   The three computation blocks are done — uptime, SLA, latency — as pure
-   functions with 26 tests. **The error-budget conversion was taken rather than
-   asked about**, after the question stood open across three turns: consumed
-   seconds are the observed down proportion projected onto the window, which is
-   exact when observation is complete and overstates in proportion to
-   `unobserved_share`, printed beside it. The alternative — down checks times the
-   interval — is wrong exactly when an interval changed mid-window or checks were
-   missed, which is when figures get disputed. It lives in one function and
-   changing the decision is changing that function.
+   **The error-budget conversion.** Consumed seconds are the observed down
+   proportion projected onto the window — exact when observation is complete,
+   overstating in proportion to `unobserved_share`, which is printed beside it.
+   The alternative, down checks times the interval, is wrong exactly when an
+   interval changed mid-window or checks were missed, which is when figures get
+   disputed. It lives in `ComputeSLA` alone.
 
-   What is left before the Month 4 checkpoint: **the breach log**, which needs
-   its own call (contiguous days from the 1d tier is coarse but always available;
-   precise timestamps are bounded by raw retention; incidents are human-declared
-   and often absent); **window resolution in a stated timezone**; and then
-   assembling `ReportDocument` around the blocks.
+   **The breach log reads the 1d tier.** Raw would give real minutes and is
+   bounded by `raw_days` — seven by default — so a breach log built on it would
+   be empty for exactly the completed months an SLA report covers. Incidents
+   carry real timestamps and are human-declared, so the log would omit most
+   outages. The daily tier is kept indefinitely and always answers; the
+   boundaries are days, the duration inside them is the projected downtime
+   rather than the span, and `meta.resolution` already states the tier that
+   produced them. A day containing four minutes of downtime is a four-minute
+   breach, not a 24-hour one.
 
 4. **Then the primitive set and the SVG backend**, because HTML is canonical and
    because standing the golden test up against the first renderer is what makes
