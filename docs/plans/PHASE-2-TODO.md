@@ -15,6 +15,55 @@ with its denominator, SLA with its error budget and breach log, ADR-006's
 latency figures, and `meta.resolution` labelling what actually answered. 116
 tests across the two packages, `-race` clean.
 
+**Runs now outlive the definitions that made them** (maintainer's ruling,
+2026-08-31). Writing the store found the first cut of `0008` contradicting the
+frozen spec: `deleteReportTemplate` is documented as *"Already-generated runs and
+their artefacts are retained"*, and `report_runs.report_template_id` was `NOT
+NULL … ON DELETE CASCADE`, so deleting a template deleted every report it had
+produced and, through `report_artifacts`, the record of what each client was
+sent. It contradicted the migration's own reasoning too: the column immediately
+below used `SET NULL` because *"the artifact is a record of what a client was
+sent, and it outlives the arrangement that sent it"* — an argument about the
+template as much as the schedule.
+
+The ruling was **soft delete**, and it is the better of the two available
+answers rather than the softer one. A nullable foreign key would retain the run
+and lose the definition, leaving a record that cannot say what it was a report
+*of* — which is the first question anybody asks of one, and the question that
+gets asked precisely because somebody tidied the template up. Keeping the row
+means "we sent them this, under this definition, on this schedule" survives the
+client leaving. It also **needed no spec change**: the sentence the spec already
+carries becomes true.
+
+`report_templates` and `report_schedules` gained `deleted_at`; the runs table now
+references both with `RESTRICT`, so the rule is an invariant of the database
+rather than a convention of the handlers — a hard `DELETE` from a SQL shell is
+refused while runs exist, and a test proves it rather than reading the DDL.
+Deleting a template soft-deletes its schedules in the same transaction, because a
+deleted report that keeps arriving in a client's inbox is worse than either
+deleting it or not. The standing cost is stated where it will be paid: every read
+path must filter `deleted_at IS NULL`, and the cursor indexes are **partial on
+that predicate** so the filter is the access path — both the listing and the
+scheduler's due query still plan as a `SEARCH` with no scan, checked against a
+real database along with `integrity_check` and `foreign_key_check`.
+`brand_profiles` is deliberately *not* soft-deleted: a template referencing a
+deleted profile falls back to the default, which is what a template with no
+profile already does, so there is nothing for the row to preserve.
+
+**`0008` was edited in place rather than corrected by an `0009`.** It is
+pre-release and says so in its own header, and SQLite cannot alter a foreign key
+without rebuilding the table — so a correction migration would rebuild
+`report_runs` to fix a file nothing has shipped. The consequence is real and
+worth knowing: **the migration runner verifies checksums, so any database with
+the earlier `0008` applied will refuse to start until it is recreated**, and it
+names the file when it does.
+
+**A smaller finding about this checklist.** `generate` is specified as `202`
+returning a **run to poll**, not the document — so the Month 4 curl is generate,
+poll, download, and it needs the runs table, artifact storage on disk and the
+download path before it works. The paragraph below said "one handler away" and
+that was optimistic; it is the artifact-storage section away.
+
 **The Month 4 checkpoint is one handler away.** The plan asks to `curl` a
 computed SLA report as JSON for a monitor over an arbitrary past month, with a
 stated denominator, honest nulls, and a latency block that omits what it cannot
@@ -89,8 +138,9 @@ all.
 - [x] Migration [`0008_reporting.sql`](../../migrations/sqlite/0008_reporting.sql) — **seven tables, not the four the data model named**: brand profiles, templates, schedules, schedule deliveries, runs, artifacts, share links, delivery attempts. `org_id` on every one from this first migration, so Phase 3 tenancy is a permission change and not a re-architecture. Applied over `0001`–`0007` against a real database with `integrity_check` and `foreign_key_check` clean, and each constraint exercised until it refused something: `sla_target = 100`, a second default brand profile, a second live share link on one run, a repeated `token_hash`, a second PDF for one run, `format = 'docx'`. Deleting a template cascades runs → artifacts → share links to zero. The three scheduled queries — due schedules, the expiry sweep, the share-token lookup — each plan onto their index as a `SEARCH`, with no scan
 - [x] `slo_target_percent` on monitors and groups — one nullable column each, `NULL` meaning no target, with the `< 100` bound enforced by a `CHECK` rather than only at the API: 100 refused and 99.95 accepted, tested against a real monitor row and a real group row. The resolution order now reads it as far as monitor-then-group; the template's override and the API field are still unwritten
 - [ ] Four things whose **column landed in `0008` and whose Go half is not written**: `report_artifact_days` inside the existing `retention` JSON (365 default, and exempt from the coarser-outlives-finer rule, because an artifact is expected to outlive the data behind it); `report_storage` as an eighth settings section with `secret_access_key_sealed` following `SMTPSettings.PasswordSealed`; the artifact row's `sha256`, `size_bytes` and `state` with `expired` as the tombstone behind a `410`; and `path`, stored rather than derived. No further migration is needed for any of them
+- [ ] **CRUD for the definitions — brand profiles and templates — landed and tested; schedules, runs and artifacts have not.** [`report.go`](../../internal/model/report.go) holds the domain types for all seven tables; [`report_brands.go`](../../internal/store/sqlite/report_brands.go) and [`report_templates.go`](../../internal/store/sqlite/report_templates.go) are the two write paths that exist. Fifteen tests, and three of them are about decisions rather than plumbing: a colour round-trips **exactly as written**, because a brand colour is a string pasted from a brand guide and handing it back in a different case is what makes a white-label feature feel like somebody else's; the scope stores **readable UUIDs** rather than base64 bytes, because the reader of that column is a human in a support conversation about why a monitor is or is not in a client's report; and the logo is **not carried on the profile read**, because a list of twelve clients would otherwise move twelve megabytes to render twelve names. Marking a profile default demotes the previous one in the same transaction rather than letting the unique index refuse the write — "there is already a default" is not something an operator can act on when making this one the default is exactly what they asked for
 - [x] The SQLite half of [`report.Store`](../../internal/report/report.go) — [`reports.go`](../../internal/store/sqlite/reports.go): `MonitorsInScope` unions ids, groups (reaching child groups) and tags in one predicate so a monitor selected three ways appears once, and includes paused monitors, which still have history in the window; `WindowTotals` and `DailySeries` are batched, seek per monitor by the `(monitor_id, bucket_start)` primary key, and return `NULL` for p95 at every tier including `1m`. Absent monitors stay absent rather than arriving zero-valued, because zero up and zero down is a real state meaning "observed nothing" and a report has to tell the two apart. Nine tests, `-race` clean
-- [ ] **Data model §4.13 updated.** It lists four Phase 2 tables and `0008` creates seven. The three it does not name are each a consequence of a decision taken after that list was written — brand profiles (spec Q2), share links (ADR-008), and the configured-target/attempt split that mirrors `notification_channels` and `notification_deliveries`. The migration header says so; the data model does not yet
+- [ ] **Data model §4.13 updated.** It lists four Phase 2 tables and `0008` creates seven, and it now also has to record the soft-delete rule — `deleted_at` on templates and schedules, `RESTRICT` from runs, and the reasoning that a run is a record which outlives its definition. The three it does not name are each a consequence of a decision taken after that list was written — brand profiles (spec Q2), share links (ADR-008), and the configured-target/attempt split that mirrors `notification_channels` and `notification_deliveries`. The migration header says so; the data model does not yet
 
 ## The report model (`internal/report`)
 
@@ -145,7 +195,7 @@ all.
 
 ## Definitions, schedules, and runs
 
-- [ ] Templates, schedules and runs kept as three things. That separation is what makes "re-send last month's", "regenerate it after we corrected the incident record" and "the PDF failed but the HTML went out" all expressible
+- [ ] Templates, schedules and runs kept as three things. That separation is what makes "re-send last month's", "regenerate it after we corrected the incident record" and "the PDF failed but the HTML went out" all expressible. **And the separation has to survive a deletion**, which is what the soft delete above is for: three things that vanish together are one thing wearing three names
 - [ ] The five-field cron parser moves out of `internal/maintenance` into a shared package and is used by both. It is written once, with the day-of-month/day-of-week union rule already correct and tested; a second copy would agree on the day it was written
 - [ ] Daily, weekly, monthly, quarterly, and cron, each at `send_at` in the schedule's own timezone
 - [ ] A bounded worker pool with an explicit concurrency limit, off the check path. **Fifty PDFs at 09:00 on the 1st must not delay a single check, and the load test says so rather than the author**
@@ -242,7 +292,7 @@ change goes through [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 first.
 
 - [ ] Contract tests green for `x-cairn-phase: 2`, in both directions: every Phase 2 operation has a handler, and nothing is served that the spec does not describe
 - [x] Golden-report regression — [`testdata/golden_report.html`](../../internal/report/render/testdata/golden_report.html), standing up **with the first renderer** as ADR-007 requires, so the PDF backend arrives with something to be measured against on its first day. `-update` rewrites it; the failure message says to read the diff rather than accept it
-- [ ] Determinism test: the same model rendered twice is byte-identical
+- [x] Determinism test: the same model rendered twice is byte-identical, held for all four formats. The PDF is the one that could have been fudged and is not — object numbers assigned in emission order, page resources sorted before writing, no clock and no random source anywhere in the writer
 - [ ] Denominator tests over maintenance, unknown and skipped, written before the code they check
 - [ ] **The 5,000-monitor gate extended: 50 concurrent report runs with check scheduling latency unchanged.** A regression blocks merge, not release. This is CI configuration and needs reviewing as such (AGENTS.md rule 7)
 - [ ] The failure paths, each demonstrated rather than reasoned about — renderer failure falls back with the reason recorded, delivery failure retries and surfaces, a missed schedule is late and visible, a cancelled run leaves nothing half-written, and a full disk degrades one run rather than the schedule

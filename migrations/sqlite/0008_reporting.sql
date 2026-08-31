@@ -21,9 +21,39 @@
 -- Every table carries org_id from creation. Phase 3 tenancy is then a permission
 -- change rather than the retrofit ADR-003 exists to prevent.
 --
+-- Templates and schedules are SOFT-DELETED, and runs reference them with
+-- RESTRICT rather than CASCADE (maintainer's ruling, 2026-08-31). The first cut
+-- of this file cascaded, which deleted every report a template had produced and,
+-- through report_artifacts, the record of what each client was sent. That
+-- contradicted the frozen spec — deleteReportTemplate is documented as
+-- "Already-generated runs and their artefacts are retained" — and it contradicted
+-- this file's own reasoning one column below, where report_schedule_id was made
+-- SET NULL because "the artifact is a record of what a client was sent, and it
+-- outlives the arrangement that sent it". That argument was always about the
+-- template as much as the schedule.
+--
+-- Soft delete rather than a nullable foreign key, because a run whose template
+-- is gone still has to say what it was a report OF. SET NULL retains the row and
+-- loses the definition, which is a record that cannot answer the question it
+-- exists to answer. Keeping the row means "we sent them this, under this
+-- definition, on this schedule" survives the client leaving.
+--
+-- The cost is the standing one: every read path must filter deleted_at IS NULL,
+-- and the one that forgets is how a deleted template reappears in a list. The
+-- cursor indexes below are partial on that predicate so the filter is also the
+-- access path, and the scheduler's due index carries it too — a soft-deleted
+-- schedule that keeps firing would be the same defect wearing a different hat.
+--
+-- brand_profiles is deliberately NOT soft-deleted. A template referencing a
+-- deleted profile falls back to the default, which is what a template with no
+-- profile already does, and a stored artifact is a file rather than something
+-- re-rendered from the profile. There is nothing for the row to preserve.
+--
 -- PRE-RELEASE: no release implements the reporting surface, so this file may
 -- still change. From Phase 2's first tagged release it is immutable per data
--- model §8.
+-- model §8. This file has already changed once under that licence, and any
+-- database with the earlier version applied will refuse to start until it is
+-- recreated — the migration runner verifies checksums and says so by name.
 
 -- ---------------------------------------------------------------------------
 -- Brand profiles
@@ -149,11 +179,19 @@ CREATE TABLE report_templates (
     -- error can name the field.
     formats     TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(formats)),
 
+    -- Null is live. Deleting a template hides it and keeps the runs it produced,
+    -- which is the whole of the header note above.
+    deleted_at  INTEGER,
+
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 ) STRICT;
 
-CREATE INDEX idx_report_templates_cursor ON report_templates (org_id, updated_at DESC, id DESC);
+-- Partial, so that the deleted_at filter every read carries is the access path
+-- rather than a check applied after one. A soft-deleted estate is otherwise
+-- something the reader pays for on every page.
+CREATE INDEX idx_report_templates_cursor ON report_templates (org_id, updated_at DESC, id DESC)
+    WHERE deleted_at IS NULL;
 CREATE INDEX idx_report_templates_brand  ON report_templates (org_id, brand_profile_id)
     WHERE brand_profile_id IS NOT NULL;
 
@@ -164,9 +202,12 @@ CREATE INDEX idx_report_templates_brand  ON report_templates (org_id, brand_prof
 CREATE TABLE report_schedules (
     id                 BLOB    PRIMARY KEY,
     org_id             BLOB    NOT NULL REFERENCES organisations(id),
-    -- Deleting a template takes its schedules with it. A schedule with no
-    -- template to render is not a thing an operator can act on.
-    report_template_id BLOB    NOT NULL REFERENCES report_templates(id) ON DELETE CASCADE,
+    -- A schedule with no template to render is not a thing an operator can act
+    -- on, so deleting a template takes its schedules with it — but as a soft
+    -- delete applied in the same transaction, not as a cascade. RESTRICT here
+    -- means a hard DELETE of a template that still has schedules is refused by
+    -- the database rather than by whichever handler remembered to check.
+    report_template_id BLOB    NOT NULL REFERENCES report_templates(id) ON DELETE RESTRICT,
     name               TEXT,
     enabled            INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     frequency          TEXT    NOT NULL
@@ -187,18 +228,24 @@ CREATE TABLE report_schedules (
     -- the scheduler seeks on it, and because "when does this next fire" is a
     -- question the UI asks for every schedule on the page.
     next_run_at        INTEGER,
+
+    -- Null is live, as on report_templates.
+    deleted_at         INTEGER,
+
     created_at         INTEGER NOT NULL,
     updated_at         INTEGER NOT NULL
 ) STRICT;
 
-CREATE INDEX idx_report_schedules_cursor   ON report_schedules (org_id, updated_at DESC, id DESC);
-CREATE INDEX idx_report_schedules_template ON report_schedules (org_id, report_template_id);
+CREATE INDEX idx_report_schedules_cursor   ON report_schedules (org_id, updated_at DESC, id DESC)
+    WHERE deleted_at IS NULL;
+CREATE INDEX idx_report_schedules_template ON report_schedules (org_id, report_template_id)
+    WHERE deleted_at IS NULL;
 
 -- The due query, and the only index the scheduler uses. Partial on enabled,
 -- because a disabled schedule is never due and an install that has paused half
 -- its reports should not pay for them on every tick.
 CREATE INDEX idx_report_schedules_due ON report_schedules (next_run_at)
-    WHERE enabled = 1 AND next_run_at IS NOT NULL;
+    WHERE enabled = 1 AND next_run_at IS NOT NULL AND deleted_at IS NULL;
 
 -- One row per configured delivery target, rather than a JSON array on the
 -- schedule.
@@ -252,11 +299,17 @@ CREATE INDEX idx_report_schedule_deliveries_channel
 CREATE TABLE report_runs (
     id                 BLOB    PRIMARY KEY,
     org_id             BLOB    NOT NULL REFERENCES organisations(id),
-    report_template_id BLOB    NOT NULL REFERENCES report_templates(id) ON DELETE CASCADE,
-    -- Null for an ad-hoc "run now". SET NULL because deleting a schedule must
-    -- not delete the reports it produced: the artifact is a record of what a
-    -- client was sent, and it outlives the arrangement that sent it.
-    report_schedule_id BLOB    REFERENCES report_schedules(id) ON DELETE SET NULL,
+    -- RESTRICT, not CASCADE. A run is a record of what a client was sent and it
+    -- outlives the arrangement that sent it, so the definition it names is
+    -- soft-deleted rather than removed and this reference stays good. A hard
+    -- DELETE of a template with runs is refused, which makes the rule an
+    -- invariant of the database rather than a convention of the handlers.
+    report_template_id BLOB    NOT NULL REFERENCES report_templates(id) ON DELETE RESTRICT,
+    -- Null for an ad-hoc "run now", and otherwise the schedule this fired from,
+    -- kept rather than nulled: "this went out on the monthly retainer" is part
+    -- of what the record is for, and it was previously lost the moment somebody
+    -- tidied up a schedule.
+    report_schedule_id BLOB    REFERENCES report_schedules(id) ON DELETE RESTRICT,
 
     state              TEXT    NOT NULL DEFAULT 'queued'
                            CHECK (state IN ('queued', 'running', 'succeeded', 'partial', 'failed')),
