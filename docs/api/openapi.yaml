@@ -7188,11 +7188,29 @@ components:
               description: Stated because a percentile quoted without its method is worse than no percentile.
             unavailable_reason:
               type: [string, "null"]
-              enum: [insufficient_raw_retention, no_successful_checks, null]
+              enum: [insufficient_raw_retention, no_successful_checks, scope_too_large, null]
               description: |
+                Why no percentile is present. Never null while `available` is false: a
+                figure that is absent without a stated reason reads as a defect in the
+                product rather than as a decision about honesty.
+
                 `insufficient_raw_retention` — `settings.retention.raw_days` is shorter than
                 the seven-day window, so a shorter figure would be reported under a
                 seven-day heading. It is omitted instead.
+
+                `no_successful_checks` — raw covers the window and holds nothing to rank.
+                A percentile of no measurements is not zero.
+
+                `scope_too_large` — the report covers more monitors than the instance
+                computes this figure for. The percentile is the one statistic here that
+                cannot be batched: it is a rank over raw heartbeats, costing a query per
+                monitor across roughly ten thousand rows each, so an estate-wide report
+                would spend longer on this block than on everything else in the document
+                together. A client report over a handful of monitors is the case that
+                wants it and is the case that gets it.
+
+                Clients must tolerate reasons added in later releases, and should render an
+                unrecognised one as "not available" rather than failing.
 
     ReportIncident:
       type: object

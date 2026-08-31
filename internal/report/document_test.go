@@ -17,6 +17,12 @@ type fakeStore struct {
 	series   map[model.ID][]store.HistoryBucket
 	targets  map[model.ID]Target
 
+	// p95 is what UptimeFromRaw reports, and rawFrom/rawTo capture the window it
+	// was asked for — which is a fact the document does not expose but the
+	// contract depends on.
+	p95            *float64
+	rawFrom, rawTo time.Time
+
 	calls map[string]int
 }
 
@@ -52,9 +58,10 @@ func (f *fakeStore) RawCovers(context.Context, model.ID, time.Time, string) (boo
 	return true, nil
 }
 
-func (f *fakeStore) UptimeFromRaw(context.Context, model.ID, time.Time, time.Time) (store.HistoryBucket, error) {
+func (f *fakeStore) UptimeFromRaw(_ context.Context, _ model.ID, from, to time.Time) (store.HistoryBucket, error) {
 	f.note("UptimeFromRaw")
-	return store.HistoryBucket{}, nil
+	f.rawFrom, f.rawTo = from, to
+	return store.HistoryBucket{ResponseTimeP95: f.p95}, nil
 }
 
 func (f *fakeStore) ListIncidents(context.Context, *store.Cursor, int, store.IncidentFilter) ([]model.Incident, bool, error) {
@@ -332,5 +339,167 @@ func TestUnknownTimezoneIsRefusedByName(t *testing.T) {
 	}, defaultRetention(), model.NewID(), time.Now())
 	if err == nil {
 		t.Fatal("unknown timezone accepted")
+	}
+}
+
+// The percentile is computed for a report small enough to afford it, and it
+// carries its own window and method rather than sitting unlabelled beside a
+// month-long average.
+func TestP95IsComputedForASmallScope(t *testing.T) {
+	t.Parallel()
+
+	m := monitorNamed("api")
+	value := 940.0
+	f := &fakeStore{
+		monitors: []model.Monitor{m},
+		totals:   map[model.ID]store.HistoryBucket{m.ID: {Up: 100}},
+		p95:      &value,
+	}
+
+	now := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	doc, err := Build(context.Background(), f, Spec{
+		Period: PeriodMonth, PeriodStyle: StyleCalendar, Timezone: "UTC",
+	}, defaultRetention(), model.NewID(), now)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	p := doc.Monitors[0].ResponseTime.P95
+	if p == nil || !p.Available || p.ValueMs == nil || *p.ValueMs != 940 {
+		t.Fatalf("p95 = %+v, want 940 available", p)
+	}
+	if p.Method != MethodNearestRank {
+		t.Errorf("method = %q, want %q", p.Method, MethodNearestRank)
+	}
+
+	// The last seven days of the reported period — March — not of the present
+	// moment. A March report describing April would be a figure about a month
+	// the document is not about.
+	wantFrom := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -7)
+	if !f.rawFrom.Equal(wantFrom) {
+		t.Errorf("raw window starts %s, want %s (seven days back from the period end)", f.rawFrom, wantFrom)
+	}
+	if !p.WindowEnd.Equal(doc.Meta.PeriodEnd) {
+		t.Errorf("p95 window ends %s, want the period end %s", p.WindowEnd, doc.Meta.PeriodEnd)
+	}
+}
+
+// The bound exists because this is the one figure that cannot be batched. Over
+// it, the block says scope_too_large and **no raw query is issued at all** —
+// which is the point: the cost is what the bound is protecting against.
+func TestLargeScopeSkipsThePercentileWithoutQuerying(t *testing.T) {
+	t.Parallel()
+
+	f := &fakeStore{totals: map[model.ID]store.HistoryBucket{}}
+	for i := 0; i <= P95MaxMonitors; i++ {
+		m := monitorNamed("m")
+		f.monitors = append(f.monitors, m)
+		f.totals[m.ID] = store.HistoryBucket{Up: 100}
+	}
+
+	doc, err := Build(context.Background(), f, Spec{
+		Period: PeriodMonth, PeriodStyle: StyleCalendar, Timezone: "UTC",
+	}, defaultRetention(), model.NewID(), time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	p := doc.Monitors[0].ResponseTime.P95
+	if p == nil || p.Available || p.Reason != ReasonScopeTooLarge {
+		t.Fatalf("p95 = %+v, want unavailable with %q", p, ReasonScopeTooLarge)
+	}
+	if f.calls["UptimeFromRaw"] != 0 || f.calls["RawCovers"] != 0 {
+		t.Errorf("issued %d raw queries over a large scope; the bound exists to prevent exactly that",
+			f.calls["UptimeFromRaw"]+f.calls["RawCovers"])
+	}
+}
+
+// Short raw retention is answered from policy, without a query, and with the
+// reason that distinguishes it from a scope decision.
+func TestShortRawRetentionSkipsThePercentileFromPolicy(t *testing.T) {
+	t.Parallel()
+
+	m := monitorNamed("api")
+	f := &fakeStore{monitors: []model.Monitor{m}, totals: map[model.ID]store.HistoryBucket{m.ID: {Up: 100}}}
+
+	r := defaultRetention()
+	r.RawDays = 3
+	doc, err := Build(context.Background(), f, Spec{
+		Period: PeriodMonth, PeriodStyle: StyleCalendar, Timezone: "UTC",
+	}, r, model.NewID(), time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	p := doc.Monitors[0].ResponseTime.P95
+	if p == nil || p.Reason != ReasonInsufficientRaw {
+		t.Fatalf("p95 = %+v, want %q", p, ReasonInsufficientRaw)
+	}
+	if f.calls["RawCovers"] != 0 {
+		t.Error("queried raw despite retention policy already answering the question")
+	}
+}
+
+// The estate block has no percentile object at all, rather than one reporting
+// itself unavailable. A quantile does not merge across monitors, so there is no
+// reason to give: the figure does not exist rather than being withheld, and the
+// contract requires a reason whenever the object is present and unavailable.
+func TestEstateSummaryHasNoPercentileObject(t *testing.T) {
+	t.Parallel()
+
+	m := monitorNamed("api")
+	value := 940.0
+	f := &fakeStore{monitors: []model.Monitor{m}, totals: map[model.ID]store.HistoryBucket{m.ID: {Up: 100}}, p95: &value}
+
+	doc, err := Build(context.Background(), f, Spec{
+		Period: PeriodMonth, PeriodStyle: StyleCalendar, Timezone: "UTC",
+	}, defaultRetention(), model.NewID(), time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if doc.Summary.ResponseTime.P95 != nil {
+		t.Errorf("estate p95 = %+v, want nil", doc.Summary.ResponseTime.P95)
+	}
+}
+
+// Every present-and-unavailable percentile states a reason. The contract says
+// so, and a figure absent without one reads as a defect in the product rather
+// than as a decision about honesty.
+func TestUnavailablePercentileAlwaysCarriesAReason(t *testing.T) {
+	t.Parallel()
+
+	short := defaultRetention()
+	short.RawDays = 1
+
+	for _, tc := range []struct {
+		name      string
+		monitors  int
+		retention Retention
+	}{
+		{"scope", P95MaxMonitors + 1, defaultRetention()},
+		{"retention", 1, short},
+	} {
+		f := &fakeStore{totals: map[model.ID]store.HistoryBucket{}}
+		for i := 0; i < tc.monitors; i++ {
+			m := monitorNamed("m")
+			f.monitors = append(f.monitors, m)
+			f.totals[m.ID] = store.HistoryBucket{Up: 100}
+		}
+
+		doc, err := Build(context.Background(), f, Spec{
+			Period: PeriodMonth, PeriodStyle: StyleCalendar, Timezone: "UTC",
+		}, tc.retention, model.NewID(), time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+		if err != nil {
+			t.Fatalf("%s: build: %v", tc.name, err)
+		}
+		for _, section := range doc.Monitors {
+			p := section.ResponseTime.P95
+			if p == nil {
+				t.Fatalf("%s: p95 object absent on a monitor section, want present with a reason", tc.name)
+			}
+			if !p.Available && p.Reason == "" {
+				t.Errorf("%s: p95 unavailable with no reason", tc.name)
+			}
+		}
 	}
 }

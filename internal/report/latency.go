@@ -18,6 +18,16 @@ const (
 	// ReasonNoSuccessfulChecks is raw covering the window and containing no
 	// successful check to rank. A percentile of nothing is not zero.
 	ReasonNoSuccessfulChecks = "no_successful_checks"
+
+	// ReasonScopeTooLarge is the report covering more monitors than the instance
+	// computes this figure for.
+	//
+	// It is the one statistic in the block that cannot be batched — a rank over
+	// raw heartbeats, one query per monitor across roughly ten thousand rows —
+	// so an estate-wide report would spend longer here than on the whole of the
+	// rest of the document. A client report over a handful of monitors is the
+	// case that wants it and the case that gets it.
+	ReasonScopeTooLarge = "scope_too_large"
 )
 
 // MethodNearestRank is the only method this product computes, stated on the
@@ -66,7 +76,12 @@ type Latency struct {
 	DaysOverTarget  *int
 	DatesOverTarget []time.Time
 
-	P95 P95
+	// P95 is nil where the figure does not apply at all rather than being
+	// unavailable for a reason — which is the estate summary, because a
+	// percentile merges no better across monitors than across time. An absent
+	// object and an unavailable one are different statements, and the contract
+	// requires a reason whenever the object is present and unavailable.
+	P95 *P95
 }
 
 // ComputeLatency derives the whole block from the window total and the daily
@@ -136,14 +151,14 @@ func ComputeLatency(total store.HistoryBucket, daily []store.HistoryBucket, targ
 // The window is carried on the figure because it is *not* the report window, and
 // the two sitting side by side without labels — "average, 30 days: 180 ms" next
 // to "p95: 940 ms" — reads as a contradiction.
-func TrailingP95(covered bool, value *float64, from, to time.Time) P95 {
+func TrailingP95(covered bool, value *float64, from, to time.Time) *P95 {
 	if !covered {
-		return P95{Reason: ReasonInsufficientRaw}
+		return &P95{Reason: ReasonInsufficientRaw}
 	}
 	if value == nil {
-		return P95{Reason: ReasonNoSuccessfulChecks}
+		return &P95{Reason: ReasonNoSuccessfulChecks}
 	}
-	return P95{
+	return &P95{
 		Available:   true,
 		ValueMs:     value,
 		WindowStart: &from,

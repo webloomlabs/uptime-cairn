@@ -210,13 +210,89 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 		doc.Monitors = append(doc.Monitors, section)
 	}
 
+	if err := attachP95(ctx, s, doc.Monitors, retention, window); err != nil {
+		return Document{}, err
+	}
+
 	summary := Estate{
 		Uptime:       ComputeUptime(Sum(collect(totals, ids)), spec.MaintenanceHandling),
 		ResponseTime: ComputeLatency(Sum(collect(totals, ids)), mergeDaily(series), spec.ResponseTimeTargetMs),
 	}
+	// The estate block carries no percentile and its P95 stays nil — an absent
+	// object rather than a present one reporting itself unavailable. A quantile
+	// merges no better across monitors than it does across time, so there is no
+	// reason to give: the figure does not exist rather than being withheld.
 	doc.Summary = &summary
 
 	return doc, nil
+}
+
+// P95MaxMonitors bounds the one figure in the document that cannot be batched.
+//
+// Everything else Build reads costs four queries however large the scope is. A
+// nearest-rank percentile is a rank statistic over raw heartbeats, so it costs
+// one query per monitor over roughly ten thousand rows each — at five thousand
+// monitors that is fifty million rows ranked to produce a block that sits beside
+// figures which took four queries to compute.
+//
+// Twenty-five is the size of a client report, which is the case that wants this
+// figure. An estate-wide report gets the block with scope_too_large on it, which
+// says what happened rather than leaving the reader to wonder.
+const P95MaxMonitors = 25
+
+// attachP95 fills the trailing-seven-day percentile, or says why it did not.
+//
+// The window is the last seven days **of the reported period**, not of the
+// present moment: a March report generated in April describes March, and a
+// percentile drawn from April would be a figure about a month the document is
+// not about. It is still labelled with its own window, because seven days beside
+// a thirty-day average reads as a contradiction otherwise.
+func attachP95(ctx context.Context, s Store, sections []MonitorSection, retention Retention, window Window) error {
+	from := window.To.AddDate(0, 0, -7)
+	if from.Before(window.From) {
+		// A window shorter than a week: the percentile covers the window rather
+		// than reaching outside it for days the report does not describe.
+		from = window.From
+	}
+
+	// Two gates that need no query at all, checked first for that reason.
+	switch {
+	case len(sections) > P95MaxMonitors:
+		for i := range sections {
+			sections[i].ResponseTime.P95 = &P95{Reason: ReasonScopeTooLarge}
+		}
+		return nil
+	case !retention.RawCoversTrailingWeek():
+		for i := range sections {
+			sections[i].ResponseTime.P95 = &P95{Reason: ReasonInsufficientRaw}
+		}
+		return nil
+	}
+
+	for i := range sections {
+		id := sections[i].MonitorID
+
+		// Compared against the daily tier rather than asked in the absolute:
+		// RawCovers answers "does raw reach at least as far back as the tier",
+		// which is false exactly when retention has pruned raw rows the tier
+		// summarised — the case ADR-006 gates against. A monitor created three
+		// days ago passes, correctly: there is no older data to be missing.
+		covered, err := s.RawCovers(ctx, id, from, "1d")
+		if err != nil {
+			return fmt.Errorf("raw coverage for %s: %w", id, err)
+		}
+
+		var value *float64
+		if covered {
+			b, err := s.UptimeFromRaw(ctx, id, from, window.To)
+			if err != nil {
+				return fmt.Errorf("trailing percentile for %s: %w", id, err)
+			}
+			value = b.ResponseTimeP95
+		}
+		sections[i].ResponseTime.P95 = TrailingP95(covered, value, from, window.To)
+	}
+	return nil
 }
 
 // resolveSpecWindow prefers explicit boundaries over a named period, so that a

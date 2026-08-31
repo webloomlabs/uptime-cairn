@@ -22,10 +22,13 @@ compute. All of that exists as a Go value; what is missing is the endpoint that
 serves it, which is `POST /report-templates/{id}/generate` and therefore needs
 the template CRUD underneath it.
 
-**What is deliberately not wired: the trailing p95.** See the latency section —
-it is written, tested, and left uncalled because calling it per monitor at
-estate scale is the fan-out this design exists to avoid, and the honest fix
-needs a spec change.
+**The percentile is wired, and it cost one spec change.** `unavailable_reason`
+gained `scope_too_large` on explicit instruction (2026-08-31), classified under
+[COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 as **breaking-but-unshipped** —
+free, because the operation is `x-cairn-phase: 2` and no release implements it,
+and stated rather than assumed so a reviewer can check the claim. The enum also
+gained the §3 tolerance sentence, which is the part that had to happen *now*:
+adding it after clients exist does not help.
 
 **The backup guide is written ahead of the code, deliberately.**
 [ADR-008](../adr/008-report-artifact-storage.md) says in its own text that the
@@ -89,7 +92,7 @@ all.
 - [x] Daily average series from the 1d tier — the report's primary latency exhibit. A day with no successful checks stays on the series with a null average, so the chart breaks rather than dipping to zero
 - [x] Best and worst day, taken from that series, over observed days only — a day the probe could not run is not the fastest day the service ever had
 - [x] Days over target, with their dates, present only when `response_time_target_ms` is set. No target yields null rather than zero: an absence of a rule and a clean sheet are different claims, and only one of them is a compliment. A day exactly at the target is not over it
-- [ ] A real nearest-rank p95 over the **trailing seven days only**. `TrailingP95` is written and tested — it carries its own window and method, and distinguishes *no retention* from *no successful checks*, because a percentile of nothing is not zero — but **`Build` does not call it yet, and that is a decision rather than an oversight.** `UptimeFromRaw` is per monitor by nature, so a report over 5,000 monitors would issue 5,000 raw queries ranking roughly ten thousand rows each, which is precisely the fan-out the rest of this design avoids. A scope bound is the obvious answer and it needs a third `unavailable_reason` the spec's enum does not have — a spec change, and therefore not mine to make
+- [x] A real nearest-rank p95 over the **trailing seven days only**, wired into `Build` and gated three ways. Two gates cost no query at all and are checked first: a scope over `P95MaxMonitors` (25) reports `scope_too_large`, and `raw_days` under seven reports `insufficient_raw_retention`. The third is `RawCovers` per monitor, compared against the daily tier rather than asked in the absolute — false exactly when retention pruned raw rows the tier summarised, which is the case ADR-006 gates against, while a monitor created three days ago passes correctly. The window is the last seven days **of the reported period**, not of the present moment: a March report describing April would be a figure about a month the document is not about
 - [x] **No window-level minimum or maximum anywhere**, held by two tests rather than by discipline: `Sum` refuses to carry them across monitors, and the latency block has no field for them even when the input bucket does. Adding one later is a deliberate act against a failing test
 - [ ] A test asserts `HistoryFromTier` still substitutes `NULL` for the coarse-tier percentile, and a second asserts the weekly p95 is absent when coverage is short. ADR-006 removes the mechanism rather than policing it, and these two tests are what keep it removed
 - [ ] The response-time SLI is described as *"met the response-time target"* and never as *"was slow"*. A threshold breach already marks a check down, but `Class` is not persisted, so stored history cannot distinguish "too slow" from "did not answer"
