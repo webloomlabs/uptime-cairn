@@ -54,6 +54,24 @@ func (s Scope) Empty() bool {
 	return len(s.MonitorIDs)+len(s.GroupIDs)+len(s.TagIDs) == 0
 }
 
+// Target is an SLO target and the level it was found at.
+//
+// The source travels with the number because §4.3 requires the report to print
+// it: a monitor silently inheriting its group's target is otherwise invisible to
+// whoever reads the report, and "99.9%" means something different when nobody
+// set it on this monitor.
+type Target struct {
+	Percent float64
+	Source  string
+}
+
+// Where a target was resolved from. The template's own override is applied by
+// the caller — it is not stored per monitor and the store cannot see it.
+const (
+	TargetFromMonitor = "monitor"
+	TargetFromGroup   = "group"
+)
+
 // Store is what computing a report needs from persistence.
 //
 // Named by the consumer, following internal/api and internal/rollup, and for the
@@ -111,6 +129,23 @@ type Store interface {
 	// and because raw is the one place a report is allowed to read a wide range
 	// of rows at all.
 	UptimeFromRaw(ctx context.Context, id model.ID, from, to time.Time) (store.HistoryBucket, error)
+
+	// SLOTargets resolves each monitor's uptime target: its own if it has one,
+	// otherwise its group's, and it reports which of the two answered.
+	//
+	// A separate method rather than a field on model.Monitor, deliberately.
+	// Phase 2 only *reads* this number — nothing alerts on it and no monitor's
+	// status is affected by it — and putting it on the domain type would hand it
+	// to every consumer in the product, through both write paths, ahead of the
+	// phase that gives it meaning. It is also the resolution that a field could
+	// not express: the fallback and its provenance are one answer, and computing
+	// them in the caller would mean every caller getting the order right.
+	//
+	// A monitor with no target at either level is **absent from the map** rather
+	// than present with a zero. Zero is a real target percentage and an absurd
+	// one, and the report's SLA block is omitted where there is no target instead
+	// of being computed against a number nobody chose.
+	SLOTargets(ctx context.Context, ids []model.ID) (map[model.ID]Target, error)
 
 	// ListIncidents supplies the incident log and the post-mortem, filtered by
 	// the window through IncidentFilter's From and To.

@@ -14,13 +14,15 @@ written down. Migration `0008` has now landed the whole reporting schema, and
 not exist is a single number: no computation, no renderer, no scheduler, no
 `reports` directory under the data directory, and nothing in the dashboard.
 
-**Three of the six methods on `report.Store` are already implemented** —
-`RawCovers`, `UptimeFromRaw` and `ListIncidents` are satisfied by `*sqlite.Store`
-today with identical signatures, which a compile-time assertion was used to prove
-rather than assume. The three that are not — `MonitorsInScope`, `WindowTotals`,
-`DailySeries` — are the batched ones, and they are batched deliberately: they are
-the queries fifty concurrent runs across 5,000 monitors will hammer, and a call
-per monitor is the fan-out the extended load gate exists to catch.
+**`report.Store` is now satisfied in full**, and `var _ report.Store =
+(*Store)(nil)` in the SQLite tests is what keeps it that way. Three of its six
+methods already existed — `RawCovers`, `UptimeFromRaw` and `ListIncidents`, with
+signatures that matched without adjustment. The three added are the batched ones,
+batched deliberately: they are the queries fifty concurrent runs across 5,000
+monitors will hammer, and a call per monitor is the fan-out the extended load gate
+exists to catch. A query-plan test asserts both seek per monitor rather than scan
+the tier, which is the invariant that does not show up in any result and the one
+that regressed once already.
 
 **The backup guide is written ahead of the code, deliberately.**
 [ADR-008](../adr/008-report-artifact-storage.md) says in its own text that the
@@ -61,7 +63,7 @@ all.
 - [x] Migration [`0008_reporting.sql`](../../migrations/sqlite/0008_reporting.sql) — **seven tables, not the four the data model named**: brand profiles, templates, schedules, schedule deliveries, runs, artifacts, share links, delivery attempts. `org_id` on every one from this first migration, so Phase 3 tenancy is a permission change and not a re-architecture. Applied over `0001`–`0007` against a real database with `integrity_check` and `foreign_key_check` clean, and each constraint exercised until it refused something: `sla_target = 100`, a second default brand profile, a second live share link on one run, a repeated `token_hash`, a second PDF for one run, `format = 'docx'`. Deleting a template cascades runs → artifacts → share links to zero. The three scheduled queries — due schedules, the expiry sweep, the share-token lookup — each plan onto their index as a `SEARCH`, with no scan
 - [x] `slo_target_percent` on monitors and groups — one nullable column each, `NULL` meaning no target, with the `< 100` bound enforced by a `CHECK` rather than only at the API: 100 refused and 99.95 accepted, tested against a real monitor row and a real group row. **Schema only.** Nothing reads it, the template → monitor → group resolution order is not written, and no API field exposes it
 - [ ] Four things whose **column landed in `0008` and whose Go half is not written**: `report_artifact_days` inside the existing `retention` JSON (365 default, and exempt from the coarser-outlives-finer rule, because an artifact is expected to outlive the data behind it); `report_storage` as an eighth settings section with `secret_access_key_sealed` following `SMTPSettings.PasswordSealed`; the artifact row's `sha256`, `size_bytes` and `state` with `expired` as the tombstone behind a `410`; and `path`, stored rather than derived. No further migration is needed for any of them
-- [ ] The SQLite half of [`report.Store`](../../internal/report/report.go) — `MonitorsInScope`, `WindowTotals`, `DailySeries`. The other three methods are already implemented; see the status note above
+- [x] The SQLite half of [`report.Store`](../../internal/report/report.go) — [`reports.go`](../../internal/store/sqlite/reports.go): `MonitorsInScope` unions ids, groups (reaching child groups) and tags in one predicate so a monitor selected three ways appears once, and includes paused monitors, which still have history in the window; `WindowTotals` and `DailySeries` are batched, seek per monitor by the `(monitor_id, bucket_start)` primary key, and return `NULL` for p95 at every tier including `1m`. Absent monitors stay absent rather than arriving zero-valued, because zero up and zero down is a real state meaning "observed nothing" and a report has to tell the two apart. Nine tests, `-race` clean
 - [ ] **Data model §4.13 updated.** It lists four Phase 2 tables and `0008` creates seven. The three it does not name are each a consequence of a decision taken after that list was written — brand profiles (spec Q2), share links (ADR-008), and the configured-target/attempt split that mirrors `notification_channels` and `notification_deliveries`. The migration header says so; the data model does not yet
 
 ## The report model (`internal/report`)
@@ -72,10 +74,11 @@ all.
 - [ ] Scope resolves **at run time, not at save time** — monitor ids, groups and tags as a union. An agency that adds a monitor to a client's tag expects it in that client's next report without editing the report
 - [ ] `meta.resolution` is filled from what actually answered: the tier used, the tier requested, `downgraded`, and `covered_from` where retention truncated the window. Reads extend `resolveHistoryTier`'s existing contract rather than bypassing it, and nothing is ever silently upsampled
 - [ ] Reads go through the rollup tiers, never raw, except inside raw retention where a real percentile is being computed. A report that scans a year of heartbeats is the failure ADR-004 exists to prevent, one layer up
-- [ ] The denominator rules of §4.3, with tests over `maintenance`, `unknown` and `skipped` written **before** the numbers they check: `down` counts; `maintenance` does not by default and the default is stated on the report face; `unknown` and `skipped` leave the denominator entirely, with the excluded share reported, because an SLA computed over 60% observation is not an SLA
-- [ ] `maintenance_handling` honoured as `exclude`, `count_as_up`, or `count_as_down`, and whichever was used appears in the output rather than in the template only
+- [x] The denominator rules of §4.3 — [`uptime.go`](../../internal/report/uptime.go), nine tests, and the tests carry the reasoning rather than the code alone. `down` counts and nothing else does; `unknown` and `skipped` leave the denominator entirely (90 up, 10 down and 100 unmade checks is 90% over half the window — never 45% and never 95%); `pending` is a third thing again and is never counted; `maintenance` is excluded by default, and the policy is carried **on the figure** rather than only on the template, because one bucket yields 80%, 90% or 40% under the three settings. Excluding maintenance deliberately does not improve `unobserved_share`, which is taken over everything scheduled — otherwise the exclusion would flatter the quality of the observation as well as the uptime
+- [x] `maintenance_handling` honoured as `exclude`, `count_as_up`, or `count_as_down`, with an empty value defaulting to `exclude` and *saying* that it did. Whichever was used appears on the figure, not only in the template
+- [x] Target resolution reaches the computation, by the smaller of the two routes: [`SLOTargets`](../../internal/store/sqlite/reports.go) resolves monitor-then-group in one `COALESCE` and returns **which level answered**, so §4.3's requirement to print the source is satisfied by the same call that finds the number. `model.Monitor` gains no field, so nothing outside reporting can act on a target this phase says nothing may act on yet. Resolution deliberately stops at the monitor's own group: groups nest, the spec's order has no fourth step, and climbing would print "inherited from group" for a number set two levels up
 - [ ] Error budgets from `up_count` and `down_count`, which are additive at every tier, so the budget over any window is exact rather than estimated. **No SLO figure derives from a percentile** — the direct answer to the instruction data model §11.5 left for this phase
-- [ ] Target resolution — template, then monitor, then group, then none — with **the source stated on the report**, because a monitor silently inheriting a group's target is otherwise invisible to whoever reads it. None means the SLA block is absent, never a number nobody chose
+- [ ] Target resolution — template, then monitor, then group, then none — with **the source stated on the report**. The store half is done and the two lower levels resolve; what is left is the template's override winning over both, and the source reaching the rendered face. None means the SLA block is absent, never a number nobody chose — a monitor with no target at any level is already absent from the map rather than present with a zero
 
 ## The latency block (ADR-006)
 
@@ -252,10 +255,31 @@ change goes through [COMPATIBILITY.md](../api/COMPATIBILITY.md) §2 first.
    an arbitrary past month, with a stated denominator, honest nulls, and a latency
    block that omits what it cannot compute. Nothing renders yet. Nothing is
    scheduled yet. If the numbers are wrong, everything downstream is a faster way
-   to be wrong. The three unimplemented `report.Store` methods are the gate on
-   it, and `WindowTotals` and `DailySeries` should be written batched from the
-   first line rather than made batched later — the per-monitor version passes
-   every test and fails the load gate.
+   to be wrong. The store half is done and is no longer the gate; what is left is
+   arithmetic and policy, in `internal/report`, over data the tests can seed
+   directly.
+
+   The denominator and target resolution are both done. **What remains before
+   the checkpoint is reachable is the error budget, and it carries the one
+   decision left in the SLA block: what a second is.**
+
+   Uptime is a ratio of *observed checks*; an error budget is quoted in
+   *seconds*. Converting between them is a choice, not a calculation, and the
+   two candidates disagree exactly when it matters. Multiplying `down_checks` by
+   the monitor's interval reads the number straight off the data but is wrong
+   whenever the interval was changed mid-window or checks were missed — and a
+   month with a gap in it is precisely when somebody disputes the figure.
+   Projecting the observed down proportion onto the window's wall-clock length
+   is exact when observation is complete and overstates in proportion to
+   `unobserved_share`, which the block already prints beside it. The second is
+   the conventional reading of an SLA and is the one I would take, with the
+   projection named on the report rather than implied. Neither is obviously
+   right, both are cheap now and expensive after the first artifact is written
+   for a client, and the plan is explicit that a wrong SLA figure reaching an
+   auditor is the critical risk of this phase.
+
+   After that: window resolution in a stated timezone, then assembling the
+   `ReportDocument` around these blocks.
 
 4. **Then the primitive set and the SVG backend**, because HTML is canonical and
    because standing the golden test up against the first renderer is what makes
