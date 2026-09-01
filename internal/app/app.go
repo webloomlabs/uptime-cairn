@@ -41,6 +41,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/report"
+	"github.com/webloomlabs/uptime-cairn/internal/report/render"
 	"github.com/webloomlabs/uptime-cairn/internal/report/runner"
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
@@ -248,17 +249,22 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	// keeps fifty PDFs at 09:00 on the first of the month off the check path —
 	// the property the load-test gate exists to hold rather than to assume.
 	//
-	// **No TrueType family is embedded in this build**, so render.Family is
-	// zero and PDF fails with a stated reason while HTML, CSV and JSON render.
-	// That is the ADR-007 item 7 degradation path taking a real case rather than
-	// a hypothetical one, and it is why the failure path was built before the
-	// font: choosing and vendoring a licensed face is a maintainer decision, and
-	// nothing else waits on it.
+	// The embedded face is parsed once here rather than per run. A failure is a
+	// build-time mistake — the bytes are compiled in — so it is logged and the
+	// three formats that need no font still render: PDF then fails with a stated
+	// reason and degrades the run to `partial`, which is the ADR-007 item 7 path
+	// and is exactly how this ran before a family was vendored.
+	fonts, err := render.Embedded()
+	if err != nil {
+		log.Error("embedded report font unavailable; PDF reports will fail", "error", err)
+	}
+
 	artifacts := artifact.New(cfg.DataDir, artifact.DefaultMaxBytes)
 	reportPool := runner.NewPool(
 		runner.New(store, artifacts, runner.Options{
 			Retention:    reportRetention(rollup.DefaultRetention()),
 			ArtifactDays: model.DefaultReportArtifactDays,
+			Fonts:        fonts,
 		}),
 		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports"))
 	reportPool.Start(ctx)

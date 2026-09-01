@@ -1642,3 +1642,57 @@ func orEmptyStrings(in []string) []string {
 	}
 	return in
 }
+
+type brandProfileJSON struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	CompanyName  *string `json:"company_name"`
+	PrimaryColor *string `json:"primary_color"`
+	AccentColor  *string `json:"accent_color"`
+	FooterText   *string `json:"footer_text"`
+	CoverText    *string `json:"cover_text"`
+
+	HidePoweredBy bool `json:"hide_powered_by"`
+
+	// LogoURL is null until the spec grows an operation that serves the bytes.
+	// PUT .../logo exists; there is no GET beside it, so a URL here would name an
+	// endpoint that answers 405 — worse than an honest null, and not something a
+	// handler may invent (AGENTS.md rule 4).
+	LogoURL         *string `json:"logo_url"`
+	LogoContentType *string `json:"logo_content_type"`
+
+	IsDefault bool      `json:"is_default"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// brandProfileWrite is a PATCH body. Every field is a pointer so that an absent
+// one is left alone; the two colours take "" as "clear it", since an empty
+// string is not a valid colour and so cannot mean anything else.
+type brandProfileWrite struct {
+	Name          *string `json:"name"`
+	CompanyName   *string `json:"company_name"`
+	PrimaryColor  *string `json:"primary_color"`
+	AccentColor   *string `json:"accent_color"`
+	FooterText    *string `json:"footer_text"`
+	CoverText     *string `json:"cover_text"`
+	HidePoweredBy *bool   `json:"hide_powered_by"`
+	IsDefault     *bool   `json:"is_default"`
+}
+
+func toBrandProfileJSON(p model.BrandProfile) brandProfileJSON {
+	return brandProfileJSON{
+		ID:              p.ID.String(),
+		Name:            p.Name,
+		CompanyName:     optional(p.CompanyName),
+		PrimaryColor:    optional(p.PrimaryColor),
+		AccentColor:     optional(p.AccentColor),
+		FooterText:      optional(p.FooterText),
+		CoverText:       optional(p.CoverText),
+		HidePoweredBy:   p.HidePoweredBy,
+		LogoContentType: optional(p.LogoContentType),
+		IsDefault:       p.IsDefault,
+		CreatedAt:       p.CreatedAt,
+		UpdatedAt:       p.UpdatedAt,
+	}
+}

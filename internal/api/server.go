@@ -101,6 +101,7 @@ type IdentityStore interface {
 type Store interface {
 	MonitorStore
 	ReportStore
+	BrandStore
 	IdentityStore
 	ChannelStore
 	MaintenanceStore
@@ -456,15 +457,20 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("PATCH /api/v1/users/me", s.updateCurrentUser)
 	authed.HandleFunc("GET /api/v1/users/{userId}", s.require(auth.ScopeUsersRead, s.getUser))
 
-	// Reporting. The scopes are the ones the spec names on each operation, and
-	// they already exist — brand profiles need two that do not, which is why
-	// that resource is not registered here yet.
+	// Reporting. The scopes are the ones the spec names on each operation.
 	authed.HandleFunc("GET /api/v1/report-templates", s.require(auth.ScopeReportsRead, s.listReportTemplates))
 	authed.HandleFunc("POST /api/v1/report-templates", s.require(auth.ScopeReportsWrite, s.createReportTemplate))
 	authed.HandleFunc("GET /api/v1/report-templates/{reportTemplateId}", s.require(auth.ScopeReportsRead, s.getReportTemplate))
 	authed.HandleFunc("PATCH /api/v1/report-templates/{reportTemplateId}", s.require(auth.ScopeReportsWrite, s.updateReportTemplate))
 	authed.HandleFunc("DELETE /api/v1/report-templates/{reportTemplateId}", s.require(auth.ScopeReportsWrite, s.deleteReportTemplate))
 	authed.HandleFunc("POST /api/v1/report-templates/{reportTemplateId}/generate", s.require(auth.ScopeReportsWrite, s.generateReport))
+
+	authed.HandleFunc("GET /api/v1/brand-profiles", s.require(auth.ScopeBrandProfilesRead, s.listBrandProfiles))
+	authed.HandleFunc("POST /api/v1/brand-profiles", s.require(auth.ScopeBrandProfilesWrite, s.createBrandProfile))
+	authed.HandleFunc("GET /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesRead, s.getBrandProfile))
+	authed.HandleFunc("PATCH /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesWrite, s.updateBrandProfile))
+	authed.HandleFunc("DELETE /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesWrite, s.deleteBrandProfile))
+	authed.HandleFunc("PUT /api/v1/brand-profiles/{brandProfileId}/logo", s.require(auth.ScopeBrandProfilesWrite, s.uploadBrandProfileLogo))
 
 	authed.HandleFunc("GET /api/v1/report-runs", s.require(auth.ScopeReportsRead, s.listReportRuns))
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}", s.require(auth.ScopeReportsRead, s.getReportRun))

@@ -43,6 +43,13 @@ const (
 	ScopeSchedulesWrite    Scope = "schedules:write"
 	ScopeReportsRead       Scope = "reports:read"
 	ScopeReportsWrite      Scope = "reports:write"
+
+	// Brand profiles are their own resource rather than part of reports:*, which
+	// is the spec's choice and the right one: a branded template is edited by
+	// whoever writes reports, but a client's logo and colours are an account
+	// asset an agency may not want every report author replacing.
+	ScopeBrandProfilesRead  Scope = "brand_profiles:read"
+	ScopeBrandProfilesWrite Scope = "brand_profiles:write"
 )
 
 // AllScopes is every scope the spec defines, which is also what the owner role
@@ -61,6 +68,7 @@ var AllScopes = []Scope{
 	ScopeTeamsRead, ScopeTeamsWrite,
 	ScopeSchedulesRead, ScopeSchedulesWrite,
 	ScopeReportsRead, ScopeReportsWrite,
+	ScopeBrandProfilesRead, ScopeBrandProfilesWrite,
 }
 
 // Valid reports whether s is a scope the spec defines.
