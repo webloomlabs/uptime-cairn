@@ -1,83 +1,10 @@
-package maintenance
+package cron
 
 import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
-
-func cronWindow(t *testing.T, expression string) model.MaintenanceWindow {
-	t.Helper()
-
-	w := window(model.StrategyCron)
-	w.StartsAt = utc(t, "2026-01-01 00:00")
-	w.Duration = 30 * time.Minute
-	w.Recurrence.Cron = expression
-	return w
-}
-
-func TestCronSchedules(t *testing.T) {
-	t.Parallel()
-
-	// Every `after` here is chosen to fall outside any occurrence, so these
-	// exercise "when does the next one start". The in-progress case has its own
-	// test, because the two answers differ and both matter.
-	cases := []struct {
-		name       string
-		expression string
-		duration   time.Duration
-		after      string
-		wantStart  string
-	}{
-		{"every day at 02:30", "30 2 * * *", 30 * time.Minute, "2026-08-19 12:00", "2026-08-20 02:30"},
-		{"top of every hour", "0 * * * *", 30 * time.Minute, "2026-08-19 12:31", "2026-08-19 13:00"},
-		{"every fifteen minutes", "*/15 * * * *", 5 * time.Minute, "2026-08-19 12:06", "2026-08-19 12:15"},
-		{"a list of hours", "0 2,14 * * *", 30 * time.Minute, "2026-08-19 03:00", "2026-08-19 14:00"},
-		{"a range of weekdays", "0 9 * * 1-5", 30 * time.Minute, "2026-08-22 00:00", "2026-08-24 09:00"}, // Sat 22nd -> Mon 24th
-		{"the first of the month", "0 0 1 * *", 30 * time.Minute, "2026-08-19 00:00", "2026-09-01 00:00"},
-		{"a single month", "0 0 1 2 *", 30 * time.Minute, "2026-08-19 00:00", "2027-02-01 00:00"},
-		// The famous one: four years of lookahead is not theoretical.
-		{"the 29th of February", "0 2 29 2 *", 30 * time.Minute, "2026-08-19 00:00", "2028-02-29 02:00"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			w := cronWindow(t, tc.expression)
-			w.Duration = tc.duration
-			occurrence := next(t, w, utc(t, tc.after))
-			if !occurrence.Start.Equal(utc(t, tc.wantStart)) {
-				t.Errorf("%s after %s = %s, want %s", tc.expression, tc.after,
-					occurrence.Start.Format("2006-01-02 15:04"), tc.wantStart)
-			}
-		})
-	}
-}
-
-// Cron's day rule is a union when both day fields are restricted, which is a
-// genuine oddity of the format rather than a bug here. Encoding it wrong makes a
-// schedule fire on the wrong days and nothing complains.
-func TestCronDayFieldsAreAUnionWhenBothAreRestricted(t *testing.T) {
-	t.Parallel()
-
-	// The 1st of the month, or any Monday.
-	w := cronWindow(t, "0 0 1 * 1")
-
-	// 2026-09-01 is a Tuesday: it matches on day-of-month alone.
-	first := next(t, w, utc(t, "2026-08-26 00:00"))
-	if !first.Start.Equal(utc(t, "2026-08-31 00:00")) {
-		// 2026-08-31 is a Monday, and comes first.
-		t.Errorf("first = %s, want the Monday 2026-08-31", first.Start)
-	}
-
-	second := next(t, w, first.End)
-	if !second.Start.Equal(utc(t, "2026-09-01 00:00")) {
-		t.Errorf("second = %s, want the 1st", second.Start)
-	}
-}
 
 func TestCronRejectsWhatItDoesNotSupport(t *testing.T) {
 	t.Parallel()
@@ -95,7 +22,7 @@ func TestCronRejectsWhatItDoesNotSupport(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := parseCron(expression)
+			_, err := Parse(expression)
 			if err == nil {
 				t.Fatalf("%q was accepted", expression)
 			}
@@ -113,10 +40,10 @@ func TestCronAliasesAreRefusedByName(t *testing.T) {
 
 	// "@daily" is one field, so it fails the count check first; the point of the
 	// assertion is that a user who tries it is told aliases are the problem.
-	if _, err := parseCron("@daily"); err == nil {
+	if _, err := Parse("@daily"); err == nil {
 		t.Fatal("@daily was accepted")
 	}
-	if _, err := parseCron("@daily * * * *"); err == nil || !strings.Contains(err.Error(), "aliases") {
+	if _, err := Parse("@daily * * * *"); err == nil || !strings.Contains(err.Error(), "aliases") {
 		t.Errorf("err = %v, want it to name aliases", err)
 	}
 }
@@ -125,7 +52,7 @@ func TestCronStepsFromABase(t *testing.T) {
 	t.Parallel()
 
 	// "5/15" is "from 5, every 15" — 5, 20, 35, 50.
-	expression, err := parseCron("5/15 * * * *")
+	expression, err := Parse("5/15 * * * *")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -136,5 +63,136 @@ func TestCronStepsFromABase(t *testing.T) {
 	}
 	if expression.minutes[0] || expression.minutes[10] {
 		t.Error("the step matched a minute before its base")
+	}
+}
+
+// --- Next -------------------------------------------------------------------
+
+func at(t *testing.T, value string, loc *time.Location) time.Time {
+	t.Helper()
+	parsed, err := time.ParseInLocation("2006-01-02 15:04", value, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
+}
+
+func TestNextFindsTheFollowingFiring(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		expression string
+		after      string
+		want       string
+	}{
+		{"later the same day", "0 9 * * *", "2026-08-19 06:00", "2026-08-19 09:00"},
+		{"tomorrow when today has passed", "0 9 * * *", "2026-08-19 09:00", "2026-08-20 09:00"},
+		{"strictly after, never equal", "0 9 * * *", "2026-08-19 08:59", "2026-08-19 09:00"},
+		{"the first of the month", "0 9 1 * *", "2026-08-19 00:00", "2026-09-01 09:00"},
+		{"weekdays only", "30 7 * * 1-5", "2026-08-22 00:00", "2026-08-24 07:30"},
+		{"several times a day", "0 6,18 * * *", "2026-08-19 07:00", "2026-08-19 18:00"},
+		{"the 29th of February", "0 2 29 2 *", "2026-08-19 00:00", "2028-02-29 02:00"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			expression, err := Parse(tc.expression)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := expression.Next(at(t, tc.after, time.UTC), time.UTC)
+			if !ok {
+				t.Fatalf("%q found no firing after %s", tc.expression, tc.after)
+			}
+			if want := at(t, tc.want, time.UTC); !got.Equal(want) {
+				t.Errorf("next(%q, %s) = %s, want %s", tc.expression, tc.after,
+					got.Format("2006-01-02 15:04 MST"), tc.want)
+			}
+		})
+	}
+}
+
+// **The firing is cut in the schedule's zone, not in UTC.** "09:00 on the first"
+// for a Sydney agency is 22:00 or 23:00 UTC on the last day of the *previous*
+// month depending on daylight saving, and a scheduler that computed it in UTC
+// would send a monthly report on the wrong day twice a year.
+func TestNextIsCutInTheGivenZone(t *testing.T) {
+	t.Parallel()
+
+	sydney, err := time.LoadLocation("Australia/Sydney")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	expression, err := Parse("0 9 1 * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Late August in UTC is already the 1st of September in Sydney's evening
+	// terms; the firing is the September one, at 09:00 local.
+	got, ok := expression.Next(time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC), sydney)
+	if !ok {
+		t.Fatal("no firing found")
+	}
+	local := got.In(sydney)
+	if local.Hour() != 9 || local.Day() != 1 || local.Month() != time.September {
+		t.Errorf("next = %s, want 09:00 on 1 September in Sydney", local.Format(time.RFC3339))
+	}
+	// And in UTC it is the previous day, which is the whole point.
+	if got.UTC().Day() != 31 || got.UTC().Month() != time.August {
+		t.Errorf("in UTC that is %s; a UTC-computed schedule would fire on the wrong day",
+			got.UTC().Format(time.RFC3339))
+	}
+}
+
+// Both sides of a daylight-saving change are handled, and the awkward one is
+// stated rather than left to chance: a firing inside the gap when clocks go
+// forward is normalised rather than skipped, because a report that silently does
+// not arrive is the worse of the two surprises.
+func TestNextSurvivesDaylightSaving(t *testing.T) {
+	t.Parallel()
+
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	// 02:30 daily. On 2026-03-29 the clocks go forward at 01:00 and 02:30 does
+	// not exist.
+	expression, err := Parse("30 2 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := expression.Next(time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC), london)
+	if !ok {
+		t.Fatal("no firing found")
+	}
+	if want := time.Date(2026, 3, 29, 2, 30, 0, 0, london); !got.Equal(want) {
+		t.Errorf("next = %s, want %s — the firing is normalised into the gap, not skipped",
+			got.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+
+	// It keeps moving forward afterwards rather than sticking.
+	after, ok := expression.Next(got, london)
+	if !ok || !after.After(got) {
+		t.Errorf("the firing after %s is %s; the walk stalled", got, after)
+	}
+}
+
+// A nil zone is UTC rather than the host's local time. Guessing the machine's
+// zone would make the same schedule mean different things on different servers.
+func TestANilZoneIsUTC(t *testing.T) {
+	t.Parallel()
+
+	expression, err := Parse("0 9 * * *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := expression.Next(time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), nil)
+	if !ok || got.UTC().Hour() != 9 {
+		t.Errorf("next = %s, want 09:00 UTC", got)
 	}
 }

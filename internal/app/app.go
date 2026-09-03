@@ -269,6 +269,11 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports"))
 	reportPool.Start(ctx)
 
+	// The scheduler turns saved schedules into queued runs and does nothing
+	// else. A tick is one seek on the partial index migration 0008 created for
+	// it, so an install with no schedules pays a lookup that returns no rows.
+	go runner.NewScheduler(store, reportPool, log.With("component", "reports")).Run(ctx)
+
 	apiServer := api.New(store, publisher, sweeps, cp, events, registry, keeper,
 		log.With("component", "api"), cfg.InstanceName).
 		WithOutbound(webhooks).

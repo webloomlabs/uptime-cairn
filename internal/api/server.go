@@ -101,6 +101,7 @@ type IdentityStore interface {
 type Store interface {
 	MonitorStore
 	ReportStore
+	ReportScheduleStore
 	BrandStore
 	IdentityStore
 	ChannelStore
@@ -471,6 +472,12 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("PATCH /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesWrite, s.updateBrandProfile))
 	authed.HandleFunc("DELETE /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesWrite, s.deleteBrandProfile))
 	authed.HandleFunc("PUT /api/v1/brand-profiles/{brandProfileId}/logo", s.require(auth.ScopeBrandProfilesWrite, s.uploadBrandProfileLogo))
+
+	authed.HandleFunc("GET /api/v1/report-schedules", s.require(auth.ScopeReportsRead, s.listReportSchedules))
+	authed.HandleFunc("POST /api/v1/report-schedules", s.require(auth.ScopeReportsWrite, s.createReportSchedule))
+	authed.HandleFunc("GET /api/v1/report-schedules/{reportScheduleId}", s.require(auth.ScopeReportsRead, s.getReportSchedule))
+	authed.HandleFunc("PATCH /api/v1/report-schedules/{reportScheduleId}", s.require(auth.ScopeReportsWrite, s.updateReportSchedule))
+	authed.HandleFunc("DELETE /api/v1/report-schedules/{reportScheduleId}", s.require(auth.ScopeReportsWrite, s.deleteReportSchedule))
 
 	authed.HandleFunc("GET /api/v1/report-runs", s.require(auth.ScopeReportsRead, s.listReportRuns))
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}", s.require(auth.ScopeReportsRead, s.getReportRun))

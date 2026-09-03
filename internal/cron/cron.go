@@ -1,7 +1,17 @@
-package maintenance
+// Package cron parses the five-field cron expressions this system accepts, and
+// answers the two questions asked of them: does a day match, and when does the
+// next firing fall.
+//
+// **One implementation, two callers.** Maintenance windows have used it since
+// Phase 1; report schedules use it from Phase 2. A second copy would agree with
+// the first on the day it was written and diverge on the first bug fix — and the
+// rule most likely to diverge is the day-of-month/day-of-week union below, which
+// is a genuine oddity of the format that a fresh implementation gets wrong.
+package cron
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +30,8 @@ import (
 // missing, which is a better answer than accepting an expression and running it
 // on a schedule the user did not intend.
 
-type cronExpression struct {
+// Expression is a parsed five-field cron.
+type Expression struct {
 	minutes       map[int]bool
 	hours         map[int]bool
 	doms          map[int]bool
@@ -30,11 +41,11 @@ type cronExpression struct {
 	dowRestricted bool
 }
 
-// matchesDay applies cron's day rule: when both day-of-month and day-of-week are
+// MatchesDay applies cron's day rule: when both day-of-month and day-of-week are
 // restricted the match is a union, not an intersection. It is a genuine oddity
 // of the format rather than a bug here — "0 0 1 * 1" is the first of the month
 // *and* every Monday.
-func (e *cronExpression) matchesDay(day time.Time) bool {
+func (e *Expression) MatchesDay(day time.Time) bool {
 	if !e.months[int(day.Month())] {
 		return false
 	}
@@ -50,7 +61,8 @@ func (e *cronExpression) matchesDay(day time.Time) bool {
 	}
 }
 
-func parseCron(expression string) (*cronExpression, error) {
+// Parse reads an expression, or says exactly what it did not understand.
+func Parse(expression string) (*Expression, error) {
 	fields := strings.Fields(expression)
 	if len(fields) != 5 {
 		return nil, fmt.Errorf("cron needs five fields (minute hour day-of-month month day-of-week), got %d in %q",
@@ -60,7 +72,7 @@ func parseCron(expression string) (*cronExpression, error) {
 		return nil, fmt.Errorf("cron aliases such as @daily are not supported; write the five fields out")
 	}
 
-	out := &cronExpression{}
+	out := &Expression{}
 	var err error
 	if out.minutes, _, err = parseField(fields[0], 0, 59, "minute"); err != nil {
 		return nil, err
@@ -146,4 +158,69 @@ func parseField(field string, low, high int, name string) (map[int]bool, bool, e
 		return nil, false, fmt.Errorf("%s field matches nothing", name)
 	}
 	return set, restricted, nil
+}
+
+// Hours and Minutes are the times of day this expression fires at, sorted.
+//
+// Exposed because a caller that already knows which days match still needs to
+// know when on those days — the maintenance scheduler builds its occurrences
+// that way, and duplicating the sort at each call site is how two callers end up
+// disagreeing about ordering.
+func (e *Expression) Hours() []int   { return sortedKeys(e.hours) }
+func (e *Expression) Minutes() []int { return sortedKeys(e.minutes) }
+
+// LookaheadDays bounds the search for a next firing.
+//
+// Four years and change, because "0 2 29 2 *" — 02:00 on the 29th of February —
+// is a legal expression whose next match can be nearly four years out. The walk
+// compares days, so the bound costs microseconds even when nothing matches.
+const LookaheadDays = 1500
+
+// Next is the first instant strictly after `after` at which this expression
+// fires, cut in the given zone.
+//
+// **In the zone, not in UTC**, and that is the whole reason this takes a
+// location. "0 9 1 * *" for an agency in Sydney means 09:00 Sydney on the first
+// — which is 22:00 or 23:00 UTC on the last day of the previous month depending
+// on daylight saving, and a scheduler that computed it in UTC would send a
+// monthly report on the wrong day twice a year.
+//
+// A firing that falls in a gap when the clocks go forward is normalised by
+// Go's time.Date rather than skipped: an 02:30 daily job runs at 03:30 on that
+// one morning. Skipping it instead would mean a report that silently does not
+// arrive, which is the worse of the two surprises.
+func (e *Expression) Next(after time.Time, loc *time.Location) (time.Time, bool) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := after.In(loc)
+	year, month, day := local.Date()
+
+	hours, minutes := e.Hours(), e.Minutes()
+	for range LookaheadDays {
+		// Midnight is reconstructed each iteration rather than advanced by 24
+		// hours, so a day that is 23 or 25 hours long does not drift the walk.
+		start := time.Date(year, month, day, 0, 0, 0, 0, loc)
+		if e.MatchesDay(start) {
+			for _, hour := range hours {
+				for _, minute := range minutes {
+					at := time.Date(year, month, day, hour, minute, 0, 0, loc)
+					if at.After(after) {
+						return at, true
+					}
+				}
+			}
+		}
+		year, month, day = start.Year(), start.Month(), start.Day()+1
+	}
+	return time.Time{}, false
+}
+
+func sortedKeys(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for value := range set {
+		out = append(out, value)
+	}
+	sort.Ints(out)
+	return out
 }

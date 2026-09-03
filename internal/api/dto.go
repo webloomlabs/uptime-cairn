@@ -1696,3 +1696,96 @@ func toBrandProfileJSON(p model.BrandProfile) brandProfileJSON {
 		UpdatedAt:       p.UpdatedAt,
 	}
 }
+
+type reportScheduleDeliveryJSON struct {
+	Type                  string   `json:"type"`
+	Recipients            []string `json:"recipients,omitempty"`
+	URL                   *string  `json:"url,omitempty"`
+	NotificationChannelID *string  `json:"notification_channel_id"`
+	Formats               []string `json:"formats"`
+}
+
+type reportScheduleJSON struct {
+	ID               string                       `json:"id"`
+	ReportTemplateID string                       `json:"report_template_id"`
+	Name             string                       `json:"name"`
+	Enabled          bool                         `json:"enabled"`
+	Frequency        string                       `json:"frequency"`
+	Cron             *string                      `json:"cron"`
+	Timezone         string                       `json:"timezone"`
+	SendAt           string                       `json:"send_at"`
+	Deliveries       []reportScheduleDeliveryJSON `json:"deliveries"`
+	LastRunAt        *time.Time                   `json:"last_run_at"`
+	NextRunAt        *time.Time                   `json:"next_run_at"`
+	CreatedAt        time.Time                    `json:"created_at"`
+	UpdatedAt        time.Time                    `json:"updated_at"`
+}
+
+type reportScheduleDeliveryWrite struct {
+	Type                  string   `json:"type"`
+	Recipients            []string `json:"recipients"`
+	URL                   *string  `json:"url"`
+	NotificationChannelID *string  `json:"notification_channel_id"`
+	Formats               []string `json:"formats"`
+
+	// S3 is accepted by the shape and refused by the handler while the SigV4
+	// client does not exist. Declared rather than omitted so that a request
+	// carrying one gets a validation error naming the reason, instead of a body
+	// silently missing a field it thought it sent.
+	S3 json.RawMessage `json:"s3"`
+}
+
+type reportScheduleWrite struct {
+	ReportTemplateID *string                        `json:"report_template_id"`
+	Name             *string                        `json:"name"`
+	Enabled          *bool                          `json:"enabled"`
+	Frequency        *string                        `json:"frequency"`
+	Cron             *string                        `json:"cron"`
+	Timezone         *string                        `json:"timezone"`
+	SendAt           *string                        `json:"send_at"`
+	Deliveries       *[]reportScheduleDeliveryWrite `json:"deliveries"`
+}
+
+func toReportScheduleJSON(s model.ReportSchedule, targets []model.ReportScheduleDelivery) reportScheduleJSON {
+	out := reportScheduleJSON{
+		ID:               s.ID.String(),
+		ReportTemplateID: s.ReportTemplateID.String(),
+		Name:             s.Name,
+		Enabled:          s.Enabled,
+		Frequency:        s.Frequency,
+		Cron:             optional(s.Cron),
+		Timezone:         s.Timezone,
+		SendAt:           s.SendAt,
+		Deliveries:       []reportScheduleDeliveryJSON{},
+		LastRunAt:        s.LastRunAt,
+		NextRunAt:        s.NextRunAt,
+		CreatedAt:        s.CreatedAt,
+		UpdatedAt:        s.UpdatedAt,
+	}
+
+	for _, target := range targets {
+		item := reportScheduleDeliveryJSON{
+			Type:    target.Type,
+			Formats: orEmptyStrings(target.Formats),
+		}
+		if target.NotificationChannelID != nil {
+			id := target.NotificationChannelID.String()
+			item.NotificationChannelID = &id
+		}
+		// Only the non-secret half is ever unpacked for the wire, which is the
+		// point of the split: there is no credential in Config to leak.
+		var config struct {
+			Recipients []string `json:"recipients"`
+			URL        string   `json:"url"`
+		}
+		if len(target.Config) > 0 {
+			_ = json.Unmarshal(target.Config, &config)
+		}
+		item.Recipients = config.Recipients
+		if config.URL != "" {
+			item.URL = &config.URL
+		}
+		out.Deliveries = append(out.Deliveries, item)
+	}
+	return out
+}
