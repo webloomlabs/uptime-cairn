@@ -203,13 +203,40 @@ func (s *Store) ListBrandProfiles(ctx context.Context, after *Cursor, limit int)
 	return out, hasMore, nil
 }
 
-// DeleteBrandProfile removes a profile. Templates referencing it are not
-// blocked and not deleted: the foreign key is ON DELETE SET NULL, so they fall
-// back to the default, which is the behaviour a template with no profile already
-// has. Blocking the delete instead would make an unused-looking profile
-// undeletable for a reason the operator cannot see from the branding screen.
+// DeleteBrandProfile removes a profile, and **refuses while a live template
+// still names it**.
+//
+// The foreign key would allow it — `ON DELETE SET NULL`, so the template would
+// fall back to the default and still render. An earlier cut of this function
+// took that route on the grounds that an undeletable-looking profile is worse
+// than a silent fallback. The frozen spec says otherwise on the operation
+// itself, and its reasoning is the better one: *a report that silently loses its
+// client's branding on the first of the month is worse than a refused delete.*
+// The fallback is invisible until an agency's client receives an unbranded
+// document; the refusal happens while somebody is looking at the screen.
+//
+// Soft-deleted templates do not count. They render nothing, so a profile held
+// hostage by a definition the operator already deleted would be undeletable for
+// a reason they cannot see anywhere.
 func (s *Store) DeleteBrandProfile(ctx context.Context, id model.ID) error {
-	result, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var referencing int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM report_templates
+		WHERE brand_profile_id = ? AND org_id = ? AND deleted_at IS NULL`,
+		id[:], model.SentinelOrgID[:]).Scan(&referencing); err != nil {
+		return fmt.Errorf("check brand profile references: %w", err)
+	}
+	if referencing > 0 {
+		return ErrConflict
+	}
+
+	result, err := tx.ExecContext(ctx,
 		`DELETE FROM brand_profiles WHERE id = ? AND org_id = ?`, id[:], model.SentinelOrgID[:])
 	if err != nil {
 		return fmt.Errorf("delete brand profile: %w", err)
@@ -217,7 +244,21 @@ func (s *Store) DeleteBrandProfile(ctx context.Context, id model.ID) error {
 	if affected, _ := result.RowsAffected(); affected == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
+}
+
+// TemplatesUsingBrandProfile counts the live templates naming a profile, so the
+// refusal above can say how many rather than only that there were some.
+func (s *Store) TemplatesUsingBrandProfile(ctx context.Context, id model.ID) (int, error) {
+	var count int
+	err := s.ro.QueryRowContext(ctx, `
+		SELECT count(*) FROM report_templates
+		WHERE brand_profile_id = ? AND org_id = ? AND deleted_at IS NULL`,
+		id[:], model.SentinelOrgID[:]).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count templates using brand profile: %w", err)
+	}
+	return count, nil
 }
 
 func brandArgs(p model.BrandProfile) []any {

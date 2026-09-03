@@ -41,7 +41,7 @@ func HTML(doc report.Document, brand Brand) ([]byte, error) {
 	// a disclosure with no code defect behind it.
 	b.WriteString(`<meta name="robots" content="noindex, nofollow">` + "\n")
 	fmt.Fprintf(&b, "<title>%s</title>\n", html.EscapeString(documentTitle(elements)))
-	b.WriteString("<style>\n" + reportCSS + "</style>\n</head>\n<body>\n<main class=\"report\">\n")
+	b.WriteString("<style>\n" + reportCSS + brandCSS(brand) + "</style>\n</head>\n<body>\n<main class=\"report\">\n")
 
 	for _, el := range elements {
 		writeElement(&b, el)
@@ -49,6 +49,22 @@ func HTML(doc report.Document, brand Brand) ([]byte, error) {
 
 	b.WriteString("</main>\n</body>\n</html>\n")
 	return []byte(b.String()), nil
+}
+
+// brandCSS recolours the two marks brandcolor.go names, and nothing else.
+//
+// Appended rather than interpolated into reportCSS, so an unbranded report is
+// byte-identical to what it was before brand colours existed — which keeps the
+// golden file a record of the default rather than of the last profile somebody
+// tested with. The value is re-rendered from a parsed Color rather than
+// interpolated from the stored string: a profile row written by hand cannot then
+// close the declaration and inject a rule of its own.
+func brandCSS(brand Brand) string {
+	if _, ok := ParseHexColor(brand.PrimaryColor); !ok {
+		return ""
+	}
+	return ".cover { border-bottom-color: " + brand.coverAccent().Hex() + "; }\n" +
+		".figures > div { border-left-color: " + brand.figureAccent().Hex() + "; }\n"
 }
 
 func documentTitle(elements []Element) string {

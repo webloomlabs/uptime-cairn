@@ -100,6 +100,10 @@ type IdentityStore interface {
 // reach a backend-specific method by accident.
 type Store interface {
 	MonitorStore
+	ReportStore
+	ReportScheduleStore
+	BrandStore
+	ExpiryStore
 	IdentityStore
 	ChannelStore
 	MaintenanceStore
@@ -158,6 +162,21 @@ type Server struct {
 	// call site checks — a status page must still work on an install with no
 	// mail relay, it just cannot promise anybody anything.
 	relay SubscriberRelay
+
+	// reports queues a generation onto the bounded worker pool, and artifacts is
+	// the local read path for what it produced. Both nil in a build that is not
+	// running reporting, which /generate reports as 501 rather than queueing a
+	// run into a void — a row stuck at `queued` forever reads as a hung report
+	// rather than as a missing feature.
+	//
+	// reportZone is the zone an ad-hoc run's boundaries are cut in. A schedule
+	// carries its own, defaulted from the instance zone at write time so that
+	// changing the instance zone does not silently move the boundaries of a
+	// report somebody has been receiving for a year; a "run now" has no schedule
+	// to take one from, so it takes this.
+	reports    Reporter
+	artifacts  ArtifactFiles
+	reportZone *time.Location
 
 	// imports is the store the Kuma importer writes through, and running is what
 	// keeps two imports from both deciding the same name was free. Nil in a
@@ -251,6 +270,16 @@ func (s *Server) WithOutbound(d Redeliverer) *Server {
 // Separate from Store even though it is the same object, because the importer
 // declares its own interface and handing it this one is what proves the two
 // agree — the CLI constructs the same Target from the same concrete store.
+// WithReporting attaches the report worker pool and the artifact directory.
+//
+// Both together, because a queue with no read path produces artifacts nobody can
+// download and a read path with no queue has nothing to serve. The zone is the
+// instance's, and is what an ad-hoc run's period boundaries are cut in.
+func (s *Server) WithReporting(reports Reporter, files ArtifactFiles, zone *time.Location) *Server {
+	s.reports, s.artifacts, s.reportZone = reports, files, zone
+	return s
+}
+
 func (s *Server) WithImports(store kuma.Store) *Server {
 	s.imports = store
 	return s
@@ -429,6 +458,37 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /api/v1/users/me", s.getCurrentUser)
 	authed.HandleFunc("PATCH /api/v1/users/me", s.updateCurrentUser)
 	authed.HandleFunc("GET /api/v1/users/{userId}", s.require(auth.ScopeUsersRead, s.getUser))
+
+	// Reporting. The scopes are the ones the spec names on each operation.
+	authed.HandleFunc("GET /api/v1/report-templates", s.require(auth.ScopeReportsRead, s.listReportTemplates))
+	authed.HandleFunc("POST /api/v1/report-templates", s.require(auth.ScopeReportsWrite, s.createReportTemplate))
+	authed.HandleFunc("GET /api/v1/report-templates/{reportTemplateId}", s.require(auth.ScopeReportsRead, s.getReportTemplate))
+	authed.HandleFunc("PATCH /api/v1/report-templates/{reportTemplateId}", s.require(auth.ScopeReportsWrite, s.updateReportTemplate))
+	authed.HandleFunc("DELETE /api/v1/report-templates/{reportTemplateId}", s.require(auth.ScopeReportsWrite, s.deleteReportTemplate))
+	authed.HandleFunc("POST /api/v1/report-templates/{reportTemplateId}/generate", s.require(auth.ScopeReportsWrite, s.generateReport))
+
+	authed.HandleFunc("GET /api/v1/brand-profiles", s.require(auth.ScopeBrandProfilesRead, s.listBrandProfiles))
+	authed.HandleFunc("POST /api/v1/brand-profiles", s.require(auth.ScopeBrandProfilesWrite, s.createBrandProfile))
+	authed.HandleFunc("GET /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesRead, s.getBrandProfile))
+	authed.HandleFunc("PATCH /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesWrite, s.updateBrandProfile))
+	authed.HandleFunc("DELETE /api/v1/brand-profiles/{brandProfileId}", s.require(auth.ScopeBrandProfilesWrite, s.deleteBrandProfile))
+	authed.HandleFunc("PUT /api/v1/brand-profiles/{brandProfileId}/logo", s.require(auth.ScopeBrandProfilesWrite, s.uploadBrandProfileLogo))
+
+	authed.HandleFunc("GET /api/v1/report-schedules", s.require(auth.ScopeReportsRead, s.listReportSchedules))
+	authed.HandleFunc("POST /api/v1/report-schedules", s.require(auth.ScopeReportsWrite, s.createReportSchedule))
+	authed.HandleFunc("GET /api/v1/report-schedules/{reportScheduleId}", s.require(auth.ScopeReportsRead, s.getReportSchedule))
+	authed.HandleFunc("PATCH /api/v1/report-schedules/{reportScheduleId}", s.require(auth.ScopeReportsWrite, s.updateReportSchedule))
+	authed.HandleFunc("DELETE /api/v1/report-schedules/{reportScheduleId}", s.require(auth.ScopeReportsWrite, s.deleteReportSchedule))
+
+	authed.HandleFunc("GET /api/v1/report-runs", s.require(auth.ScopeReportsRead, s.listReportRuns))
+	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}", s.require(auth.ScopeReportsRead, s.getReportRun))
+	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}/download", s.require(auth.ScopeReportsRead, s.downloadReportArtifact))
+	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}/artifacts/{artifactId}", s.require(auth.ScopeReportsRead, s.downloadReportArtifactByID))
+
+	// monitors:read rather than reports:read, which is the spec's choice: the
+	// rows are facts about monitors, and a key that can see a monitor can
+	// already read its certificate one at a time.
+	authed.HandleFunc("GET /api/v1/expiries", s.require(auth.ScopeMonitorsRead, s.listUpcomingExpiries))
 
 	authed.HandleFunc("GET /api/v1/settings", s.require(auth.ScopeSettingsRead, s.getSettings))
 	authed.HandleFunc("PATCH /api/v1/settings", s.require(auth.ScopeSettingsWrite, s.updateSettings))

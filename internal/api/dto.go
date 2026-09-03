@@ -30,6 +30,7 @@ type monitorJSON struct {
 	GroupID                *string         `json:"group_id"`
 	ParentMonitorID        *string         `json:"parent_monitor_id"`
 	ProbeID                *string         `json:"probe_id"`
+	SLOTargetPercent       *float64        `json:"slo_target_percent"`
 	TagIDs                 []string        `json:"tag_ids"`
 	NotificationChannelIDs []string        `json:"notification_channel_ids"`
 	NotifyOnRecovery       bool            `json:"notify_on_recovery"`
@@ -148,6 +149,11 @@ type monitorWrite struct {
 	// that needs this — the pin is placement rather than checking, so it is a
 	// field on the monitor rather than a key inside a type-specific config.
 	ProbeID *string `json:"probe_id"`
+
+	// SLOTargetPercent is the uptime target reporting resolves against. Null and
+	// absent are the same thing here — no target — because a create has nothing
+	// to clear.
+	SLOTargetPercent *float64 `json:"slo_target_percent"`
 
 	// Absent or null leaves the monitor ungrouped and untagged. There is no
 	// PATCH on monitors yet, so the "unset an existing value" case these fields
@@ -323,6 +329,7 @@ func toMonitorJSON(m store.MonitorWithState) monitorJSON {
 		id := m.Monitor.ProbeID.String()
 		out.ProbeID = &id
 	}
+	out.SLOTargetPercent = m.Monitor.SLOTargetPercent
 	out.NotificationChannelIDs = []string{}
 	out.TagIDs = []string{}
 	return out
@@ -499,6 +506,10 @@ type groupJSON struct {
 	ParentGroupID *string `json:"parent_group_id"`
 	MonitorCount  int     `json:"monitor_count"`
 
+	// SLOTargetPercent is the target a monitor in this group inherits when it
+	// has none of its own. Read by reporting and by nothing else in this phase.
+	SLOTargetPercent *float64 `json:"slo_target_percent"`
+
 	// Status is the worst among the group's monitors, its children's included.
 	// Null when it holds none — which is a different statement from "up", and
 	// rendering it green would be the dashboard inventing health.
@@ -518,15 +529,19 @@ type groupWrite struct {
 	// top level. Nothing else in this file needs the distinction, so nothing
 	// else pays for it.
 	ParentGroupID json.RawMessage `json:"parent_group_id"`
+
+	// Raw for the same reason: a target somebody set has to be removable.
+	SLOTargetPercent json.RawMessage `json:"slo_target_percent"`
 }
 
 func toGroupJSON(g model.GroupSummary) groupJSON {
 	out := groupJSON{
-		ID:           g.Group.ID.String(),
-		Name:         g.Group.Name,
-		MonitorCount: g.MonitorCount,
-		CreatedAt:    g.Group.CreatedAt,
-		UpdatedAt:    g.Group.UpdatedAt,
+		ID:               g.Group.ID.String(),
+		Name:             g.Group.Name,
+		MonitorCount:     g.MonitorCount,
+		SLOTargetPercent: g.Group.SLOTargetPercent,
+		CreatedAt:        g.Group.CreatedAt,
+		UpdatedAt:        g.Group.UpdatedAt,
 	}
 	if g.Group.Description != "" {
 		out.Description = &g.Group.Description
@@ -819,6 +834,11 @@ type monitorUpdate struct {
 	// value are three different instructions — leave the pin, unpin, and repin —
 	// and a *string collapses the first two.
 	ProbeID json.RawMessage `json:"probe_id"`
+
+	// And SLOTargetPercent for the same reason again: **removing a target has to
+	// be expressible**. A *float64 makes "clear this" indistinguishable from
+	// "leave it", which would let somebody set a target they could never undo.
+	SLOTargetPercent json.RawMessage `json:"slo_target_percent"`
 
 	TagIDs                 *[]string `json:"tag_ids"`
 	NotificationChannelIDs *[]string `json:"notification_channel_ids"`
@@ -1392,4 +1412,454 @@ type overviewCounts struct {
 	Pending     int `json:"pending"`
 	Paused      int `json:"paused"`
 	Maintenance int `json:"maintenance"`
+}
+
+// --- reporting --------------------------------------------------------------
+//
+// Hand-written against the frozen spec, like everything above it. The one shape
+// worth reading twice is reportArtifactJSON: `sha256` and `size_bytes` survive
+// the file, so an expired artifact still answers "what was this document" after
+// the bytes are gone — which is what makes the 410 a useful answer rather than a
+// polite 404.
+
+type reportScopeJSON struct {
+	MonitorIDs []string `json:"monitor_ids,omitempty"`
+	GroupIDs   []string `json:"group_ids,omitempty"`
+	TagIDs     []string `json:"tag_ids,omitempty"`
+	IncidentID *string  `json:"incident_id,omitempty"`
+}
+
+type reportTemplateJSON struct {
+	ID                  string                `json:"id"`
+	Name                string                `json:"name"`
+	Description         *string               `json:"description"`
+	Type                string                `json:"type"`
+	Scope               reportScopeJSON       `json:"scope"`
+	Period              string                `json:"period"`
+	PeriodStyle         string                `json:"period_style"`
+	SLATarget           *float64              `json:"sla_target"`
+	ResponseTimeTarget  *int                  `json:"response_time_target_ms"`
+	MaintenanceHandling string                `json:"maintenance_handling"`
+	BrandProfileID      *string               `json:"brand_profile_id"`
+	Comparison          *reportComparisonJSON `json:"comparison"`
+	Sections            []string              `json:"sections"`
+	Formats             []string              `json:"formats"`
+	CreatedAt           time.Time             `json:"created_at"`
+	UpdatedAt           time.Time             `json:"updated_at"`
+}
+
+// reportComparisonJSON configures a comparative report.
+//
+// Region against region is deliberately absent from the mode enum rather than
+// present and empty: the data does not exist until Phase 4, and a fourth mode
+// returning nothing would read as a broken feature rather than an unbuilt one.
+type reportComparisonJSON struct {
+	Mode       string   `json:"mode"`
+	MonitorIDs []string `json:"monitor_ids"`
+	GroupIDs   []string `json:"group_ids"`
+}
+
+// reportTemplateWrite is a PATCH body, and it has to tell three states apart:
+// absent (leave it), null (clear it), and a value (set it).
+//
+// The clearable fields are json.RawMessage rather than **T, because
+// **encoding/json flattens the first two**: unmarshalling `null` into a
+// **float64 sets the outer pointer to nil, exactly as an absent field does. The
+// double pointer looks like it works, compiles, and quietly makes "remove this
+// SLA target" impossible — an operator unable to undo their own change. A test
+// that patches a null and reads the value back is what found it.
+type reportTemplateWrite struct {
+	Name        *string          `json:"name"`
+	Description *string          `json:"description"`
+	Type        *string          `json:"type"`
+	Scope       *reportScopeJSON `json:"scope"`
+	Period      *string          `json:"period"`
+	PeriodStyle *string          `json:"period_style"`
+
+	SLATarget            json.RawMessage `json:"sla_target"`
+	ResponseTimeTargetMS json.RawMessage `json:"response_time_target_ms"`
+	BrandProfileID       json.RawMessage `json:"brand_profile_id"`
+
+	MaintenanceHandling *string   `json:"maintenance_handling"`
+	Sections            *[]string `json:"sections"`
+	Formats             *[]string `json:"formats"`
+
+	// Clearable for the same reason the targets are: switching a template away
+	// from `comparative` should be able to remove the comparison rather than
+	// leave a configuration nothing reads.
+	Comparison json.RawMessage `json:"comparison"`
+}
+
+// clearing reports whether a field was sent as an explicit null. An absent field
+// is a nil RawMessage and is neither present nor clearing.
+func clearing(raw json.RawMessage) bool {
+	return len(raw) > 0 && string(trimJSONSpace(raw)) == "null"
+}
+
+func trimJSONSpace(b []byte) []byte {
+	start, end := 0, len(b)
+	for start < end && isJSONSpace(b[start]) {
+		start++
+	}
+	for end > start && isJSONSpace(b[end-1]) {
+		end--
+	}
+	return b[start:end]
+}
+
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+type reportGenerateRequest struct {
+	PeriodStart *time.Time `json:"period_start"`
+	PeriodEnd   *time.Time `json:"period_end"`
+	Formats     []string   `json:"formats"`
+	Deliver     bool       `json:"deliver"`
+}
+
+type reportArtifactJSON struct {
+	ID          string     `json:"id"`
+	Format      string     `json:"format"`
+	State       string     `json:"state"`
+	SizeBytes   *int64     `json:"size_bytes"`
+	SHA256      *string    `json:"sha256"`
+	Error       *string    `json:"error"`
+	DownloadURL *string    `json:"download_url"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type reportDeliveryJSON struct {
+	Type        string     `json:"type"`
+	Outcome     string     `json:"outcome"`
+	Error       *string    `json:"error"`
+	Attempts    int        `json:"attempts"`
+	DeliveredAt *time.Time `json:"delivered_at"`
+}
+
+type reportRunJSON struct {
+	ID               string               `json:"id"`
+	ReportTemplateID string               `json:"report_template_id"`
+	ReportScheduleID *string              `json:"report_schedule_id"`
+	State            string               `json:"state"`
+	PeriodStart      time.Time            `json:"period_start"`
+	PeriodEnd        time.Time            `json:"period_end"`
+	Timezone         string               `json:"timezone"`
+	Artifacts        []reportArtifactJSON `json:"artifacts"`
+	Deliveries       []reportDeliveryJSON `json:"deliveries"`
+	Late             bool                 `json:"late"`
+	Error            *string              `json:"error"`
+	StartedAt        *time.Time           `json:"started_at"`
+	FinishedAt       *time.Time           `json:"finished_at"`
+	CreatedAt        time.Time            `json:"created_at"`
+}
+
+func toReportTemplateJSON(t model.ReportTemplate) reportTemplateJSON {
+	out := reportTemplateJSON{
+		ID:                  t.ID.String(),
+		Name:                t.Name,
+		Description:         optional(t.Description),
+		Type:                t.Type,
+		Period:              t.Period,
+		PeriodStyle:         t.PeriodStyle,
+		SLATarget:           t.SLATarget,
+		ResponseTimeTarget:  t.ResponseTimeTargetMS,
+		MaintenanceHandling: t.MaintenanceHandling,
+		// Empty arrays rather than null: a client mapping over them should not
+		// have to special-case a template that selects nothing yet.
+		Sections:  orEmptyStrings(t.Sections),
+		Formats:   orEmptyStrings(t.Formats),
+		CreatedAt: t.CreatedAt,
+		UpdatedAt: t.UpdatedAt,
+	}
+	out.Scope = reportScopeJSON{
+		MonitorIDs: idsToStrings(t.Scope.MonitorIDs),
+		GroupIDs:   idsToStrings(t.Scope.GroupIDs),
+		TagIDs:     idsToStrings(t.Scope.TagIDs),
+	}
+	if t.Scope.IncidentID != nil {
+		id := t.Scope.IncidentID.String()
+		out.Scope.IncidentID = &id
+	}
+	if t.BrandProfileID != nil {
+		id := t.BrandProfileID.String()
+		out.BrandProfileID = &id
+	}
+	if t.Comparison != nil {
+		out.Comparison = &reportComparisonJSON{
+			Mode:       t.Comparison.Mode,
+			MonitorIDs: idsToStrings(t.Comparison.MonitorIDs),
+			GroupIDs:   idsToStrings(t.Comparison.GroupIDs),
+		}
+	}
+	return out
+}
+
+func reportRunToJSON(run model.ReportRun, artifacts []model.ReportArtifact, deliveries []model.ReportDelivery) reportRunJSON {
+	out := reportRunJSON{
+		ID:               run.ID.String(),
+		ReportTemplateID: run.ReportTemplateID.String(),
+		State:            run.State,
+		PeriodStart:      run.PeriodStart,
+		PeriodEnd:        run.PeriodEnd,
+		Timezone:         run.Timezone,
+		Artifacts:        []reportArtifactJSON{},
+		Deliveries:       []reportDeliveryJSON{},
+		Late:             run.Late,
+		Error:            optional(run.Error),
+		StartedAt:        run.StartedAt,
+		FinishedAt:       run.FinishedAt,
+		CreatedAt:        run.CreatedAt,
+	}
+	if run.ReportScheduleID != nil {
+		id := run.ReportScheduleID.String()
+		out.ReportScheduleID = &id
+	}
+
+	for _, a := range artifacts {
+		item := reportArtifactJSON{
+			ID:        a.ID.String(),
+			Format:    a.Format,
+			State:     a.State,
+			SHA256:    optional(a.SHA256),
+			Error:     optional(a.Error),
+			ExpiresAt: a.ExpiresAt,
+			CreatedAt: a.CreatedAt,
+		}
+		if a.SizeBytes > 0 {
+			size := a.SizeBytes
+			item.SizeBytes = &size
+		}
+		// Offered only where there is something to fetch. A download link on an
+		// expired or failed artifact is a link that answers with a problem
+		// document, which is a worse way to learn the file is gone than not
+		// being offered one.
+		if a.State == model.ArtifactRendered {
+			url := "/api/v1/report-runs/" + run.ID.String() + "/artifacts/" + a.ID.String()
+			item.DownloadURL = &url
+		}
+		out.Artifacts = append(out.Artifacts, item)
+	}
+
+	// One row per attempt in the store; the wire shape counts attempts per
+	// target, because "we tried three times and the third worked" is one
+	// delivery with three attempts rather than three deliveries.
+	byTarget := map[string]int{}
+	for _, d := range deliveries {
+		key := d.Type + "|" + d.Target
+		if at, seen := byTarget[key]; seen {
+			existing := out.Deliveries[at]
+			existing.Attempts = max(existing.Attempts, d.Attempt)
+			existing.Outcome = d.Outcome
+			existing.Error = optional(d.Error)
+			existing.DeliveredAt = d.DeliveredAt
+			out.Deliveries[at] = existing
+			continue
+		}
+		byTarget[key] = len(out.Deliveries)
+		out.Deliveries = append(out.Deliveries, reportDeliveryJSON{
+			Type:        d.Type,
+			Outcome:     d.Outcome,
+			Error:       optional(d.Error),
+			Attempts:    d.Attempt,
+			DeliveredAt: d.DeliveredAt,
+		})
+	}
+	return out
+}
+
+func idsToStrings(ids []model.ID) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
+func orEmptyStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
+type brandProfileJSON struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	CompanyName  *string `json:"company_name"`
+	PrimaryColor *string `json:"primary_color"`
+	AccentColor  *string `json:"accent_color"`
+	FooterText   *string `json:"footer_text"`
+	CoverText    *string `json:"cover_text"`
+
+	HidePoweredBy bool `json:"hide_powered_by"`
+
+	// LogoURL is null until the spec grows an operation that serves the bytes.
+	// PUT .../logo exists; there is no GET beside it, so a URL here would name an
+	// endpoint that answers 405 — worse than an honest null, and not something a
+	// handler may invent (AGENTS.md rule 4).
+	LogoURL         *string `json:"logo_url"`
+	LogoContentType *string `json:"logo_content_type"`
+
+	IsDefault bool      `json:"is_default"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// brandProfileWrite is a PATCH body. Every field is a pointer so that an absent
+// one is left alone; the two colours take "" as "clear it", since an empty
+// string is not a valid colour and so cannot mean anything else.
+type brandProfileWrite struct {
+	Name          *string `json:"name"`
+	CompanyName   *string `json:"company_name"`
+	PrimaryColor  *string `json:"primary_color"`
+	AccentColor   *string `json:"accent_color"`
+	FooterText    *string `json:"footer_text"`
+	CoverText     *string `json:"cover_text"`
+	HidePoweredBy *bool   `json:"hide_powered_by"`
+	IsDefault     *bool   `json:"is_default"`
+}
+
+func toBrandProfileJSON(p model.BrandProfile) brandProfileJSON {
+	return brandProfileJSON{
+		ID:              p.ID.String(),
+		Name:            p.Name,
+		CompanyName:     optional(p.CompanyName),
+		PrimaryColor:    optional(p.PrimaryColor),
+		AccentColor:     optional(p.AccentColor),
+		FooterText:      optional(p.FooterText),
+		CoverText:       optional(p.CoverText),
+		HidePoweredBy:   p.HidePoweredBy,
+		LogoContentType: optional(p.LogoContentType),
+		IsDefault:       p.IsDefault,
+		CreatedAt:       p.CreatedAt,
+		UpdatedAt:       p.UpdatedAt,
+	}
+}
+
+type reportScheduleDeliveryJSON struct {
+	Type                  string   `json:"type"`
+	Recipients            []string `json:"recipients,omitempty"`
+	URL                   *string  `json:"url,omitempty"`
+	NotificationChannelID *string  `json:"notification_channel_id"`
+	Formats               []string `json:"formats"`
+}
+
+type reportScheduleJSON struct {
+	ID               string                       `json:"id"`
+	ReportTemplateID string                       `json:"report_template_id"`
+	Name             string                       `json:"name"`
+	Enabled          bool                         `json:"enabled"`
+	Frequency        string                       `json:"frequency"`
+	Cron             *string                      `json:"cron"`
+	Timezone         string                       `json:"timezone"`
+	SendAt           string                       `json:"send_at"`
+	Deliveries       []reportScheduleDeliveryJSON `json:"deliveries"`
+	LastRunAt        *time.Time                   `json:"last_run_at"`
+	NextRunAt        *time.Time                   `json:"next_run_at"`
+	CreatedAt        time.Time                    `json:"created_at"`
+	UpdatedAt        time.Time                    `json:"updated_at"`
+}
+
+type reportScheduleDeliveryWrite struct {
+	Type                  string   `json:"type"`
+	Recipients            []string `json:"recipients"`
+	URL                   *string  `json:"url"`
+	NotificationChannelID *string  `json:"notification_channel_id"`
+	Formats               []string `json:"formats"`
+
+	// S3 is accepted by the shape and refused by the handler while the SigV4
+	// client does not exist. Declared rather than omitted so that a request
+	// carrying one gets a validation error naming the reason, instead of a body
+	// silently missing a field it thought it sent.
+	S3 json.RawMessage `json:"s3"`
+}
+
+type reportScheduleWrite struct {
+	ReportTemplateID *string                        `json:"report_template_id"`
+	Name             *string                        `json:"name"`
+	Enabled          *bool                          `json:"enabled"`
+	Frequency        *string                        `json:"frequency"`
+	Cron             *string                        `json:"cron"`
+	Timezone         *string                        `json:"timezone"`
+	SendAt           *string                        `json:"send_at"`
+	Deliveries       *[]reportScheduleDeliveryWrite `json:"deliveries"`
+}
+
+func toReportScheduleJSON(s model.ReportSchedule, targets []model.ReportScheduleDelivery) reportScheduleJSON {
+	out := reportScheduleJSON{
+		ID:               s.ID.String(),
+		ReportTemplateID: s.ReportTemplateID.String(),
+		Name:             s.Name,
+		Enabled:          s.Enabled,
+		Frequency:        s.Frequency,
+		Cron:             optional(s.Cron),
+		Timezone:         s.Timezone,
+		SendAt:           s.SendAt,
+		Deliveries:       []reportScheduleDeliveryJSON{},
+		LastRunAt:        s.LastRunAt,
+		NextRunAt:        s.NextRunAt,
+		CreatedAt:        s.CreatedAt,
+		UpdatedAt:        s.UpdatedAt,
+	}
+
+	for _, target := range targets {
+		item := reportScheduleDeliveryJSON{
+			Type:    target.Type,
+			Formats: orEmptyStrings(target.Formats),
+		}
+		if target.NotificationChannelID != nil {
+			id := target.NotificationChannelID.String()
+			item.NotificationChannelID = &id
+		}
+		// Only the non-secret half is ever unpacked for the wire, which is the
+		// point of the split: there is no credential in Config to leak.
+		var config struct {
+			Recipients []string `json:"recipients"`
+			URL        string   `json:"url"`
+		}
+		if len(target.Config) > 0 {
+			_ = json.Unmarshal(target.Config, &config)
+		}
+		item.Recipients = config.Recipients
+		if config.URL != "" {
+			item.URL = &config.URL
+		}
+		out.Deliveries = append(out.Deliveries, item)
+	}
+	return out
+}
+
+// upcomingExpiryJSON is one row of the expiry calendar.
+//
+// `days_remaining` is signed rather than floored at zero, which is the one
+// decision on this shape worth stating: something that expired eleven days ago
+// reports −11, because that is the row somebody opened the page to find and
+// flooring it would file it beside "expires today".
+type upcomingExpiryJSON struct {
+	Kind          string    `json:"kind"`
+	MonitorID     string    `json:"monitor_id"`
+	MonitorName   string    `json:"monitor_name"`
+	Subject       *string   `json:"subject"`
+	Issuer        *string   `json:"issuer"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	DaysRemaining int       `json:"days_remaining"`
+	ObservedAt    time.Time `json:"observed_at"`
+}
+
+func toUpcomingExpiryJSON(e model.UpcomingExpiry) upcomingExpiryJSON {
+	return upcomingExpiryJSON{
+		Kind:          e.Kind,
+		MonitorID:     e.MonitorID.String(),
+		MonitorName:   e.MonitorName,
+		Subject:       optional(e.Subject),
+		Issuer:        optional(e.Issuer),
+		ExpiresAt:     e.ExpiresAt,
+		DaysRemaining: e.DaysRemaining,
+		ObservedAt:    e.ObservedAt,
+	}
 }

@@ -58,7 +58,23 @@ type RetentionSettings struct {
 	Rollup1hDays        *int `json:"rollup_1h_days,omitempty"`
 	Rollup1dDays        *int `json:"rollup_1d_days,omitempty"`
 	WebhookDeliveryDays *int `json:"webhook_delivery_days,omitempty"`
+
+	// ReportArtifactDays is how long a rendered report's bytes are kept, and it
+	// is **deliberately not a tier**. ADR-008 item 6: an artifact is expected to
+	// outlive the data it was computed from — that is the whole point of keeping
+	// one — so the coarser-outlives-finer rule the tiers answer to does not
+	// apply and must not be extended to it. Zero keeps artifacts indefinitely,
+	// the same convention as every field above.
+	//
+	// Retention reclaims the bytes and keeps the row as a tombstone, so an
+	// expired artifact answers 410 rather than 404.
+	ReportArtifactDays *int `json:"report_artifact_days,omitempty"`
 }
+
+// DefaultReportArtifactDays is a year: long enough that last year's SLA report
+// is still downloadable during this year's contract review, which is when
+// somebody actually goes looking for one.
+const DefaultReportArtifactDays = 365
 
 // SMTPSettings is the instance-wide mail relay.
 type SMTPSettings struct {

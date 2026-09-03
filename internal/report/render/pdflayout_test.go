@@ -20,7 +20,7 @@ import (
 // belongs in the bottom margin, and the margin invariant below would have to
 // make an exception for them that could hide a real overflow.
 func layoutOf(elements []Element) *PDF {
-	return flow(elements, testFamily()).pdf
+	return flow(elements, testFamily(), Brand{}).pdf
 }
 
 func longTable(rows int) Table {

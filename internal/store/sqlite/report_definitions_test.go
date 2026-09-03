@@ -192,10 +192,12 @@ func TestTheLogoIsNotCarriedOnTheProfileRead(t *testing.T) {
 	}
 }
 
-// Deleting a profile does not block on the templates using it, and does not take
-// them with it: they fall back to the default, which is the behaviour a template
-// with no profile already has.
-func TestDeletingAProfileLeavesItsTemplatesAlone(t *testing.T) {
+// **Deleting a profile is refused while a live template names it.** The
+// foreign key would allow it and let the template fall back to the default, and
+// an earlier cut did exactly that — but the fallback is invisible until an
+// agency's client receives an unbranded document, whereas the refusal happens
+// while somebody is looking at the screen.
+func TestDeletingAProfileInUseIsRefused(t *testing.T) {
 	t.Parallel()
 
 	s := open(t)
@@ -210,16 +212,44 @@ func TestDeletingAProfileLeavesItsTemplatesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DeleteBrandProfile(t.Context(), p.ID); err != nil {
-		t.Fatalf("delete profile: %v", err)
+	if err := s.DeleteBrandProfile(t.Context(), p.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("delete = %v, want ErrConflict", err)
+	}
+	if _, err := s.GetBrandProfile(t.Context(), p.ID); err != nil {
+		t.Errorf("the profile was removed despite the refusal: %v", err)
 	}
 
-	got, err := s.GetReportTemplate(t.Context(), tpl.ID)
+	count, err := s.TemplatesUsingBrandProfile(t.Context(), p.ID)
 	if err != nil {
-		t.Fatalf("the template went with the profile: %v", err)
+		t.Fatal(err)
 	}
-	if got.BrandProfileID != nil {
-		t.Error("the template still references a profile that no longer exists")
+	if count != 1 {
+		t.Errorf("templates using = %d, want 1 so the refusal can say how many", count)
+	}
+}
+
+// A soft-deleted template does not hold a profile hostage. It renders nothing,
+// so refusing on its behalf would make the profile undeletable for a reason the
+// operator cannot see anywhere.
+func TestASoftDeletedTemplateDoesNotBlockItsProfile(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	p := testBrand("Acme", false)
+	if err := s.CreateBrandProfile(t.Context(), p); err != nil {
+		t.Fatal(err)
+	}
+	tpl := testTemplate("Monthly")
+	tpl.BrandProfileID = &p.ID
+	if err := s.CreateReportTemplate(t.Context(), tpl); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteReportTemplate(t.Context(), tpl.ID, deletedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteBrandProfile(t.Context(), p.ID); err != nil {
+		t.Errorf("delete = %v, want success once the template is gone", err)
 	}
 }
 

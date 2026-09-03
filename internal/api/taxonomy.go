@@ -164,6 +164,8 @@ func (s *Server) buildGroup(ctx context.Context, group *model.Group, body groupW
 		}
 	}
 
+	problems = append(problems, applySLOTarget(&group.SLOTargetPercent, body.SLOTargetPercent)...)
+
 	if len(body.ParentGroupID) > 0 {
 		problems = append(problems, s.resolveParentGroup(ctx, group, body.ParentGroupID)...)
 	}

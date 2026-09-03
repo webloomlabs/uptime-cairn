@@ -439,3 +439,50 @@ type ReportDelivery struct {
 	DeliveredAt *time.Time
 	CreatedAt   time.Time
 }
+
+// UpcomingExpiry is one certificate or domain registration approaching its end,
+// as the expiry calendar reports it.
+//
+// A view rather than a table. The rows live in `monitor_certificates` and
+// `monitor_domain_expiry`, which are shaped differently on purpose — a
+// registration has a registrar and a source, and no subject, chain or serial —
+// and this is the one shape they have in common: something expires, on a date,
+// belonging to a monitor.
+//
+// The two are unified here rather than at the schema, because the calendar is
+// the only reader that wants them together. Every other consumer wants one or
+// the other and would have to filter a merged table on every read.
+type UpcomingExpiry struct {
+	// Kind is ExpiryCertificate or ExpiryDomain.
+	Kind string
+
+	MonitorID   ID
+	MonitorName string
+
+	// Subject is the certificate's subject, or the registered domain. Issuer is
+	// the certificate's issuer, or the registrar — the spec's own wording, and
+	// the reason the two columns are shared rather than split: a calendar row
+	// reads "expires on this date, issued by this party", whichever kind it is.
+	Subject string
+	Issuer  string
+
+	ExpiresAt time.Time
+
+	// DaysRemaining is computed against the instant of the request rather than
+	// stored, and it is signed: an expiry that has already passed reports a
+	// negative number rather than zero. "Expired eleven days ago" is the row
+	// somebody most needs to see, and flooring it at zero would file it beside
+	// "expires today".
+	DaysRemaining int
+
+	// ObservedAt is when the probe last confirmed this. A calendar built from a
+	// stale observation is a calendar that can be confidently wrong, so the date
+	// travels with every row.
+	ObservedAt time.Time
+}
+
+// The two kinds of expiry the calendar reports.
+const (
+	ExpiryCertificate = "certificate"
+	ExpiryDomain      = "domain"
+)

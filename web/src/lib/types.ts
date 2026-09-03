@@ -451,3 +451,177 @@ export type PublicStatusPage = {
 	scheduled_maintenance: PublicMaintenanceWindow[];
 	generated_at: string;
 };
+
+/**
+ * Reporting.
+ *
+ * Three things kept apart, and the separation is what makes "re-send last
+ * month's", "regenerate it after we corrected the incident record" and "the PDF
+ * failed but the HTML went out" all expressible: a **template** is the
+ * definition, a **schedule** is when it runs and who receives it, and a **run**
+ * is one execution with the artifacts it produced.
+ */
+
+export type ReportType = 'uptime' | 'sla' | 'post_mortem' | 'comparative' | 'custom';
+export type ReportPeriod = 'day' | 'week' | 'month' | 'quarter' | 'year' | 'custom';
+export type ReportPeriodStyle = 'calendar' | 'rolling';
+export type ReportFormat = 'pdf' | 'html' | 'csv' | 'json';
+export type MaintenanceHandling = 'exclude' | 'count_as_up' | 'count_as_down';
+
+/**
+ * `partial` is a real state and is not collapsible into either neighbour: one
+ * format produced and another not. Rendering it as "succeeded" is how somebody
+ * concludes a delivery went out whole.
+ */
+export type ReportRunState = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
+
+export type ReportScope = {
+	monitor_ids?: string[];
+	group_ids?: string[];
+	tag_ids?: string[];
+	incident_id?: string | null;
+};
+
+export type ReportComparison = {
+	mode: 'previous_period' | 'monitors' | 'groups';
+	monitor_ids?: string[];
+	group_ids?: string[];
+};
+
+export type ReportTemplate = {
+	id: string;
+	name: string;
+	description: string | null;
+	type: ReportType;
+	scope: ReportScope;
+	period: ReportPeriod;
+	period_style: ReportPeriodStyle;
+	sla_target: number | null;
+	response_time_target_ms: number | null;
+	maintenance_handling: MaintenanceHandling;
+	brand_profile_id: string | null;
+	comparison: ReportComparison | null;
+	sections: string[];
+	formats: ReportFormat[];
+	created_at: string;
+	updated_at: string;
+};
+
+/**
+ * `expired` is a tombstone rather than a deletion: the bytes are reclaimed and
+ * the row stays, so a bookmarked link answers "this existed and is gone" instead
+ * of "no such thing". `failed` is one format that did not render while others
+ * did, which is what makes a run `partial`.
+ */
+export type ReportArtifactState = 'rendered' | 'expired' | 'failed';
+
+export type ReportArtifact = {
+	id: string;
+	format: ReportFormat;
+	state: ReportArtifactState;
+	size_bytes: number | null;
+	sha256: string | null;
+	error: string | null;
+	download_url: string | null;
+	expires_at: string | null;
+	created_at: string;
+};
+
+/**
+ * One entry per configured target rather than per attempt: "we tried three times
+ * and the third worked" is one delivery with three attempts, not three
+ * deliveries.
+ *
+ * `skipped` is not a failure and must not be rendered as one — no relay
+ * configured, or nothing rendered in a format this target takes.
+ */
+export type ReportDelivery = {
+	type: 'email' | 'slack' | 'webhook' | 's3';
+	outcome: 'succeeded' | 'failed' | 'skipped';
+	error: string | null;
+	attempts: number;
+	delivered_at: string | null;
+};
+
+export type ReportRun = {
+	id: string;
+	report_template_id: string;
+	report_schedule_id: string | null;
+	state: ReportRunState;
+	period_start: string;
+	period_end: string;
+	/** The zone the boundaries were cut in. A month means different instants in different ones. */
+	timezone: string;
+	artifacts: ReportArtifact[];
+	deliveries: ReportDelivery[];
+	late: boolean;
+	error: string | null;
+	started_at: string | null;
+	finished_at: string | null;
+	created_at: string;
+};
+
+export type ReportScheduleDelivery = {
+	type: 'email' | 'slack' | 'webhook' | 's3';
+	recipients?: string[];
+	notification_channel_id?: string | null;
+	url?: string | null;
+	formats?: ReportFormat[];
+};
+
+export type ReportSchedule = {
+	id: string;
+	report_template_id: string;
+	frequency: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'cron';
+	cron: string | null;
+	timezone: string;
+	send_at: string | null;
+	enabled: boolean;
+	deliveries: ReportScheduleDelivery[];
+	last_run_at: string | null;
+	next_run_at: string | null;
+	created_at: string;
+	updated_at: string;
+};
+
+/**
+ * A brand profile.
+ *
+ * `logo_url` is always null: the field is defined and no operation serves the
+ * bytes, so a URL here would name an endpoint answering 405. The rendered report
+ * embeds the logo directly, which is what makes the file standalone.
+ */
+export type BrandProfile = {
+	id: string;
+	name: string;
+	company_name: string | null;
+	primary_color: string | null;
+	accent_color: string | null;
+	footer_text: string | null;
+	cover_text: string | null;
+	hide_powered_by: boolean;
+	logo_url: string | null;
+	/** Non-null once a logo has been uploaded; the bytes themselves are not served. */
+	logo_content_type: string | null;
+	is_default: boolean;
+	created_at: string;
+	updated_at: string;
+};
+
+/**
+ * One row of the expiry calendar.
+ *
+ * `days_remaining` is **signed**: something that expired eleven days ago reports
+ * −11, because that is the row somebody opened the page to find. Flooring it at
+ * zero would file it beside "expires today".
+ */
+export type UpcomingExpiry = {
+	kind: 'certificate' | 'domain';
+	monitor_id: string;
+	monitor_name: string;
+	subject: string | null;
+	issuer: string | null;
+	expires_at: string;
+	days_remaining: number;
+	observed_at: string;
+};

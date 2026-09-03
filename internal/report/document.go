@@ -51,6 +51,10 @@ type Spec struct {
 	// Tier requested, or "auto". Retention decides what actually answers and the
 	// document says which.
 	Tier string
+
+	// Comparison is what a comparative template asks for. The zero value's empty
+	// Mode means "no comparison", which every other report type has.
+	Comparison ComparisonSpec
 }
 
 // Meta is ReportDocument.meta: everything needed to read the figures correctly.
@@ -66,6 +70,40 @@ type Meta struct {
 	Timezone               string
 
 	Resolution Resolution
+
+	// Brand is the profile as it stood when this run executed, copied onto the
+	// document rather than referenced from it.
+	//
+	// Denormalised deliberately. An artifact is a record of what a client was
+	// sent, and a profile is an editable row: an agency that rebrands in June
+	// would otherwise change what every January report *claims* it said, which
+	// is the one thing an artifact exists to prevent. The copy is what makes the
+	// stored JSON re-renderable years later, after the profile has been edited
+	// or the client has left and the row is gone.
+	//
+	// Nil where the instance has no branding at all, which is the solo user's
+	// case and is not a failure — the report simply has no client name on it.
+	Brand *Brand
+}
+
+// Brand is the resolved branding, in the shape `meta.brand` fixes in the frozen
+// spec and no wider.
+//
+// The accent colour is deliberately not here. The profile carries one, the spec's
+// `meta.brand` does not, and inventing a field would be an API change on a
+// document a BI tool binds to (AGENTS.md rule 4). It is applied at render time
+// from the profile instead, which is where it is used.
+//
+// LogoURL is likewise absent rather than null-and-hopeful: there is no operation
+// in the spec that serves a brand logo's bytes, so a URL here would name an
+// endpoint that answers 405. The rendered HTML and PDF embed the logo directly,
+// which is what actually makes those two artifacts standalone; the JSON is a
+// data document and carries the words, not the picture.
+type Brand struct {
+	CompanyName   string
+	PrimaryColor  string
+	FooterText    string
+	HidePoweredBy bool
 }
 
 // ScopeSummary is what the document covers, resolved at run time.
@@ -114,11 +152,25 @@ type Estate struct {
 // and JSON are siblings over one model (ADR-007) — and it is the JSON artifact
 // verbatim.
 type Document struct {
-	Meta      Meta
-	Scope     ScopeSummary
-	Summary   *Estate
-	Monitors  []MonitorSection
-	Incidents []model.Incident
+	Meta     Meta
+	Scope    ScopeSummary
+	Summary  *Estate
+	Monitors []MonitorSection
+
+	// Incidents are the ones overlapping the window, with their MTT* intervals
+	// computed. Present on every type that asks for an incident log, and the
+	// substance of a post_mortem.
+	Incidents []Incident
+
+	// MTT is the aggregate across those incidents. Zero-valued where there are
+	// none, and each mean is nil where no incident supplied that figure — never
+	// zero, because averaging an unknown as zero drags the mean towards zero in
+	// proportion to how much is unknown.
+	MTT MTTSummary
+
+	// Comparison is present for a comparative report and nil for every other
+	// type, which is the spec's own shape.
+	Comparison *Comparison
 }
 
 // Build computes a report.
@@ -221,7 +273,14 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 		section.ResponseTime = ComputeLatency(total, daily, spec.ResponseTimeTargetMs)
 		section.Breaches = ComputeBreaches(daily, spec.MaintenanceHandling)
 
-		if target, ok := resolveTarget(spec, targets, m.ID); ok {
+		// **An uptime report carries no SLO vocabulary at all**, even where the
+		// monitors in scope have targets. That is what makes it "the default a
+		// solo user gets", and it has a second use worth stating: an agency
+		// running an uptime summary for a client does not put the internal
+		// target it set on that client's monitors onto the client's document.
+		// Choosing the type is the choice; a target set for the agency's own
+		// dashboards is not a decision to publish it.
+		if target, ok := resolveTarget(spec, targets, m.ID); ok && spec.Type != model.ReportTypeUptime {
 			// The same total the breach table above shows, so the two cannot
 			// disagree on the face of one document.
 			sla := ComputeSLA(section.Uptime, target, length,
@@ -245,7 +304,60 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 	// reason to give: the figure does not exist rather than being withheld.
 	doc.Summary = &summary
 
+	if err := attachIncidents(ctx, s, &doc, spec, window); err != nil {
+		return Document{}, err
+	}
+
+	if spec.Comparison.Mode != "" {
+		comparison, err := BuildComparison(ctx, s, spec.Comparison, spec.Scope, window, res.Tier, spec.MaintenanceHandling)
+		if err != nil {
+			return Document{}, err
+		}
+		doc.Comparison = comparison
+	}
+
 	return doc, nil
+}
+
+// IncidentPageSize bounds the incident log.
+//
+// A window with more incidents than this has a problem a report is not going to
+// fix, and a document listing five hundred of them is one nobody reads. The
+// listing is the newest page rather than a truncated head, because the recent
+// ones are the ones a post-mortem is about.
+const IncidentPageSize = 100
+
+// attachIncidents fills the incident log and the MTT* summary.
+//
+// Only for the types that want one, and that is a cost decision rather than a
+// stylistic one: it is a fifth read, and the four-reads-whatever-the-scope
+// property the load gate measures is worth keeping for the two types that make
+// up almost every scheduled report.
+func attachIncidents(ctx context.Context, s Store, doc *Document, spec Spec, window Window) error {
+	switch spec.Type {
+	case model.ReportTypePostMortem, model.ReportTypeCustom:
+	default:
+		return nil
+	}
+
+	incidents, _, err := s.ListIncidents(ctx, nil, IncidentPageSize, store.IncidentFilter{
+		From: &window.From,
+		To:   &window.To,
+	})
+	if err != nil {
+		return fmt.Errorf("incident log: %w", err)
+	}
+
+	// The alert counts are nil, which reports every incident's alerts_fired as
+	// unknown rather than as zero. The delivery log is not on this package's
+	// read-side contract and adding a method for one report type would put it in
+	// front of every consumer — and **unknown is the honest answer** in the
+	// meantime: zero would read as "nobody was told", which is one of the more
+	// serious findings a post-mortem can carry and not one a missing query
+	// should be able to manufacture.
+	doc.Incidents = PostMortem(incidents, nil, nil)
+	doc.MTT = Summarise(doc.Incidents)
+	return nil
 }
 
 // P95MaxMonitors bounds the one figure in the document that cannot be batched.

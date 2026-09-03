@@ -2,9 +2,9 @@ package maintenance
 
 import (
 	"fmt"
-	"sort"
 	"time"
 
+	"github.com/webloomlabs/uptime-cairn/internal/cron"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
@@ -162,13 +162,13 @@ func startTimes(w model.MaintenanceWindow) ([]clock, error) {
 		return []clock{{anchor.Hour(), anchor.Minute()}}, nil
 	}
 
-	expression, err := parseCron(w.Recurrence.Cron)
+	expression, err := cron.Parse(w.Recurrence.Cron)
 	if err != nil {
 		return nil, err
 	}
 	var out []clock
-	for _, hour := range sortedKeys(expression.hours) {
-		for _, minute := range sortedKeys(expression.minutes) {
+	for _, hour := range expression.Hours() {
+		for _, minute := range expression.Minutes() {
 			out = append(out, clock{hour, minute})
 		}
 	}
@@ -212,11 +212,11 @@ func dayMatcher(w model.MaintenanceWindow) (func(time.Time) bool, error) {
 		return func(day time.Time) bool { return wanted[day.Day()] }, nil
 
 	case model.StrategyCron:
-		expression, err := parseCron(w.Recurrence.Cron)
+		expression, err := cron.Parse(w.Recurrence.Cron)
 		if err != nil {
 			return nil, err
 		}
-		return expression.matchesDay, nil
+		return expression.MatchesDay, nil
 
 	default:
 		return nil, fmt.Errorf("unknown strategy %q", w.Strategy)
@@ -235,13 +235,4 @@ func zone(name string) (*time.Location, error) {
 		return nil, fmt.Errorf("unknown timezone %q: want an IANA name such as Europe/London", name)
 	}
 	return location, nil
-}
-
-func sortedKeys(set map[int]bool) []int {
-	out := make([]int, 0, len(set))
-	for value := range set {
-		out = append(out, value)
-	}
-	sort.Ints(out)
-	return out
 }

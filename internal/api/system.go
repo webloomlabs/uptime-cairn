@@ -74,6 +74,14 @@ func (s *Server) capabilities(r *http.Request) map[string]bool {
 		"kuma_import":        false,
 		"certificate_detail": true,
 
+		// A fact about this process, like the three below it. Reporting needs a
+		// worker pool and somewhere to put the files, and an install wired
+		// without either can still serve the templates it has stored — so a
+		// dashboard offering "generate" would be offering a button that answers
+		// 501. The expiry calendar is deliberately not gated on this: it reads
+		// monitor observations and needs neither.
+		"reports": s.reports != nil && s.artifacts != nil,
+
 		// Three facts about this process, not a setting. A status page can offer
 		// a subscribe box only if there is somewhere to deliver from, a relay to
 		// deliver through, and a base URL to put in the confirmation link — and

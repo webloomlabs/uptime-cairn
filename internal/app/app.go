@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/webloomlabs/uptime-cairn/internal/api"
+	"github.com/webloomlabs/uptime-cairn/internal/artifact"
 	"github.com/webloomlabs/uptime-cairn/internal/config"
 	"github.com/webloomlabs/uptime-cairn/internal/controlplane"
 	"github.com/webloomlabs/uptime-cairn/internal/live"
@@ -39,6 +40,10 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/outbound"
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
+	"github.com/webloomlabs/uptime-cairn/internal/report"
+	"github.com/webloomlabs/uptime-cairn/internal/report/delivery"
+	"github.com/webloomlabs/uptime-cairn/internal/report/render"
+	"github.com/webloomlabs/uptime-cairn/internal/report/runner"
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
 	"github.com/webloomlabs/uptime-cairn/internal/secrets"
 	"github.com/webloomlabs/uptime-cairn/internal/store/sqlite"
@@ -241,12 +246,74 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		}
 	}()
 
+	// Reporting. The pool is bounded and owns its own goroutines, which is what
+	// keeps fifty PDFs at 09:00 on the first of the month off the check path —
+	// the property the load-test gate exists to hold rather than to assume.
+	//
+	// The embedded face is parsed once here rather than per run. A failure is a
+	// build-time mistake — the bytes are compiled in — so it is logged and the
+	// three formats that need no font still render: PDF then fails with a stated
+	// reason and degrades the run to `partial`, which is the ADR-007 item 7 path
+	// and is exactly how this ran before a family was vendored.
+	fonts, err := render.Embedded()
+	if err != nil {
+		log.Error("embedded report font unavailable; PDF reports will fail", "error", err)
+	}
+
+	artifacts := artifact.New(cfg.DataDir, artifact.DefaultMaxBytes)
+
+	// Runs a previous process was killed in the middle of are finished before any
+	// worker starts, which is the only moment it can be done without a threshold:
+	// nothing is running yet, so every `running` row belongs to a process that is
+	// gone. Left alone, such a row is indistinguishable on the screen from a
+	// report that is genuinely in flight, and it never changes again.
+	//
+	// Not fatal. An install that cannot tidy its history should still monitor.
+	if recovered, err := store.RecoverInterruptedReportRuns(ctx, time.Now().UTC()); err != nil {
+		log.Warn("recover interrupted report runs", "error", err)
+	} else if recovered > 0 {
+		log.Info("finished report runs interrupted by a restart", "runs", recovered)
+	}
+
+	reportPool := runner.NewPool(
+		runner.New(store, artifacts, runner.Options{
+			Retention:    reportRetention(rollup.DefaultRetention()),
+			ArtifactDays: model.DefaultReportArtifactDays,
+			Fonts:        fonts,
+		}),
+		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports")).
+		// Delivery hangs off the pool rather than being part of a run, which is
+		// what makes "the PDF failed but the HTML went out" and "re-send last
+		// month's" expressible: a run produces artifacts and finishes, and
+		// handing them over is a separate step whose failure is a delivery row
+		// rather than a failed report.
+		//
+		// The vault is the notification channels' own, so a target that names a
+		// channel reads that channel's credentials rather than a copy — which is
+		// what makes a rotated Slack token a one-place change.
+		WithDeliverer(delivery.New(store, artifacts, notify.NewVault(keeper),
+			cfg.InstanceName, log.With("component", "reports")))
+	reportPool.Start(ctx)
+
+	// The scheduler turns saved schedules into queued runs and does nothing
+	// else. A tick is one seek on the partial index migration 0008 created for
+	// it, so an install with no schedules pays a lookup that returns no rows.
+	go runner.NewScheduler(store, reportPool, log.With("component", "reports")).Run(ctx)
+
+	// The two reclaim passes ADR-008 requires: bytes past their retention date,
+	// and the orphan files write-then-commit deliberately leaves behind. Without
+	// this the reports directory only ever grows, and it grows silently — the
+	// database index stays small, so nothing in the product looks wrong until a
+	// disk fills.
+	go runner.NewSweeper(store, artifacts, log.With("component", "reports")).Run(ctx)
+
 	apiServer := api.New(store, publisher, sweeps, cp, events, registry, keeper,
 		log.With("component", "api"), cfg.InstanceName).
 		WithOutbound(webhooks).
 		WithRetuner(rollups).
 		WithSubscribers(subscribers).
 		WithLive(updates).
+		WithReporting(reportPool, artifacts, time.UTC).
 		WithImports(store)
 
 	// Refused before the listener opens rather than at the first scrape: a
@@ -574,3 +641,20 @@ func (f *fanout) Test(ctx context.Context, channel model.NotificationChannel, ev
 func (f *fanout) SampleEvent(eventType string) notify.Event { return f.notify.SampleEvent(eventType) }
 
 func (f *fanout) AppriseAvailable() bool { return f.notify.AppriseAvailable() }
+
+// reportRetention translates the rollup runner's policy into the shape the
+// report window resolver reads.
+//
+// Two types for one policy, and deliberately: the rollup runner owns the
+// coarser-outlives-finer rule and the report package owns "which tier can answer
+// this window", and neither should have to import the other to ask its own
+// question.
+func reportRetention(r rollup.Retention) report.Retention {
+	return report.Retention{
+		RawDays:      r.RawDays,
+		Rollup1mDays: r.Rollup1mDays,
+		Rollup5mDays: r.Rollup5mDays,
+		Rollup1hDays: r.Rollup1hDays,
+		Rollup1dDays: r.Rollup1dDays,
+	}
+}

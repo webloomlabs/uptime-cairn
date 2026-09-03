@@ -92,6 +92,7 @@ func (s *Server) createMonitor(w http.ResponseWriter, r *http.Request) {
 	problems = append(problems, s.resolveParent(r.Context(), &monitor, body.ParentMonitorID)...)
 	problems = append(problems, s.resolveGroup(r.Context(), &monitor, body.GroupID)...)
 	problems = append(problems, s.resolvePin(r.Context(), &monitor, body.ProbeID, true)...)
+	problems = append(problems, setSLOTarget(&monitor.SLOTargetPercent, body.SLOTargetPercent)...)
 
 	tagIDs, tagProblems := s.resolveTags(r.Context(), body.TagIDs)
 	problems = append(problems, tagProblems...)

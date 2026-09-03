@@ -209,3 +209,44 @@ func TestMaintenancePolicyReachesTheBudget(t *testing.T) {
 			asDown.ErrorBudgetConsumedSeconds, excluded.ErrorBudgetConsumedSeconds)
 	}
 }
+
+// **The budget and the breach log must agree even when they are read from
+// different tiers.** The window totals come from whatever tier retention chose;
+// the breach log always comes from the 1d tier. Those two can disagree about
+// whether anything is known — an install whose 1h rows were pruned while its 1d
+// rows survived, or one that imported daily history — and an earlier cut of
+// ComputeSLA returned early on the window bucket, reporting a consumed budget of
+// zero above a breach log listing fifty minutes of downtime.
+//
+// Found by generating a real report against a real instance, not by a unit test:
+// both halves were individually correct and only disagreed on the same page.
+func TestConsumedIsTheBreachTotalEvenWhenTheWindowObservedNothing(t *testing.T) {
+	t.Parallel()
+
+	// The daily series knows about downtime; the window bucket knows nothing.
+	daily := []store.HistoryBucket{downDay(0, 280, 8), downDay(1, 288, 0)}
+	downtime := DowntimeSeconds(daily, MaintenanceExclude)
+	if downtime == 0 {
+		t.Fatal("fixture produced no downtime")
+	}
+
+	empty := ComputeUptime(store.HistoryBucket{}, MaintenanceExclude)
+	s := ComputeSLA(empty, Target{Percent: 99.9, Source: TargetFromTemplate}, 31*24*time.Hour, downtime)
+
+	if s.ErrorBudgetConsumedSeconds != downtime {
+		t.Errorf("consumed = %ds, want %ds — the breach log says so", s.ErrorBudgetConsumedSeconds, downtime)
+	}
+	if s.ErrorBudgetRemainingSeconds != s.ErrorBudgetSeconds-downtime {
+		t.Errorf("remaining = %d, want %d", s.ErrorBudgetRemainingSeconds, s.ErrorBudgetSeconds-downtime)
+	}
+
+	// The percentage and the verdict stay absent, because those genuinely need a
+	// denominator the window did not supply. Reporting downtime the log knows
+	// about is not the same as inventing an uptime figure it does not.
+	if s.ActualPercent != nil || s.Met != nil {
+		t.Errorf("actual = %v, met = %v; both want nil with nothing observed", s.ActualPercent, s.Met)
+	}
+	if s.BurnRate != nil {
+		t.Error("a burn rate was stated for a window with no observed denominator")
+	}
+}

@@ -59,6 +59,13 @@ type pdfLayout struct {
 	pdf    *PDF
 	family Family
 
+	// cover and figure are the two marks the brand profile colours. Resolved
+	// once at the top of the flow rather than looked up per element, so the same
+	// two decisions are made once and both backends make them the same way — see
+	// brandcolor.go.
+	coverRule   Color
+	figureAccnt Color
+
 	// y is the top of the next thing to be drawn, in top-down page coordinates.
 	y float64
 }
@@ -86,14 +93,19 @@ func pdfFor(doc report.Document, brand Brand, family Family) (*PDF, error) {
 	if family.Regular == nil {
 		return nil, fmt.Errorf("render: PDF needs an embedded font family")
 	}
-	l := flow(Compose(doc, brand), family)
+	l := flow(Compose(doc, brand), family, brand)
 	l.runningFooters()
 	return l.pdf, nil
 }
 
 // flow places the element list onto pages. One pass, no backtracking.
-func flow(elements []Element, family Family) *pdfLayout {
-	l := &pdfLayout{pdf: NewPDF(family), family: family}
+func flow(elements []Element, family Family, brand Brand) *pdfLayout {
+	l := &pdfLayout{
+		pdf:         NewPDF(family),
+		family:      family,
+		coverRule:   brand.coverAccent(),
+		figureAccnt: brand.figureAccent(),
+	}
 
 	// The cover is its own page. It is what an agency's client sees first and
 	// the reason the white-label feature exists; a cover crammed above the first
@@ -182,7 +194,7 @@ func (l *pdfLayout) cover(c Cover) {
 	l.text(marginX, l.y, "Generated "+c.Generated, sizeSmall, Regular, mutedColor, Start)
 	l.y += 20
 
-	l.pdf.Rect(Rect{X: marginX, Y: l.y, W: contentW, H: 2}, Fill(inkColor))
+	l.pdf.Rect(Rect{X: marginX, Y: l.y, W: contentW, H: 2}, Fill(l.coverRule))
 }
 
 func (l *pdfLayout) heading(h Heading) {
@@ -261,7 +273,7 @@ func (l *pdfLayout) keyValues(kv KeyValues) {
 			// The left rule the HTML draws with a border, for the same reason:
 			// three figures side by side with no separation read as one
 			// sentence.
-			l.pdf.Rect(Rect{X: x, Y: top, W: 2, H: height - 8}, Fill(gridColor))
+			l.pdf.Rect(Rect{X: x, Y: top, W: 2, H: height - 8}, Fill(l.figureAccnt))
 
 			y := top + sizeKey
 			l.text(x+10, y, item.Key, sizeKey, Regular, mutedColor, Start)

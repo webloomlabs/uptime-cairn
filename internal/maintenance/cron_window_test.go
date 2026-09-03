@@ -1,12 +1,19 @@
 package maintenance
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
+
+// Cron scheduling, exercised through a maintenance window rather than through
+// the parser.
+//
+// The parser itself moved to internal/cron when report schedules became its
+// second caller, and its own tests went with it. These stayed: what they check
+// is that a window built on a cron expression produces the occurrences somebody
+// expects, which is a question about this package and not about that one.
 
 func cronWindow(t *testing.T, expression string) model.MaintenanceWindow {
 	t.Helper()
@@ -76,65 +83,5 @@ func TestCronDayFieldsAreAUnionWhenBothAreRestricted(t *testing.T) {
 	second := next(t, w, first.End)
 	if !second.Start.Equal(utc(t, "2026-09-01 00:00")) {
 		t.Errorf("second = %s, want the 1st", second.Start)
-	}
-}
-
-func TestCronRejectsWhatItDoesNotSupport(t *testing.T) {
-	t.Parallel()
-
-	cases := map[string]string{
-		"too few fields":  "0 2 * *",
-		"too many fields": "0 0 2 * * *",
-		"named weekday":   "0 9 * * MON",
-		"out of range":    "0 25 * * *",
-		"bad step":        "*/0 * * * *",
-		"empty part":      "0,, * * * *",
-	}
-
-	for name, expression := range cases {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-
-			_, err := parseCron(expression)
-			if err == nil {
-				t.Fatalf("%q was accepted", expression)
-			}
-			// The message has to say what is missing, or the user is left
-			// guessing which of five fields the parser disliked.
-			if strings.TrimSpace(err.Error()) == "" {
-				t.Error("empty error message")
-			}
-		})
-	}
-}
-
-func TestCronAliasesAreRefusedByName(t *testing.T) {
-	t.Parallel()
-
-	// "@daily" is one field, so it fails the count check first; the point of the
-	// assertion is that a user who tries it is told aliases are the problem.
-	if _, err := parseCron("@daily"); err == nil {
-		t.Fatal("@daily was accepted")
-	}
-	if _, err := parseCron("@daily * * * *"); err == nil || !strings.Contains(err.Error(), "aliases") {
-		t.Errorf("err = %v, want it to name aliases", err)
-	}
-}
-
-func TestCronStepsFromABase(t *testing.T) {
-	t.Parallel()
-
-	// "5/15" is "from 5, every 15" — 5, 20, 35, 50.
-	expression, err := parseCron("5/15 * * * *")
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	for _, want := range []int{5, 20, 35, 50} {
-		if !expression.minutes[want] {
-			t.Errorf("minute %d is missing", want)
-		}
-	}
-	if expression.minutes[0] || expression.minutes[10] {
-		t.Error("the step matched a minute before its base")
 	}
 }

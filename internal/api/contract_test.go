@@ -149,14 +149,27 @@ func readSpec(t *testing.T) []specOperation {
 	return ops
 }
 
-// Every Phase 1 operation in the spec has a handler.
+// coveredPhases are the phases whose operations must be routed.
+//
+// Phase 2 joined on 2026-09-03, which is the point at which the reporting
+// surface stopped being a plan and became a contract this test enforces. The
+// checklist asks for the selection to be "switched on per operation as it lands
+// rather than in one move at the end", and the honest way round is the one this
+// file already prefers: **every** Phase 2 operation is exercised, and the ones
+// that have not landed are named in skippedFromContract with a reason. A growing
+// skip list is visible on the screen; an allow-list that has to be added to
+// before an operation is checked is a list somebody forgets to add to, and the
+// forgetting is silent.
+var coveredPhases = map[int]bool{1: true, 2: true}
+
+// Every operation in a covered phase has a handler.
 //
 // The failure this catches is an endpoint that exists in the contract and
 // nowhere else. Somebody implements a client against the spec, calls it, and
 // gets the application shell back with a 200 — because the SPA fallback answers
 // any unrouted path — which is the most confusing possible way to discover that
 // an endpoint was never built.
-func TestEveryPhase1OperationIsRouted(t *testing.T) {
+func TestEveryCoveredOperationIsRouted(t *testing.T) {
 	t.Parallel()
 
 	server := testServer(t)
@@ -165,14 +178,16 @@ func TestEveryPhase1OperationIsRouted(t *testing.T) {
 
 	var missing []string
 	exercised := 0
+	byPhase := map[int]int{}
 	for _, op := range readSpec(t) {
-		if op.Phase != 1 {
+		if !coveredPhases[op.Phase] {
 			continue
 		}
 		if skippedFromContract[op.String()] {
 			continue
 		}
 		exercised++
+		byPhase[op.Phase]++
 
 		// A concrete path: {monitorId} and friends are replaced with a
 		// syntactically valid id, so the request reaches the routing table
@@ -191,7 +206,8 @@ func TestEveryPhase1OperationIsRouted(t *testing.T) {
 			continue
 		}
 		if resp.StatusCode == http.StatusNotImplemented {
-			missing = append(missing, fmt.Sprintf("%s answers 501 but is marked Phase 1 (spec line %d)", op, op.Line))
+			missing = append(missing, fmt.Sprintf("%s answers 501 but is marked Phase %d (spec line %d)",
+				op, op.Phase, op.Line))
 		}
 	}
 
@@ -200,13 +216,17 @@ func TestEveryPhase1OperationIsRouted(t *testing.T) {
 		t.Errorf("no handler: %s", entry)
 	}
 
-	// A contract test that quietly exercises nothing passes forever. The floor
-	// is well under the real count and its only job is to fail loudly if the
-	// scanner stops finding operations.
-	if exercised < 60 {
-		t.Fatalf("only %d Phase 1 operations were exercised; the scanner and the spec have diverged", exercised)
+	// A contract test that quietly exercises nothing passes forever. The floors
+	// are well under the real counts and their only job is to fail loudly if the
+	// scanner stops finding operations — **per phase**, because a single total
+	// would let Phase 2 drop to zero without the number moving much.
+	for phase, floor := range map[int]int{1: 60, 2: 18} {
+		if byPhase[phase] < floor {
+			t.Fatalf("only %d Phase %d operations were exercised, want at least %d; "+
+				"the scanner and the spec have diverged", byPhase[phase], phase, floor)
+		}
 	}
-	t.Logf("%d Phase 1 operations exercised", exercised)
+	t.Logf("%d operations exercised (%d Phase 1, %d Phase 2)", exercised, byPhase[1], byPhase[2])
 }
 
 // Nothing is served that the spec does not describe.
@@ -333,6 +353,23 @@ var skippedFromContract = map[string]bool{
 
 	// Not JSON, and answered by the metrics handler rather than the API mux.
 	"GET /metrics": true,
+
+	// --- Phase 2: share links ------------------------------------------------
+	//
+	// **Human-led work, not unbuilt work.** A share link is an unauthenticated
+	// credential: the token in the URL is the whole of the authorisation, and
+	// generating, hashing and sealing it is exactly what AGENTS.md rule 8 puts
+	// in a person's hands ("Do not generate authentication, session, crypto, or
+	// access-control code"). The schema is in migration 0008 and the spec is
+	// merged; what is missing is deliberately missing.
+	//
+	// They are listed here rather than left to fail so that the reason is on the
+	// screen. Deleting these four lines is the last step of building them, and
+	// the test then says whether they work.
+	"POST /api/v1/report-runs/{reportRunId}/share":     true,
+	"DELETE /api/v1/report-runs/{reportRunId}/share":   true,
+	"GET /api/v1/public/reports/{shareToken}":          true,
+	"GET /api/v1/public/reports/{shareToken}/download": true,
 }
 
 // serverRoutes reads the routing table out of Handler's source.

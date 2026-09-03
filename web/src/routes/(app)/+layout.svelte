@@ -60,6 +60,24 @@
 					scope: 'notifications:read',
 					capability: 'notifications'
 				},
+				{
+					href: '/reports',
+					label: t('nav.reports'),
+					icon: 'reports',
+					scope: 'reports:read',
+					capability: 'reports'
+				},
+				// The expiry calendar is a report over data the monitors already
+				// carry, so it takes monitors:read rather than reports:read — a key
+				// that can see a monitor can already read its certificate one at a
+				// time, and requiring a reporting scope would make the calendar less
+				// reachable than the same facts individually.
+				{
+					href: '/expiries',
+					label: t('nav.expiries'),
+					icon: 'calendar',
+					scope: 'monitors:read'
+				},
 				// Groups and tags are one screen because they are one job. The link
 				// takes a single scope, so it is gated on groups:read; the page
 				// itself checks both and renders only the half the principal may
