@@ -509,34 +509,28 @@ func latencyFigures(l report.Latency) []KeyValue {
 		})
 	}
 
-	// The percentile, and its window, and why it is missing when it is. Never a
-	// bare blank: an absent figure with no reason reads as a defect.
-	if l.P95 != nil {
+	// The percentile and its window, and only when there is one. An unavailable
+	// figure is left out of the rendered document altogether rather than printed
+	// as a dash with an explanation of itself: a client reading a PDF has no use
+	// for the retention setting behind a figure they were never shown. The reason
+	// survives where a consumer can act on it — `unavailable_reason` in the JSON
+	// export (json.go) — so nothing is lost, it is only not narrated on the page.
+	if l.P95 != nil && l.P95.Available {
 		items = append(items, p95Figure(*l.P95))
 	}
 	return items
 }
 
+// p95Figure renders an available percentile. Callers check Available first: an
+// unavailable one has no tile at all, so there is no unavailable branch here to
+// keep in step with the reasons in report/latency.go.
 func p95Figure(p report.P95) KeyValue {
-	if p.Available {
-		note := "nearest rank"
-		if p.WindowStart != nil && p.WindowEnd != nil {
-			note = fmt.Sprintf("nearest rank, %s — the last seven days of the period, not the whole of it",
-				formatPeriod(*p.WindowStart, *p.WindowEnd))
-		}
-		return KeyValue{Key: "95th percentile", Value: millis(p.ValueMs), Note: note}
+	note := "nearest rank"
+	if p.WindowStart != nil && p.WindowEnd != nil {
+		note = fmt.Sprintf("nearest rank, %s — the last seven days of the period, not the whole of it",
+			formatPeriod(*p.WindowStart, *p.WindowEnd))
 	}
-
-	reason := "not available"
-	switch p.Reason {
-	case report.ReasonInsufficientRaw:
-		reason = "raw history is kept for less than seven days, so a shorter figure would be reported under a seven-day heading"
-	case report.ReasonNoSuccessfulChecks:
-		reason = "no successful checks in the last seven days"
-	case report.ReasonScopeTooLarge:
-		reason = "not computed for a report of this size"
-	}
-	return KeyValue{Key: "95th percentile", Value: "—", Note: reason}
+	return KeyValue{Key: "95th percentile", Value: millis(p.ValueMs), Note: note}
 }
 
 func breachTable(breaches []report.Breach) Table {

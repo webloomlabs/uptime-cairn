@@ -104,18 +104,65 @@ func TestDowngradedResolutionIsStatedOnTheFace(t *testing.T) {
 	}
 }
 
-// A missing percentile always says why. An absent figure with no reason reads as
-// a defect in the product rather than as a decision about honesty — which is the
-// same rule the spec's enum now carries.
-func TestAbsentPercentileExplainsItselfOnTheFace(t *testing.T) {
+// An unavailable percentile is left off the rendered page entirely — no dash, no
+// explanation of a figure the reader was never shown. The reason is not lost: it
+// stays machine-readable as `unavailable_reason` in the JSON export, which
+// TestUnavailablePercentileSerialisesItsReason covers.
+func TestUnavailablePercentileIsLeftOffTheFace(t *testing.T) {
 	t.Parallel()
 
+	// sample()'s percentile is unavailable, with reason scope_too_large.
 	out, err := HTML(sample(), brandFixture())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "not computed for a report of this size") {
-		t.Error("the p95 is missing from the face with no reason beside it")
+	page := string(out)
+
+	if strings.Contains(page, "95th percentile") {
+		t.Error("an unavailable percentile still has a heading on the page")
+	}
+	if strings.Contains(page, "not computed for a report of this size") {
+		t.Error("the page explains a percentile it does not show")
+	}
+}
+
+// The other half of the rule above, and the reason it is a separate test:
+// omitting the unavailable case must not omit the available one. A figure that
+// exists is rendered with its value and the window it was ranked over, because
+// a trailing-seven-day percentile printed under a whole-period report is
+// misread as covering the period.
+func TestAvailablePercentileIsRenderedWithItsWindow(t *testing.T) {
+	t.Parallel()
+
+	doc := sample()
+	value := 402.1
+	from := march
+	to := march.AddDate(0, 0, 3)
+	doc.Monitors[0].ResponseTime.P95 = &report.P95{
+		Available:   true,
+		ValueMs:     &value,
+		WindowStart: &from,
+		WindowEnd:   &to,
+		Method:      report.MethodNearestRank,
+	}
+
+	out, err := HTML(doc, brandFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(out)
+
+	if !strings.Contains(page, "95th percentile") {
+		t.Error("an available percentile is not on the page")
+	}
+	if !strings.Contains(page, "402.1ms") {
+		t.Error("the percentile's value is not rendered")
+	}
+	if !strings.Contains(page, "nearest rank") {
+		t.Error("the method is not stated; a percentile without one is worse than none")
+	}
+	if !strings.Contains(page, "the last seven days of the period, not the whole of it") {
+		t.Error("the window the figure covers is not disclosed")
 	}
 }
 
