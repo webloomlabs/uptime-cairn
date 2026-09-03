@@ -27,6 +27,11 @@ const (
 
 	// RowEstateTotal is every monitor in scope over the whole window.
 	RowEstateTotal = "estate_total"
+
+	// RowComparison is one side of a comparative report, carrying the same
+	// columns a total does — so a spreadsheet comparing two of them is
+	// subtracting like from like rather than reconciling two shapes.
+	RowComparison = "comparison_series"
 )
 
 var csvHeader = []string{
@@ -73,6 +78,26 @@ func CSV(doc report.Document) ([]byte, error) {
 		row := totalRow(RowEstateTotal, "", "", doc.Summary.Uptime, doc.Summary.ResponseTime)
 		if err := w.Write(row); err != nil {
 			return nil, err
+		}
+	}
+
+	if doc.Comparison != nil {
+		for _, series := range doc.Comparison.Series {
+			// The label goes in the monitor_name column and the id stays empty:
+			// a series is not a monitor, and putting a monitor id on a row that
+			// aggregates several would be a join key that joins to the wrong
+			// thing. The name column is free text on this row type by design.
+			row := totalRow(RowComparison, "", series.Label, series.Uptime, series.ResponseTime)
+			// The period is what distinguishes the two sides of a
+			// previous_period comparison, and it is the one thing the total row
+			// has no column for — so it goes in `date`, which is otherwise empty
+			// on a total. Stated here because a reader will meet it.
+			if series.PeriodStart != nil {
+				row[3] = series.PeriodStart.Format(dateOnly)
+			}
+			if err := w.Write(row); err != nil {
+				return nil, err
+			}
 		}
 	}
 

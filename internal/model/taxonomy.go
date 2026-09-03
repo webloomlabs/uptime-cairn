@@ -27,6 +27,12 @@ type Group struct {
 	// filter query and the UI's tree harder, and nobody has asked for three.
 	ParentGroupID *ID
 
+	// SLOTargetPercent is the fallback a monitor with no target of its own
+	// inherits. Resolution stops here: groups nest, the spec's order has no
+	// fourth step, and climbing would print "inherited from group" for a number
+	// set two levels up.
+	SLOTargetPercent *float64
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

@@ -23,6 +23,12 @@ type fakeStore struct {
 	p95            *float64
 	rawFrom, rawTo time.Time
 
+	// rawShort makes RawCovers answer false, which is the per-monitor half of
+	// the trailing-week gate: retention policy can permit the figure while this
+	// particular monitor's raw rows have already been pruned behind the daily
+	// tier that summarised them.
+	rawShort bool
+
 	calls map[string]int
 }
 
@@ -55,7 +61,7 @@ func (f *fakeStore) SLOTargets(context.Context, []model.ID) (map[model.ID]Target
 
 func (f *fakeStore) RawCovers(context.Context, model.ID, time.Time, string) (bool, error) {
 	f.note("RawCovers")
-	return true, nil
+	return !f.rawShort, nil
 }
 
 func (f *fakeStore) UptimeFromRaw(_ context.Context, _ model.ID, from, to time.Time) (store.HistoryBucket, error) {
@@ -501,5 +507,70 @@ func TestUnavailablePercentileAlwaysCarriesAReason(t *testing.T) {
 				t.Errorf("%s: p95 unavailable with no reason", tc.name)
 			}
 		}
+	}
+}
+
+// The second of ADR-006's two guard tests, and the one that holds the gate the
+// ADR is actually about.
+//
+// The first — in internal/store/sqlite — keeps the approximate percentile out of
+// the coarse tiers. This one keeps the *real* percentile from being quoted over
+// a window it does not cover. The distinction matters because the two failures
+// look nothing alike from the outside: an approximation is wrong by some amount,
+// while an uncovered window is a correct percentile under a heading that lies
+// about which days it describes.
+//
+// The case is a live one rather than a hypothetical. `RawCovers` is compared
+// against the daily tier rather than asked in the absolute, so it goes false
+// exactly when retention pruned raw rows that the 1d tier had already summarised
+// — an ordinary install that has been running longer than raw_days. Retention
+// policy permits the figure here (raw_days is seven), and the monitor still
+// cannot supply it. Nothing but this per-monitor check stands between "the
+// operator configured seven days of raw" and "these 940 ms are a p95 over the
+// last seven days", which is the sentence the report would otherwise print.
+func TestShortCoverageOnOneMonitorOmitsThePercentile(t *testing.T) {
+	t.Parallel()
+
+	value := 940.0
+	m := monitorNamed("api")
+	f := &fakeStore{
+		monitors: []model.Monitor{m},
+		totals:   map[model.ID]store.HistoryBucket{m.ID: {Up: 100}},
+		p95:      &value,
+		rawShort: true,
+	}
+
+	// A retention policy that permits the figure, so the only thing that can
+	// withhold it is the per-monitor check.
+	retention := defaultRetention()
+	if !retention.RawCoversTrailingWeek() {
+		t.Fatal("the fixture's retention policy already withholds the p95; " +
+			"this test would then pass for the wrong reason")
+	}
+
+	doc, err := Build(context.Background(), f, Spec{
+		Period: PeriodMonth, PeriodStyle: StyleCalendar, Timezone: "UTC",
+	}, retention, model.NewID(), time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	// The check was actually made rather than skipped by an earlier gate, which
+	// is what makes the assertion below about coverage.
+	if f.calls["RawCovers"] == 0 {
+		t.Fatal("coverage was never checked; an earlier gate answered instead")
+	}
+
+	p := doc.Monitors[0].ResponseTime.P95
+	if p == nil {
+		t.Fatal("no percentile object at all, want one reporting itself unavailable")
+	}
+	if p.Available || p.ValueMs != nil {
+		t.Fatalf("p95 = %+v — raw does not reach back seven days for this monitor, "+
+			"so the figure would be a percentile over a shorter window printed under "+
+			"a seven-day heading", p)
+	}
+	if p.Reason != ReasonInsufficientRaw {
+		t.Errorf("reason = %q, want %q", p.Reason, ReasonInsufficientRaw)
 	}
 }

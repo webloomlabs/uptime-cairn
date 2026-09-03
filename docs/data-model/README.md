@@ -483,11 +483,73 @@ its outcome, and the reason — the guarantee that nothing was silently dropped.
 ### 4.13 Later-phase tables
 
 Specified in the OpenAPI contract, created when their phase ships, listed here so
-the model is complete: `teams`, `team_members` (Phase 3);
-`on_call_schedules`, `on_call_rotations`, `on_call_overrides`,
-`escalation_policies`, `escalation_steps`, `escalation_targets` (Phase 3);
-`report_templates`, `report_schedules`, `report_runs`, `report_artifacts`
-(Phase 2). All carry `org_id` from creation.
+the model is complete: `teams`, `team_members` (Phase 3); `on_call_schedules`,
+`on_call_rotations`, `on_call_overrides`, `escalation_policies`,
+`escalation_steps`, `escalation_targets` (Phase 3). All carry `org_id` from
+creation.
+
+### 4.14 Reporting (Phase 2, migration `0008`)
+
+**Seven tables, not the four this section originally named.** Each of the three
+that were missing is a consequence of a decision taken after that list was
+written, so they are named here with the decision beside them:
+
+| Table | Why it exists |
+|---|---|
+| `brand_profiles` | White-labelling moved to its own resource (spec Q2) rather than replacing the inline branding on status pages, which would have been a breaking change to a shipped schema. |
+| `report_templates` | The definition. |
+| `report_schedules` | When a template runs, and in which timezone. |
+| `report_schedule_deliveries` | The **configured** targets. A child table rather than JSON on the schedule, because an S3 secret needs a row to bind its AAD to (§12.1). |
+| `report_runs` | One execution. |
+| `report_artifacts` | The index. The bytes are on disk ([ADR-008](../adr/008-report-artifact-storage.md)). |
+| `report_share_links` | Added by ADR-008, which requires a share link to be revocable. |
+| `report_deliveries` | One row per **attempt**, mirroring `notification_deliveries`. The split between configured target and attempt is the same one alerting already makes. |
+
+`monitors` and `groups` each gained one nullable `slo_target_percent`, with the
+`< 100` bound enforced by a `CHECK`: a 100% target has an error budget of zero
+seconds, which makes burn rate undefined. `settings` gained a `report_storage`
+column for the S3 mirror. Every table carries `org_id` from this first migration,
+so Phase 3 tenancy is a permission change rather than a re-architecture.
+
+#### Runs outlive the definitions that made them
+
+**`report_templates` and `report_schedules` are soft-deleted** — `deleted_at`,
+with the cursor indexes partial on `deleted_at IS NULL` so the filter is the
+access path rather than a scan — and `report_runs` references both with `ON DELETE
+RESTRICT`.
+
+The rule is therefore an invariant of the database rather than a convention of the
+handlers: a hard `DELETE` from a SQL shell is refused while runs exist.
+
+The reasoning is worth keeping because a nullable foreign key looks equivalent and
+is not. Retaining the run and nulling the reference leaves a record that cannot
+say what it was a report *of* — which is the first question anybody asks of one,
+and the question that gets asked precisely because somebody tidied the template
+up. Keeping the row means "we sent them this, under this definition, on this
+schedule" survives the client leaving. Deleting a template soft-deletes its
+schedules in the same transaction, because a deleted report that keeps arriving in
+a client's inbox is worse than either deleting it or not.
+
+The standing cost is stated where it is paid: **every read path must filter
+`deleted_at IS NULL`**.
+
+`brand_profiles` is deliberately *not* soft-deleted. A template referencing a
+deleted profile would fall back to the default, which is what a template with no
+profile already does, so there is nothing for the row to preserve — and deleting a
+profile a live template names is refused with a `409` instead.
+
+#### Artifacts are records, not caches
+
+`report_artifacts.state` is `rendered`, `failed` or `expired`, and **`expired` is a
+tombstone**: retention reclaims the bytes and keeps the row, so a bookmarked share
+link answers `410` — "this existed and is gone" — rather than `404`. The `path`
+is stored rather than recomputed, because retention and the orphan sweeper both
+need to go from a row to a file without reconstructing whatever dating rule was in
+force when it was written.
+
+Every row carries a SHA-256 and a size. That is what makes an artifact evidence
+rather than a file: "is this the document we sent?" is answerable, and a truncated
+write from a full disk is detectable rather than served silently.
 
 ---
 

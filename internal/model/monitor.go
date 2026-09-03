@@ -84,6 +84,18 @@ type Monitor struct {
 	// network segment, needs no second mechanism.
 	ProbeID *ID
 
+	// SLOTargetPercent is the uptime target reporting resolves against, and
+	// **Phase 2 only reads it**: nothing alerts on it, and no monitor's status is
+	// affected by it. Null means no target, which is the default and the state of
+	// every monitor until somebody sets one.
+	//
+	// It lives on the monitor rather than on a report so that alerting can act on
+	// the same number later without a second place to configure it. Exclusive of
+	// 100, enforced by a CHECK as well as at the API: a 100% target has an error
+	// budget of zero seconds, which makes burn rate undefined and every report a
+	// breach report.
+	SLOTargetPercent *float64
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

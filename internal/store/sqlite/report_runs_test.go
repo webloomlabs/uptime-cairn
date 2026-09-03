@@ -465,3 +465,156 @@ func TestMissingRunsAndArtifactsAreNotFound(t *testing.T) {
 		t.Errorf("start missing run: %v, want ErrConflict — it is not queued", err)
 	}
 }
+
+// A restart finishes the runs it interrupted, and does not touch the ones it did
+// not.
+//
+// The state a stuck run leaves behind is the point. `running` means "a worker has
+// this", and after a crash nobody has it and nobody ever will — so the row sits
+// on the run-history screen forever, looking exactly like a report that is still
+// being produced. A person reading that screen cannot tell whether to wait, and
+// the answer is that they should never have been asked to.
+//
+// Doing it at start-up rather than on a timer is what makes it safe: no worker
+// has started, so every `running` row is from a process that is gone. A threshold
+// sweep would have to be long enough not to kill a genuinely slow CSV over five
+// thousand monitors, which is exactly how long the ambiguous state would last.
+func TestARestartFinishesTheRunsItInterrupted(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	tpl := liveTemplate(t, s)
+
+	// One that got as far as producing an artifact, one that did not, and two
+	// that must be left exactly as they are.
+	withArtifact := queuedRun(t, s, tpl.ID)
+	empty := queuedRun(t, s, tpl.ID)
+	queued := queuedRun(t, s, tpl.ID)
+	done := queuedRun(t, s, tpl.ID)
+
+	for _, run := range []model.ReportRun{withArtifact, empty, done} {
+		if err := s.StartReportRun(t.Context(), run.ID, runNow); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+	}
+	if err := s.CreateReportArtifact(t.Context(), artifact(withArtifact.ID, model.FormatJSON, model.ArtifactRendered)); err != nil {
+		t.Fatalf("create artifact: %v", err)
+	}
+	if err := s.FinishReportRun(t.Context(), done.ID, model.RunSucceeded, "", runNow); err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+
+	at := runNow.Add(time.Hour)
+	recovered, err := s.RecoverInterruptedReportRuns(t.Context(), at)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if recovered != 2 {
+		t.Errorf("recovered = %d, want 2", recovered)
+	}
+
+	// Something arrived, so the run says so. Calling it a failure would claim
+	// nothing was produced when a real artifact is on disk with a digest beside
+	// it.
+	got := mustGetRun(t, s, withArtifact.ID)
+	if got.State != model.RunPartial {
+		t.Errorf("state = %q, want %q — one format landed before the interruption",
+			got.State, model.RunPartial)
+	}
+	if got.Error == "" || got.FinishedAt == nil {
+		t.Error("a recovered run carries neither a reason nor a finish time")
+	}
+
+	// Nothing arrived, so it failed. Partial means "some of it arrived", and a
+	// run with no artifacts has nothing to be partial about.
+	if got := mustGetRun(t, s, empty.ID); got.State != model.RunFailed {
+		t.Errorf("state = %q, want %q on a run that produced nothing", got.State, model.RunFailed)
+	}
+
+	// A queued run is a run nothing has claimed yet. Recovery must leave it
+	// alone or a restart during a monthly burst would fail every report waiting
+	// in the queue rather than running them.
+	if got := mustGetRun(t, s, queued.ID); got.State != model.RunQueued {
+		t.Errorf("a queued run became %q; a restart must not fail the backlog", got.State)
+	}
+
+	// And a finished run keeps its outcome and its timestamps.
+	if got := mustGetRun(t, s, done.ID); got.State != model.RunSucceeded || got.Error != "" {
+		t.Errorf("a completed run was rewritten: state = %q, error = %q", got.State, got.Error)
+	}
+}
+
+// The artifacts a recovered run did produce are kept.
+//
+// They are complete files with committed rows and digests. Deleting them to make
+// the run's state tidier would be destroying the only record of what a client was
+// actually sent — which is the one thing ADR-008 says an artifact exists to be.
+func TestRecoveryKeepsTheArtifactsThatLanded(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	tpl := liveTemplate(t, s)
+	run := queuedRun(t, s, tpl.ID)
+
+	if err := s.StartReportRun(t.Context(), run.ID, runNow); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	kept := artifact(run.ID, model.FormatJSON, model.ArtifactRendered)
+	if err := s.CreateReportArtifact(t.Context(), kept); err != nil {
+		t.Fatalf("create artifact: %v", err)
+	}
+
+	if _, err := s.RecoverInterruptedReportRuns(t.Context(), runNow.Add(time.Hour)); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+
+	artifacts, err := s.ArtifactsForRuns(t.Context(), []model.ID{run.ID})
+	if err != nil {
+		t.Fatalf("artifacts: %v", err)
+	}
+	rows := artifacts[run.ID]
+	if len(rows) != 1 {
+		t.Fatalf("%d artifacts after recovery, want 1", len(rows))
+	}
+	if rows[0].State != model.ArtifactRendered || rows[0].SHA256 != kept.SHA256 {
+		t.Errorf("the surviving artifact was altered: %+v", rows[0])
+	}
+}
+
+// A failed artifact row is not something that landed.
+//
+// The distinction is the whole reason `partial` exists: a run whose only format
+// failed to render produced nothing, and calling it partial would tell somebody
+// a document is available when none is.
+func TestAFailedArtifactDoesNotMakeARunPartial(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	tpl := liveTemplate(t, s)
+	run := queuedRun(t, s, tpl.ID)
+
+	if err := s.StartReportRun(t.Context(), run.ID, runNow); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := s.CreateReportArtifact(t.Context(),
+		artifact(run.ID, model.FormatPDF, model.ArtifactFailed)); err != nil {
+		t.Fatalf("create artifact: %v", err)
+	}
+
+	if _, err := s.RecoverInterruptedReportRuns(t.Context(), runNow.Add(time.Hour)); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if got := mustGetRun(t, s, run.ID); got.State != model.RunFailed {
+		t.Errorf("state = %q, want %q — a failed artifact row is a format that did "+
+			"not arrive, not one that did", got.State, model.RunFailed)
+	}
+}
+
+func mustGetRun(t *testing.T, s *Store, id model.ID) model.ReportRun {
+	t.Helper()
+	run, err := s.GetReportRun(t.Context(), id)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	return run
+}

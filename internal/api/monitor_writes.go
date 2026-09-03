@@ -237,6 +237,7 @@ func (s *Server) applyMonitorUpdate(ctx context.Context, m *model.Monitor, store
 		problems = append(problems, s.applyParentChange(ctx, m, body.ParentMonitorID)...)
 	}
 	problems = append(problems, s.applyPinChange(ctx, m, body.ProbeID)...)
+	problems = append(problems, applySLOTarget(&m.SLOTargetPercent, body.SLOTargetPercent)...)
 	if len(body.Config) > 0 {
 		problems = append(problems, s.applyConfigChange(m, stored, body.Config)...)
 	}
@@ -823,4 +824,57 @@ func (s *Server) getMonitorCertificate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, s.log, http.StatusOK, toCertificateJSON(certificate, time.Now().UTC()))
+}
+
+// applySLOTarget merges a clearable uptime target.
+//
+// Absent leaves it, null clears it, a number sets it — the three states a
+// json.RawMessage is here to keep apart. A **float64 would flatten the first two
+// and make "remove this target" impossible, which is the same defect the report
+// template's sla_target had until a test that patched a null and read the value
+// back found it.
+func applySLOTarget(into **float64, raw json.RawMessage) []ValidationItem {
+	if len(raw) == 0 {
+		return nil
+	}
+	if clearing(raw) {
+		*into = nil
+		return nil
+	}
+	var target float64
+	return setSLOTarget(into, decodeTarget(raw, &target))
+}
+
+func decodeTarget(raw json.RawMessage, into *float64) *float64 {
+	if json.Unmarshal(raw, into) != nil {
+		// A sentinel out of range, so setSLOTarget reports it with the same
+		// message a bad number gets. Two different messages for "that is not a
+		// usable target" would be two things to keep in step.
+		bad := -1.0
+		return &bad
+	}
+	return into
+}
+
+// setSLOTarget validates and assigns.
+//
+// **Exclusive of 100**, refused here as well as by the schema's CHECK, because
+// the API is the layer where the reason can be said rather than only enforced: a
+// 100% target has an error budget of zero seconds, which makes the burn rate
+// undefined and turns every report into a breach report.
+func setSLOTarget(into **float64, value *float64) []ValidationItem {
+	if value == nil {
+		return nil
+	}
+	if *value < 0 || *value >= 100 {
+		return []ValidationItem{{
+			Pointer: "/slo_target_percent",
+			Code:    "invalid",
+			Message: "slo_target_percent must be at least 0 and below 100; a target of " +
+				"exactly 100 has an error budget of zero seconds",
+		}}
+	}
+	target := *value
+	*into = &target
+	return nil
 }

@@ -11,6 +11,9 @@ matters — backups, upgrades, reverse proxies, what to alert on — see
 | **[monitor-types.md](monitor-types.md)** | The nine types, what each actually checks, and the fields where the obvious reading is wrong. |
 | **[alerting.md](alerting.md)** | Every channel field by field, webhook templating, and maintenance windows. |
 | **[migrating-from-uptime-kuma.md](migrating-from-uptime-kuma.md)** | `cairn import kuma`, the multi-instance merge, and exactly what does not come across. |
+| **[reporting.md](reporting.md)** | Templates, schedules and runs; windows and timezones; what a report over last March will contain; delivery, and where the files live. |
+| **[sla-methodology.md](sla-methodology.md)** | **The page to read when a figure is disputed.** What counts as downtime, what leaves the denominator, and what the maintenance default is. |
+| **[brand-profiles.md](brand-profiles.md)** | White-labelling a report, and why a logo has to be raster. |
 
 ## The API
 

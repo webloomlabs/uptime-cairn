@@ -44,12 +44,25 @@ const DefaultWorkers = 2
 // the refusal is a symptom of something wrong rather than of a busy morning.
 const DefaultQueue = 256
 
+// Deliverer hands a finished run to the recipients its schedule configures.
+//
+// An interface rather than the concrete dispatcher, and optional rather than
+// required, because **delivery is decoupled from generation**: a run produces
+// artifacts and finishes, and handing them over is a separate step that can fail
+// without the report failing. An install with no deliverer still generates and
+// still serves downloads.
+type Deliverer interface {
+	Deliver(ctx context.Context, runID model.ID, now time.Time) error
+}
+
 // Pool runs queued reports on a fixed number of workers.
 type Pool struct {
 	runner  *Runner
 	queue   chan model.ReportRun
 	log     *slog.Logger
 	workers int
+
+	deliver Deliverer
 
 	// now is injectable so a test can pin the clock. Production passes nil and
 	// gets time.Now, which is the only place in the reporting subsystem that
@@ -111,6 +124,13 @@ func (p *Pool) Submit(run model.ReportRun) error {
 	}
 }
 
+// WithDeliverer attaches delivery. Returns the pool so it composes at the call
+// site, following the API server's own builder.
+func (p *Pool) WithDeliverer(d Deliverer) *Pool {
+	p.deliver = d
+	return p
+}
+
 // Depth is the current backlog, for the operator-facing count.
 func (p *Pool) Depth() int { return len(p.queue) }
 
@@ -146,6 +166,26 @@ func (p *Pool) execute(ctx context.Context, run model.ReportRun, worker int) {
 	p.log.Info("report run finished",
 		"run_id", run.ID.String(), "worker", worker,
 		"duration", p.clock().Sub(started).Round(time.Millisecond))
+
+	p.handOver(ctx, run)
+}
+
+// handOver delivers a finished run, and never fails it.
+//
+// **A delivery failure is not a run failure**, and keeping them apart is the
+// point of the separation: the report exists, it is on disk with a digest beside
+// it, and it can be downloaded and re-sent. Marking the run failed because a
+// mailbox was full would tell somebody the document does not exist when it does.
+// Every attempt is already a row by the time this returns, so the log is the
+// record and this line is only for the operator watching the console.
+func (p *Pool) handOver(ctx context.Context, run model.ReportRun) {
+	if p.deliver == nil {
+		return
+	}
+	if err := p.deliver.Deliver(ctx, run.ID, p.clock()); err != nil {
+		p.log.Warn("report delivery did not complete",
+			"run_id", run.ID.String(), "error", err)
+	}
 }
 
 func (p *Pool) clock() time.Time {

@@ -91,6 +91,51 @@ func (s *Store) FinishReportRun(ctx context.Context, id model.ID, state, failure
 	return nil
 }
 
+// RecoverInterruptedReportRuns finishes every run this process finds already in
+// `running`, and reports how many there were.
+//
+// **Called once at start-up, and that is what makes it safe without a
+// threshold.** A `running` row at start-up cannot belong to a worker of this
+// process, because no worker has started; it belongs to a process that is gone.
+// A time-based sweep would need a threshold long enough not to kill a genuinely
+// slow CSV over five thousand monitors, and would therefore leave a stuck run
+// looking live for however long that threshold was — which is the state a person
+// staring at the screen cannot interpret.
+//
+// The assumption it rests on is the one SQLite already makes and the deployment
+// model already states: one process owns this database. If that ever stops being
+// true, this becomes a threshold sweep and the comment above is the reason it
+// would have to.
+//
+// The artifacts that did land are kept. Each is a complete file with a committed
+// row and a digest, so a run that produced three of four formats produced three
+// real ones — hence `partial` where anything survived and `failed` where nothing
+// did. Deleting them to make the state tidier would be destroying the only record
+// of what a client was actually sent.
+func (s *Store) RecoverInterruptedReportRuns(ctx context.Context, at time.Time) (int, error) {
+	const reason = "the run was interrupted by a restart before it finished; generate it again"
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE report_runs
+		SET state = CASE
+		        WHEN EXISTS (
+		            SELECT 1 FROM report_artifacts
+		            WHERE report_artifacts.report_run_id = report_runs.id
+		              AND report_artifacts.state = ?
+		        ) THEN ?
+		        ELSE ?
+		    END,
+		    error = ?, finished_at = ?
+		WHERE state = ? AND org_id = ?`,
+		model.ArtifactRendered, model.RunPartial, model.RunFailed,
+		reason, millis(at), model.RunRunning, model.SentinelOrgID[:])
+	if err != nil {
+		return 0, fmt.Errorf("recover interrupted report runs: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+	return int(affected), nil
+}
+
 // MarkReportRunLate records that the run started materially after it was due.
 //
 // A separate call rather than a field on create, because whether a run is late

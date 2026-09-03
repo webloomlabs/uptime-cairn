@@ -30,6 +30,7 @@ type monitorJSON struct {
 	GroupID                *string         `json:"group_id"`
 	ParentMonitorID        *string         `json:"parent_monitor_id"`
 	ProbeID                *string         `json:"probe_id"`
+	SLOTargetPercent       *float64        `json:"slo_target_percent"`
 	TagIDs                 []string        `json:"tag_ids"`
 	NotificationChannelIDs []string        `json:"notification_channel_ids"`
 	NotifyOnRecovery       bool            `json:"notify_on_recovery"`
@@ -148,6 +149,11 @@ type monitorWrite struct {
 	// that needs this — the pin is placement rather than checking, so it is a
 	// field on the monitor rather than a key inside a type-specific config.
 	ProbeID *string `json:"probe_id"`
+
+	// SLOTargetPercent is the uptime target reporting resolves against. Null and
+	// absent are the same thing here — no target — because a create has nothing
+	// to clear.
+	SLOTargetPercent *float64 `json:"slo_target_percent"`
 
 	// Absent or null leaves the monitor ungrouped and untagged. There is no
 	// PATCH on monitors yet, so the "unset an existing value" case these fields
@@ -323,6 +329,7 @@ func toMonitorJSON(m store.MonitorWithState) monitorJSON {
 		id := m.Monitor.ProbeID.String()
 		out.ProbeID = &id
 	}
+	out.SLOTargetPercent = m.Monitor.SLOTargetPercent
 	out.NotificationChannelIDs = []string{}
 	out.TagIDs = []string{}
 	return out
@@ -499,6 +506,10 @@ type groupJSON struct {
 	ParentGroupID *string `json:"parent_group_id"`
 	MonitorCount  int     `json:"monitor_count"`
 
+	// SLOTargetPercent is the target a monitor in this group inherits when it
+	// has none of its own. Read by reporting and by nothing else in this phase.
+	SLOTargetPercent *float64 `json:"slo_target_percent"`
+
 	// Status is the worst among the group's monitors, its children's included.
 	// Null when it holds none — which is a different statement from "up", and
 	// rendering it green would be the dashboard inventing health.
@@ -518,15 +529,19 @@ type groupWrite struct {
 	// top level. Nothing else in this file needs the distinction, so nothing
 	// else pays for it.
 	ParentGroupID json.RawMessage `json:"parent_group_id"`
+
+	// Raw for the same reason: a target somebody set has to be removable.
+	SLOTargetPercent json.RawMessage `json:"slo_target_percent"`
 }
 
 func toGroupJSON(g model.GroupSummary) groupJSON {
 	out := groupJSON{
-		ID:           g.Group.ID.String(),
-		Name:         g.Group.Name,
-		MonitorCount: g.MonitorCount,
-		CreatedAt:    g.Group.CreatedAt,
-		UpdatedAt:    g.Group.UpdatedAt,
+		ID:               g.Group.ID.String(),
+		Name:             g.Group.Name,
+		MonitorCount:     g.MonitorCount,
+		SLOTargetPercent: g.Group.SLOTargetPercent,
+		CreatedAt:        g.Group.CreatedAt,
+		UpdatedAt:        g.Group.UpdatedAt,
 	}
 	if g.Group.Description != "" {
 		out.Description = &g.Group.Description
@@ -819,6 +834,11 @@ type monitorUpdate struct {
 	// value are three different instructions — leave the pin, unpin, and repin —
 	// and a *string collapses the first two.
 	ProbeID json.RawMessage `json:"probe_id"`
+
+	// And SLOTargetPercent for the same reason again: **removing a target has to
+	// be expressible**. A *float64 makes "clear this" indistinguishable from
+	// "leave it", which would let somebody set a target they could never undo.
+	SLOTargetPercent json.RawMessage `json:"slo_target_percent"`
 
 	TagIDs                 *[]string `json:"tag_ids"`
 	NotificationChannelIDs *[]string `json:"notification_channel_ids"`
@@ -1410,21 +1430,33 @@ type reportScopeJSON struct {
 }
 
 type reportTemplateJSON struct {
-	ID                  string          `json:"id"`
-	Name                string          `json:"name"`
-	Description         *string         `json:"description"`
-	Type                string          `json:"type"`
-	Scope               reportScopeJSON `json:"scope"`
-	Period              string          `json:"period"`
-	PeriodStyle         string          `json:"period_style"`
-	SLATarget           *float64        `json:"sla_target"`
-	ResponseTimeTarget  *int            `json:"response_time_target_ms"`
-	MaintenanceHandling string          `json:"maintenance_handling"`
-	BrandProfileID      *string         `json:"brand_profile_id"`
-	Sections            []string        `json:"sections"`
-	Formats             []string        `json:"formats"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	ID                  string                `json:"id"`
+	Name                string                `json:"name"`
+	Description         *string               `json:"description"`
+	Type                string                `json:"type"`
+	Scope               reportScopeJSON       `json:"scope"`
+	Period              string                `json:"period"`
+	PeriodStyle         string                `json:"period_style"`
+	SLATarget           *float64              `json:"sla_target"`
+	ResponseTimeTarget  *int                  `json:"response_time_target_ms"`
+	MaintenanceHandling string                `json:"maintenance_handling"`
+	BrandProfileID      *string               `json:"brand_profile_id"`
+	Comparison          *reportComparisonJSON `json:"comparison"`
+	Sections            []string              `json:"sections"`
+	Formats             []string              `json:"formats"`
+	CreatedAt           time.Time             `json:"created_at"`
+	UpdatedAt           time.Time             `json:"updated_at"`
+}
+
+// reportComparisonJSON configures a comparative report.
+//
+// Region against region is deliberately absent from the mode enum rather than
+// present and empty: the data does not exist until Phase 4, and a fourth mode
+// returning nothing would read as a broken feature rather than an unbuilt one.
+type reportComparisonJSON struct {
+	Mode       string   `json:"mode"`
+	MonitorIDs []string `json:"monitor_ids"`
+	GroupIDs   []string `json:"group_ids"`
 }
 
 // reportTemplateWrite is a PATCH body, and it has to tell three states apart:
@@ -1451,6 +1483,11 @@ type reportTemplateWrite struct {
 	MaintenanceHandling *string   `json:"maintenance_handling"`
 	Sections            *[]string `json:"sections"`
 	Formats             *[]string `json:"formats"`
+
+	// Clearable for the same reason the targets are: switching a template away
+	// from `comparative` should be able to remove the comparison rather than
+	// leave a configuration nothing reads.
+	Comparison json.RawMessage `json:"comparison"`
 }
 
 // clearing reports whether a field was sent as an explicit null. An absent field
@@ -1548,6 +1585,13 @@ func toReportTemplateJSON(t model.ReportTemplate) reportTemplateJSON {
 	if t.BrandProfileID != nil {
 		id := t.BrandProfileID.String()
 		out.BrandProfileID = &id
+	}
+	if t.Comparison != nil {
+		out.Comparison = &reportComparisonJSON{
+			Mode:       t.Comparison.Mode,
+			MonitorIDs: idsToStrings(t.Comparison.MonitorIDs),
+			GroupIDs:   idsToStrings(t.Comparison.GroupIDs),
+		}
 	}
 	return out
 }
@@ -1788,4 +1832,34 @@ func toReportScheduleJSON(s model.ReportSchedule, targets []model.ReportSchedule
 		out.Deliveries = append(out.Deliveries, item)
 	}
 	return out
+}
+
+// upcomingExpiryJSON is one row of the expiry calendar.
+//
+// `days_remaining` is signed rather than floored at zero, which is the one
+// decision on this shape worth stating: something that expired eleven days ago
+// reports −11, because that is the row somebody opened the page to find and
+// flooring it would file it beside "expires today".
+type upcomingExpiryJSON struct {
+	Kind          string    `json:"kind"`
+	MonitorID     string    `json:"monitor_id"`
+	MonitorName   string    `json:"monitor_name"`
+	Subject       *string   `json:"subject"`
+	Issuer        *string   `json:"issuer"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	DaysRemaining int       `json:"days_remaining"`
+	ObservedAt    time.Time `json:"observed_at"`
+}
+
+func toUpcomingExpiryJSON(e model.UpcomingExpiry) upcomingExpiryJSON {
+	return upcomingExpiryJSON{
+		Kind:          e.Kind,
+		MonitorID:     e.MonitorID.String(),
+		MonitorName:   e.MonitorName,
+		Subject:       optional(e.Subject),
+		Issuer:        optional(e.Issuer),
+		ExpiresAt:     e.ExpiresAt,
+		DaysRemaining: e.DaysRemaining,
+		ObservedAt:    e.ObservedAt,
+	}
 }

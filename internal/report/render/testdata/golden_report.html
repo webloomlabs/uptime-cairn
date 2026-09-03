@@ -56,7 +56,7 @@ footer { margin-top: 36px; padding-top: 14px; border-top: 1px solid #e2e5ea; col
 <p class="generated">Generated 1 April 2026</p>
 </header>
 <p>Monthly availability summary for the services covered by your agreement.</p>
-<p class="muted">Uptime is the share of observed checks that succeeded. Checks the probe could not make are excluded from the figure and reported separately: a gap in observation is not an outage. Declared maintenance is excluded. Figures are read at daily resolution, which is coarser than requested because retention no longer holds finer data for this period.</p>
+<p class="muted">Uptime is the share of observed checks that succeeded. Checks the probe could not make are excluded from the figure and reported separately: a gap in observation is not an outage. Declared maintenance is excluded. Figures are read at daily resolution, which is coarser than requested because retention no longer holds finer data for this period. A day is counted over target when its average response exceeded 500 ms. A check that exceeded the configured threshold is recorded as down and is not separable, in stored history, from one that did not answer at all — so this figure reports whether the response-time target was met, and no figure here describes how the service felt to use.</p>
 <h2>Summary</h2>
 <dl class="figures">
 <div>

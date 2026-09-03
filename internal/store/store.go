@@ -331,3 +331,20 @@ type DailyUptime struct {
 	// than as an outage.
 	Ratio *float64
 }
+
+// ExpiryFilter narrows the expiry calendar. Every field is optional.
+type ExpiryFilter struct {
+	// WithinDays bounds how far ahead to look. Nil means everything known.
+	//
+	// It does **not** bound how far back: an expiry that has already passed is
+	// the most urgent row on the calendar, and a filter that dropped it would
+	// hide exactly the entries somebody opened the page to find.
+	WithinDays *int
+
+	// Kinds is "certificate", "domain", or both. Empty means both.
+	Kinds []string
+
+	// TagIDs narrows to monitors carrying any of these tags, which is how an
+	// agency reads one client's calendar.
+	TagIDs []model.ID
+}

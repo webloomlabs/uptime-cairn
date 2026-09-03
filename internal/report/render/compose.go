@@ -14,12 +14,47 @@ import (
 //
 // Text fields are plain text and are treated as such by every backend.
 type Brand struct {
-	CompanyName   string
-	FooterText    string
-	CoverText     string
-	Logo          []byte
-	LogoMIME      string
+	CompanyName string
+
+	// Six-digit hex including the leading '#', as pasted from a brand guide.
+	// Empty means "use the renderer's own", which is what an unbranded install
+	// gets and is a deliberate look rather than a missing one.
+	PrimaryColor string
+	AccentColor  string
+
+	FooterText string
+	CoverText  string
+
+	Logo     []byte
+	LogoMIME string
+
 	HidePoweredBy bool
+}
+
+// Denormalised is the subset the stored document carries, in the shape the
+// frozen spec's `meta.brand` fixes.
+//
+// Narrower than this struct on purpose. The logo bytes are not in it because the
+// spec's field is a `logo_url` and there is no operation that serves one; the
+// accent colour and the cover text are not in it because the spec's object has
+// no place for them. Both are applied at render time, which is where they are
+// used, and the JSON artifact is a data document rather than a second copy of
+// the page.
+//
+// An entirely empty brand denormalises to nil rather than to an object of empty
+// strings: "this instance has no branding" is a different answer from "it has
+// branding that says nothing", and the spec types the field as nullable so that
+// both can be given.
+func (b Brand) Denormalised() *report.Brand {
+	if b.CompanyName == "" && b.PrimaryColor == "" && b.FooterText == "" && !b.HidePoweredBy {
+		return nil
+	}
+	return &report.Brand{
+		CompanyName:   b.CompanyName,
+		PrimaryColor:  b.PrimaryColor,
+		FooterText:    b.FooterText,
+		HidePoweredBy: b.HidePoweredBy,
+	}
 }
 
 // Compose turns a computed report into the bounded element list.
@@ -98,8 +133,162 @@ func Compose(doc report.Document, brand Brand) []Element {
 		out = append(out, KeyValues{Items: latencyFigures(s.ResponseTime)})
 	}
 
+	if doc.Comparison != nil && len(doc.Comparison.Series) > 0 {
+		out = append(out, comparisonSection(*doc.Comparison)...)
+	}
+	if len(doc.Incidents) > 0 {
+		out = append(out, incidentSection(doc)...)
+	}
+
 	out = append(out, Footer{Text: brand.FooterText, HidePoweredBy: brand.HidePoweredBy})
 	return out
+}
+
+// comparisonSection draws the comparative block as one table.
+//
+// A table rather than a chart, and that is the decision. Two or three series over
+// one window is four numbers a reader compares by eye in a second; a chart of
+// three bars is the same four numbers with an axis nobody reads and a legend that
+// has to be matched to it. The chart primitives exist and this deliberately does
+// not use them.
+func comparisonSection(c report.Comparison) []Element {
+	heading := "Compared with the previous period"
+	switch c.Mode {
+	case report.CompareMonitors:
+		heading = "Monitors compared"
+	case report.CompareGroups:
+		heading = "Groups compared"
+	}
+
+	columns := []Column{{Title: "Series"}}
+	if c.Mode == report.CompareToPreviousPeriod {
+		columns = append(columns, Column{Title: "Period"})
+	}
+	columns = append(columns,
+		Column{Title: "Uptime", Numeric: true},
+		Column{Title: "Observed", Numeric: true},
+		Column{Title: "Failed", Numeric: true},
+		Column{Title: "Avg response", Numeric: true},
+	)
+
+	table := Table{Columns: columns}
+	for _, series := range c.Series {
+		row := []string{series.Label}
+		if c.Mode == report.CompareToPreviousPeriod {
+			period := "—"
+			if series.PeriodStart != nil && series.PeriodEnd != nil {
+				period = formatPeriod(*series.PeriodStart, *series.PeriodEnd)
+			}
+			row = append(row, period)
+		}
+		row = append(row,
+			percentOrDash(series.Uptime.Ratio),
+			thousands(series.Uptime.ObservedChecks),
+			thousands(series.Uptime.DownChecks),
+			millis(series.ResponseTime.AverageMs),
+		)
+		table.Rows = append(table.Rows, row)
+	}
+
+	return []Element{
+		Heading{Text: heading, Level: 1},
+		// The caption earns its line: a comparison of unequal windows is the
+		// commonest way one of these gets misread, and the counts are the half
+		// that goes wrong while the ratios stay comparable.
+		Paragraph{Muted: true, Text: comparisonNote(c)},
+		table,
+	}
+}
+
+func comparisonNote(c report.Comparison) string {
+	if c.Mode != report.CompareToPreviousPeriod {
+		return "Both series cover the same window, so the counts are directly comparable."
+	}
+	return "The previous period is the same length placed immediately before this one, " +
+		"rather than the previous calendar period — otherwise February beside March would " +
+		"put 28 days against 31 and every count would differ for reasons that are about the " +
+		"calendar rather than about the service."
+}
+
+// incidentSection draws the post-mortem: the aggregate first, then the log.
+//
+// The aggregate leads because it is the sentence somebody quotes, and the log
+// follows because it is the evidence for it. Each mean carries **how many
+// incidents supplied it**, which is not decoration: "22 minutes, from one
+// incident of nine" is a very different claim from "22 minutes", and a reader who
+// cannot tell them apart will quote the wrong one.
+func incidentSection(doc report.Document) []Element {
+	out := []Element{Heading{Text: "Incidents", Level: 1}}
+
+	summary := doc.MTT
+	items := []KeyValue{{
+		Key:   "Incidents",
+		Value: thousands(summary.Incidents),
+	}}
+	for _, figure := range []struct {
+		key   string
+		value *int
+		known int
+	}{
+		{"Mean time to detect", summary.MeanTimeToDetect, summary.DetectKnownCount},
+		{"Mean time to acknowledge", summary.MeanTimeToAcknowledge, summary.AcknowledgeKnownCount},
+		{"Mean time to resolve", summary.MeanTimeToResolve, summary.ResolveKnownCount},
+	} {
+		items = append(items, KeyValue{
+			Key:   figure.key,
+			Value: durationOrUnknown(figure.value),
+			Note:  knownFrom(figure.known, summary.Incidents),
+		})
+	}
+	out = append(out, KeyValues{Items: items})
+
+	table := Table{Columns: []Column{
+		{Title: "Incident"},
+		{Title: "Started"},
+		{Title: "State"},
+		{Title: "To detect", Numeric: true},
+		{Title: "To acknowledge", Numeric: true},
+		{Title: "To resolve", Numeric: true},
+	}}
+	for _, in := range doc.Incidents {
+		table.Rows = append(table.Rows, []string{
+			in.Title,
+			in.StartedAt.Format("2 Jan 15:04"),
+			in.State,
+			durationOrUnknown(in.MTTDSeconds),
+			durationOrUnknown(in.MTTASeconds),
+			durationOrUnknown(in.MTTRSeconds),
+		})
+	}
+	return append(out, table)
+}
+
+// durationOrUnknown prints an interval, or says it is unknown.
+//
+// **"unknown", not a dash and not zero.** A dash reads as "none" and zero reads
+// as "instant", and the commonest of the three figures here is a time-to-detect
+// that genuinely is not known — `auto_opened` is never set before Phase 3, so an
+// incident recorded by hand has no detection time at all. A post-mortem that
+// printed 0 s there would claim the outage was noticed the moment it began.
+func durationOrUnknown(seconds *int) string {
+	if seconds == nil {
+		return "unknown"
+	}
+	return duration(*seconds)
+}
+
+// knownFrom says how many incidents supplied a mean, and stays silent when every
+// one of them did — a note saying "from 9 of 9" is noise on every row.
+func knownFrom(known, total int) string {
+	switch {
+	case total == 0:
+		return ""
+	case known == 0:
+		return "not recorded on any incident in this period"
+	case known == total:
+		return ""
+	}
+	return fmt.Sprintf("from %d of %d incidents", known, total)
 }
 
 // methodology is the sentence a disputed figure gets checked against.
@@ -126,7 +315,37 @@ func methodology(doc report.Document) string {
 	if from := doc.Meta.Resolution.CoveredFrom; from != nil {
 		fmt.Fprintf(&b, " Data is available only from %s; the period before that is not covered.", from.Format("2 January 2006"))
 	}
+
+	// The response-time SLI, but only where a target makes it one. A report with
+	// no response-time target has no such indicator to describe, and a sentence
+	// about a rule nobody set is noise on a page that is short on purpose.
+	if ms, ok := responseTarget(doc); ok {
+		fmt.Fprintf(&b, " A day is counted over target when its average response exceeded %d ms.", ms)
+		b.WriteString(" A check that exceeded the configured threshold is recorded as down and is not separable, in stored history, from one that did not answer at all — so this figure reports whether the response-time target was met, and no figure here describes how the service felt to use.")
+	}
 	return b.String()
+}
+
+// responseTarget reports the response-time target the document was measured
+// against, if it has one.
+//
+// The target is per-section rather than per-document because a scope can mix
+// monitors, but every section of one report shares the template's value in
+// practice: the first one found is the one the sentence names, and where they
+// differ the per-monitor "target 250ms" note beside each figure is the
+// authoritative statement. The alternative — a sentence per monitor in the
+// methodology block — would put the least-read text on the page in the place
+// most likely to be long.
+func responseTarget(doc report.Document) (int, bool) {
+	if doc.Summary != nil && doc.Summary.ResponseTime.TargetMs != nil {
+		return *doc.Summary.ResponseTime.TargetMs, true
+	}
+	for _, s := range doc.Monitors {
+		if s.ResponseTime.TargetMs != nil {
+			return *s.ResponseTime.TargetMs, true
+		}
+	}
+	return 0, false
 }
 
 func policyOf(doc report.Document) string {

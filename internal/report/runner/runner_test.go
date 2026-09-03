@@ -36,6 +36,12 @@ type fakeStore struct {
 	brand    model.BrandProfile
 	logo     []byte
 
+	// settings is the instance row the runner reads per run. brandErr makes the
+	// profile lookup fail, which is the path an install with no brand profile at
+	// all takes and the one the appearance fallback exists for.
+	settings model.Settings
+	brandErr error
+
 	monitors []model.Monitor
 	daily    map[model.ID][]store.HistoryBucket
 	totals   map[model.ID]store.HistoryBucket
@@ -85,11 +91,15 @@ func (f *fakeStore) ReportTemplateForRun(context.Context, model.ID) (model.Repor
 }
 
 func (f *fakeStore) GetBrandProfile(context.Context, model.ID) (model.BrandProfile, error) {
-	return f.brand, nil
+	return f.brand, f.brandErr
 }
 
 func (f *fakeStore) DefaultBrandProfile(context.Context) (model.BrandProfile, error) {
-	return f.brand, nil
+	return f.brand, f.brandErr
+}
+
+func (f *fakeStore) GetSettings(context.Context, model.ID) (model.Settings, error) {
+	return f.settings, nil
 }
 
 func (f *fakeStore) BrandLogo(context.Context, model.ID) ([]byte, string, error) {

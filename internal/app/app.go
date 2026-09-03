@@ -41,6 +41,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/probe"
 	"github.com/webloomlabs/uptime-cairn/internal/probe/check"
 	"github.com/webloomlabs/uptime-cairn/internal/report"
+	"github.com/webloomlabs/uptime-cairn/internal/report/delivery"
 	"github.com/webloomlabs/uptime-cairn/internal/report/render"
 	"github.com/webloomlabs/uptime-cairn/internal/report/runner"
 	"github.com/webloomlabs/uptime-cairn/internal/rollup"
@@ -260,19 +261,51 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 	}
 
 	artifacts := artifact.New(cfg.DataDir, artifact.DefaultMaxBytes)
+
+	// Runs a previous process was killed in the middle of are finished before any
+	// worker starts, which is the only moment it can be done without a threshold:
+	// nothing is running yet, so every `running` row belongs to a process that is
+	// gone. Left alone, such a row is indistinguishable on the screen from a
+	// report that is genuinely in flight, and it never changes again.
+	//
+	// Not fatal. An install that cannot tidy its history should still monitor.
+	if recovered, err := store.RecoverInterruptedReportRuns(ctx, time.Now().UTC()); err != nil {
+		log.Warn("recover interrupted report runs", "error", err)
+	} else if recovered > 0 {
+		log.Info("finished report runs interrupted by a restart", "runs", recovered)
+	}
+
 	reportPool := runner.NewPool(
 		runner.New(store, artifacts, runner.Options{
 			Retention:    reportRetention(rollup.DefaultRetention()),
 			ArtifactDays: model.DefaultReportArtifactDays,
 			Fonts:        fonts,
 		}),
-		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports"))
+		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports")).
+		// Delivery hangs off the pool rather than being part of a run, which is
+		// what makes "the PDF failed but the HTML went out" and "re-send last
+		// month's" expressible: a run produces artifacts and finishes, and
+		// handing them over is a separate step whose failure is a delivery row
+		// rather than a failed report.
+		//
+		// The vault is the notification channels' own, so a target that names a
+		// channel reads that channel's credentials rather than a copy — which is
+		// what makes a rotated Slack token a one-place change.
+		WithDeliverer(delivery.New(store, artifacts, notify.NewVault(keeper),
+			cfg.InstanceName, log.With("component", "reports")))
 	reportPool.Start(ctx)
 
 	// The scheduler turns saved schedules into queued runs and does nothing
 	// else. A tick is one seek on the partial index migration 0008 created for
 	// it, so an install with no schedules pays a lookup that returns no rows.
 	go runner.NewScheduler(store, reportPool, log.With("component", "reports")).Run(ctx)
+
+	// The two reclaim passes ADR-008 requires: bytes past their retention date,
+	// and the orphan files write-then-commit deliberately leaves behind. Without
+	// this the reports directory only ever grows, and it grows silently — the
+	// database index stays small, so nothing in the product looks wrong until a
+	// disk fills.
+	go runner.NewSweeper(store, artifacts, log.With("component", "reports")).Run(ctx)
 
 	apiServer := api.New(store, publisher, sweeps, cp, events, registry, keeper,
 		log.With("component", "api"), cfg.InstanceName).

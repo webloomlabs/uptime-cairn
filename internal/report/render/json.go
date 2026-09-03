@@ -24,11 +24,12 @@ import (
 const dateOnly = "2006-01-02"
 
 type documentJSON struct {
-	Meta      metaJSON             `json:"meta"`
-	Scope     scopeJSON            `json:"scope"`
-	Summary   *estateJSON          `json:"summary"`
-	Monitors  []monitorSectionJSON `json:"monitors"`
-	Incidents []incidentJSON       `json:"incidents"`
+	Meta       metaJSON             `json:"meta"`
+	Scope      scopeJSON            `json:"scope"`
+	Summary    *estateJSON          `json:"summary"`
+	Monitors   []monitorSectionJSON `json:"monitors"`
+	Incidents  []incidentJSON       `json:"incidents"`
+	Comparison *comparisonJSON      `json:"comparison"`
 }
 
 type metaJSON struct {
@@ -41,6 +42,25 @@ type metaJSON struct {
 	PeriodEnd        time.Time      `json:"period_end"`
 	Timezone         string         `json:"timezone"`
 	Resolution       resolutionJSON `json:"resolution"`
+
+	// Null on an unbranded instance rather than an empty object, because the
+	// spec types the field as nullable and "there is no branding" and "there is
+	// branding with nothing in it" are different answers to a consumer.
+	Brand *brandJSON `json:"brand"`
+}
+
+// brandJSON is `meta.brand` exactly as the spec fixes it.
+//
+// logo_url is emitted as null and stays null: the spec defines the field and
+// defines no operation that serves the bytes — PUT .../logo exists with no GET
+// beside it — so a URL here would name an endpoint answering 405. It is the same
+// gap BrandProfile.logo_url has, recorded rather than invented around.
+type brandJSON struct {
+	CompanyName   *string `json:"company_name"`
+	PrimaryColor  *string `json:"primary_color"`
+	FooterText    *string `json:"footer_text"`
+	LogoURL       *string `json:"logo_url"`
+	HidePoweredBy bool    `json:"hide_powered_by"`
 }
 
 type resolutionJSON struct {
@@ -138,12 +158,51 @@ type p95JSON struct {
 	UnavailableReason *string    `json:"unavailable_reason"`
 }
 
+// incidentJSON is ReportIncident, and the three null-able intervals are the
+// whole point of the shape.
+//
+// **mttd_seconds is frequently null and is reported as unknown rather than
+// inferred.** `auto_opened` is never set before Phase 3, so an incident recorded
+// by hand has no detection time, and a post-mortem that treated `started_at` as
+// the detection would report a time-to-detect of zero on an outage nobody noticed
+// for forty minutes — a confident wrong number in a document written for the
+// people who were affected.
+//
+// alerts_fired distinguishes null from zero for the same class of reason. Zero
+// means the delivery log covers this incident and holds nothing, which reads as
+// *nobody was told* and is one of the more serious findings a post-mortem can
+// carry; null means the rows have been swept. A retention policy must not be able
+// to manufacture that finding.
 type incidentJSON struct {
-	ID         string     `json:"id"`
-	Title      string     `json:"title"`
-	State      string     `json:"state"`
-	StartedAt  time.Time  `json:"started_at"`
-	ResolvedAt *time.Time `json:"resolved_at"`
+	ID             string     `json:"id"`
+	Title          string     `json:"title"`
+	State          string     `json:"state"`
+	Impact         string     `json:"impact"`
+	StartedAt      time.Time  `json:"started_at"`
+	DetectedAt     *time.Time `json:"detected_at"`
+	AcknowledgedAt *time.Time `json:"acknowledged_at"`
+	ResolvedAt     *time.Time `json:"resolved_at"`
+	AutoOpened     bool       `json:"auto_opened"`
+	MonitorIDs     []string   `json:"monitor_ids"`
+	MTTDSeconds    *int       `json:"mttd_seconds"`
+	MTTASeconds    *int       `json:"mtta_seconds"`
+	MTTRSeconds    *int       `json:"mttr_seconds"`
+	AlertsFired    *int       `json:"alerts_fired"`
+}
+
+// comparisonJSON is the comparative block, present for that type and null for
+// every other — the spec's own shape.
+type comparisonJSON struct {
+	Mode   string             `json:"mode"`
+	Series []comparisonSeries `json:"series"`
+}
+
+type comparisonSeries struct {
+	Label        string           `json:"label"`
+	PeriodStart  *time.Time       `json:"period_start"`
+	PeriodEnd    *time.Time       `json:"period_end"`
+	Uptime       uptimeJSON       `json:"uptime"`
+	ResponseTime responseTimeJSON `json:"response_time"`
 }
 
 // JSON renders the document as the published JSON artifact.
@@ -178,6 +237,7 @@ func JSON(doc report.Document) ([]byte, error) {
 				Downgraded:    doc.Meta.Resolution.Downgraded,
 				CoveredFrom:   doc.Meta.Resolution.CoveredFrom,
 			},
+			Brand: brandFor(doc.Meta.Brand),
 		},
 		Scope: scopeJSON{
 			MonitorCount: doc.Scope.MonitorCount,
@@ -236,12 +296,38 @@ func JSON(doc report.Document) ([]byte, error) {
 
 	for _, inc := range doc.Incidents {
 		out.Incidents = append(out.Incidents, incidentJSON{
-			ID:         inc.ID.String(),
-			Title:      inc.Title,
-			State:      string(inc.State),
-			StartedAt:  inc.StartedAt,
-			ResolvedAt: inc.ResolvedAt,
+			ID:             inc.ID.String(),
+			Title:          inc.Title,
+			State:          inc.State,
+			Impact:         inc.Impact,
+			StartedAt:      inc.StartedAt,
+			DetectedAt:     inc.DetectedAt,
+			AcknowledgedAt: inc.AcknowledgedAt,
+			ResolvedAt:     inc.ResolvedAt,
+			AutoOpened:     inc.AutoOpened,
+			MonitorIDs:     ids(inc.MonitorIDs),
+			MTTDSeconds:    inc.MTTDSeconds,
+			MTTASeconds:    inc.MTTASeconds,
+			MTTRSeconds:    inc.MTTRSeconds,
+			AlertsFired:    inc.AlertsFired,
 		})
+	}
+
+	if doc.Comparison != nil {
+		block := comparisonJSON{
+			Mode:   doc.Comparison.Mode,
+			Series: make([]comparisonSeries, 0, len(doc.Comparison.Series)),
+		}
+		for _, series := range doc.Comparison.Series {
+			block.Series = append(block.Series, comparisonSeries{
+				Label:        series.Label,
+				PeriodStart:  series.PeriodStart,
+				PeriodEnd:    series.PeriodEnd,
+				Uptime:       uptimeToJSON(series.Uptime),
+				ResponseTime: latencyToJSON(series.ResponseTime),
+			})
+		}
+		out.Comparison = &block
 	}
 
 	return json.MarshalIndent(out, "", "  ")
@@ -329,4 +415,17 @@ func idPtr(id *model.ID) *string {
 	}
 	s := id.String()
 	return &s
+}
+
+// brandFor renders the denormalised profile, or null where there is none.
+func brandFor(b *report.Brand) *brandJSON {
+	if b == nil {
+		return nil
+	}
+	return &brandJSON{
+		CompanyName:   emptyToNil(b.CompanyName),
+		PrimaryColor:  emptyToNil(b.PrimaryColor),
+		FooterText:    emptyToNil(b.FooterText),
+		HidePoweredBy: b.HidePoweredBy,
+	}
 }

@@ -651,6 +651,36 @@ func applyReportTemplate(t *model.ReportTemplate, body reportTemplateWrite) []Va
 			}
 		}
 	}
+	if len(body.Comparison) > 0 {
+		if clearing(body.Comparison) {
+			t.Comparison = nil
+		} else {
+			comparison, comparisonProblems := parseReportComparison(body.Comparison)
+			problems = append(problems, comparisonProblems...)
+			if len(comparisonProblems) == 0 {
+				t.Comparison = comparison
+			}
+		}
+	}
+
+	// **A comparative template with no comparison is refused at write time**
+	// rather than discovered by a run that produces a report with nothing on it.
+	// It is the same rule the schedule handler applies to a cron that matches
+	// nothing: a definition that cannot do what its type says is a mistake
+	// somebody is standing in front of a screen to fix, not a silence to
+	// discover next month.
+	if t.Type == model.ReportTypeComparative && t.Comparison == nil {
+		problems = append(problems, ValidationItem{Pointer: "/comparison", Code: "required",
+			Message: "a comparative report needs a comparison; choose previous_period, or name the monitors or groups to compare"})
+	}
+	// And the converse: a comparison on a template of any other type is
+	// configuration nothing will read, which is worth refusing while the reason
+	// is on the screen rather than storing and ignoring.
+	if t.Comparison != nil && t.Type != model.ReportTypeComparative {
+		problems = append(problems, ValidationItem{Pointer: "/comparison", Code: "conflict",
+			Message: "comparison applies to a comparative report; this template's type is " + t.Type})
+	}
+
 	if body.Sections != nil {
 		t.Sections = *body.Sections
 	}
@@ -711,4 +741,56 @@ func oneOf(value string, allowed ...string) bool {
 		}
 	}
 	return false
+}
+
+// parseReportComparison reads the comparison block.
+//
+// The two entity modes need something to compare, and an empty list is refused
+// rather than accepted: "compare these monitors" naming no monitors produces a
+// report with one column, which reads as a rendering bug rather than as a
+// configuration mistake.
+func parseReportComparison(raw json.RawMessage) (*model.ReportComparison, []ValidationItem) {
+	var body reportComparisonJSON
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, []ValidationItem{{Pointer: "/comparison", Code: "invalid",
+			Message: "comparison must be an object or null"}}
+	}
+
+	if !oneOf(body.Mode, report.CompareToPreviousPeriod, report.CompareMonitors, report.CompareGroups) {
+		return nil, []ValidationItem{{Pointer: "/comparison/mode", Code: "invalid",
+			Message: "mode must be previous_period, monitors or groups"}}
+	}
+
+	out := &model.ReportComparison{Mode: body.Mode}
+	var problems []ValidationItem
+
+	for _, raw := range body.MonitorIDs {
+		id, ok := model.ParseID(raw)
+		if !ok {
+			problems = append(problems, ValidationItem{Pointer: "/comparison/monitor_ids",
+				Code: "invalid", Message: "not a uuid: " + raw})
+			continue
+		}
+		out.MonitorIDs = append(out.MonitorIDs, id)
+	}
+	for _, raw := range body.GroupIDs {
+		id, ok := model.ParseID(raw)
+		if !ok {
+			problems = append(problems, ValidationItem{Pointer: "/comparison/group_ids",
+				Code: "invalid", Message: "not a uuid: " + raw})
+			continue
+		}
+		out.GroupIDs = append(out.GroupIDs, id)
+	}
+
+	switch {
+	case body.Mode == report.CompareMonitors && len(out.MonitorIDs) < 2:
+		problems = append(problems, ValidationItem{Pointer: "/comparison/monitor_ids",
+			Code: "invalid", Message: "comparing monitors needs at least two of them"})
+	case body.Mode == report.CompareGroups && len(out.GroupIDs) < 2:
+		problems = append(problems, ValidationItem{Pointer: "/comparison/group_ids",
+			Code: "invalid", Message: "comparing groups needs at least two of them"})
+	}
+
+	return out, problems
 }

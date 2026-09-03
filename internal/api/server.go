@@ -103,6 +103,7 @@ type Store interface {
 	ReportStore
 	ReportScheduleStore
 	BrandStore
+	ExpiryStore
 	IdentityStore
 	ChannelStore
 	MaintenanceStore
@@ -483,6 +484,11 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}", s.require(auth.ScopeReportsRead, s.getReportRun))
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}/download", s.require(auth.ScopeReportsRead, s.downloadReportArtifact))
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}/artifacts/{artifactId}", s.require(auth.ScopeReportsRead, s.downloadReportArtifactByID))
+
+	// monitors:read rather than reports:read, which is the spec's choice: the
+	// rows are facts about monitors, and a key that can see a monitor can
+	// already read its certificate one at a time.
+	authed.HandleFunc("GET /api/v1/expiries", s.require(auth.ScopeMonitorsRead, s.listUpcomingExpiries))
 
 	authed.HandleFunc("GET /api/v1/settings", s.require(auth.ScopeSettingsRead, s.getSettings))
 	authed.HandleFunc("PATCH /api/v1/settings", s.require(auth.ScopeSettingsWrite, s.updateSettings))

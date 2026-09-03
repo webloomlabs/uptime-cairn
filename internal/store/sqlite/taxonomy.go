@@ -18,16 +18,18 @@ import (
 // it holds and the worst thing any of them is doing — so both come back from the
 // same query as the page rather than from a round trip per row.
 
-const groupColumns = `g.id, g.org_id, g.name, g.description, g.parent_group_id, g.created_at, g.updated_at`
+const groupColumns = `g.id, g.org_id, g.name, g.description, g.parent_group_id,
+	g.slo_target_percent, g.created_at, g.updated_at`
 const tagColumns = `t.id, t.org_id, t.name, t.slug, t.color, t.description, t.created_at, t.updated_at`
 
 // CreateGroup inserts a group.
 func (s *Store) CreateGroup(ctx context.Context, g model.Group) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO groups (id, org_id, name, description, parent_group_id, created_at, updated_at)
-		VALUES (?,?,?,?,?,?,?)`,
+		INSERT INTO groups (id, org_id, name, description, parent_group_id,
+		    slo_target_percent, created_at, updated_at)
+		VALUES (?,?,?,?,?,?,?,?)`,
 		g.ID[:], g.OrgID[:], g.Name, nullString(g.Description), nullID(g.ParentGroupID),
-		millis(g.CreatedAt), millis(g.UpdatedAt))
+		nullFloat(g.SLOTargetPercent), millis(g.CreatedAt), millis(g.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("insert group: %w", err)
 	}
@@ -37,9 +39,11 @@ func (s *Store) CreateGroup(ctx context.Context, g model.Group) error {
 // UpdateGroup replaces the mutable columns.
 func (s *Store) UpdateGroup(ctx context.Context, g model.Group) error {
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE groups SET name = ?, description = ?, parent_group_id = ?, updated_at = ?
+		UPDATE groups SET name = ?, description = ?, parent_group_id = ?,
+		    slo_target_percent = ?, updated_at = ?
 		WHERE id = ?`,
-		g.Name, nullString(g.Description), nullID(g.ParentGroupID), millis(g.UpdatedAt), g.ID[:])
+		g.Name, nullString(g.Description), nullID(g.ParentGroupID),
+		nullFloat(g.SLOTargetPercent), millis(g.UpdatedAt), g.ID[:])
 	if err != nil {
 		return fmt.Errorf("update group: %w", err)
 	}
@@ -399,15 +403,21 @@ func scanGroup(row scanner) (model.Group, error) {
 		g                    model.Group
 		id, orgID, parentID  []byte
 		description          sql.NullString
+		sloTarget            sql.NullFloat64
 		createdAt, updatedAt int64
 	)
-	if err := row.Scan(&id, &orgID, &g.Name, &description, &parentID, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&id, &orgID, &g.Name, &description, &parentID, &sloTarget,
+		&createdAt, &updatedAt); err != nil {
 		return model.Group{}, err
 	}
 	copy(g.ID[:], id)
 	copy(g.OrgID[:], orgID)
 	g.Description = description.String
 	g.ParentGroupID = idFromBytes(parentID)
+	if sloTarget.Valid {
+		v := sloTarget.Float64
+		g.SLOTargetPercent = &v
+	}
 	g.CreatedAt = fromMillis(createdAt)
 	g.UpdatedAt = fromMillis(updatedAt)
 	return g, nil
