@@ -44,7 +44,12 @@
 	async function generate(template: ReportTemplate) {
 		delete refused[template.id];
 		try {
-			const run = await api.post<ReportRun>(`/report-templates/${template.id}/generate`);
+			// An explicit empty object, not an absent body: the endpoint's requestBody
+			// is `required: true` (docs/api/openapi.yaml), so a bodyless POST is
+			// refused with `malformed-json` and a detail of "EOF" before any of the
+			// fields' documented defaults apply. `{}` is what asks for them: the
+			// template's own period, resolved to the last completed one.
+			const run = await api.post<ReportRun>(`/report-templates/${template.id}/generate`, {});
 			queued[template.id] = run.id;
 		} catch (caught) {
 			// 501 with no worker, 503 with a full queue. Both are the server saying
