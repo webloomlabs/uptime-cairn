@@ -9,6 +9,16 @@ them, not which files moved.
 
 ## [Unreleased]
 
+## [1.1.0-beta.1] — 2026-09-04
+
+The Phase 2 reporting subsystem, released as a beta. Everything below is
+implemented and installable; what it is not yet is frozen. Per
+[COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §1 the `/api/v1` freeze attaches at
+the first stable tag, so the reporting operations stay editable until `1.1.0`.
+That is the point of a beta, and it is the window in which a report about the
+shape of these endpoints can still be acted on rather than deferred to
+`/api/v2`.
+
 ### Changed
 
 - **Licence is now Apache 2.0**, replacing AGPL 3.0 throughout the project —
@@ -175,6 +185,7 @@ SQLite on disk and no database server to run.
   `ghcr.io/webloomlabs/uptime-cairn` and `webloomlabs/uptime-cairn` on Docker Hub.
 - Load-test gate in CI holding the single-instance target of 5,000 monitors.
 
-[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0-beta.1...HEAD
+[1.1.0-beta.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.1...v1.1.0-beta.1
 [1.0.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.0-rc.1...v1.0.1
 [1.0.0-rc.1]: https://github.com/webloomlabs/uptime-cairn/releases/tag/v1.0.0-rc.1
