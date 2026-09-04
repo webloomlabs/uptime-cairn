@@ -30,7 +30,13 @@ const (
 // record that needs a CDN to render is not one. It is also what makes the file
 // safe to email, which is how most of these actually travel.
 func HTML(doc report.Document, brand Brand) ([]byte, error) {
-	elements := Compose(doc, brand)
+	return HTMLSections(doc, brand, nil)
+}
+
+// HTMLSections is HTML with a template's chosen content blocks. A nil selection
+// composes the defaults, which is what HTML passes.
+func HTMLSections(doc report.Document, brand Brand, sections []string) ([]byte, error) {
+	elements := ComposeSections(doc, brand, sections)
 
 	var b strings.Builder
 	b.WriteString("<!doctype html>\n<html lang=\"en\">\n<head>\n")

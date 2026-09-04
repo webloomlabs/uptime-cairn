@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/report"
 )
 
@@ -73,7 +74,31 @@ func (b Brand) Denormalised() *report.Brand {
 //     different lawful percentages, and a figure without its policy cannot be
 //     checked by the person it is handed to.
 func Compose(doc report.Document, brand Brand) []Element {
+	return ComposeSections(doc, brand, nil)
+}
+
+// ComposeSections is Compose with a template's chosen content blocks.
+//
+// A nil or empty selection composes the defaults for the document, which is what
+// Compose passes and what every template that has never named a section gets. See
+// sections.go for what selection and ordering mean, and for the one structural
+// rule: the per-monitor group is emitted once, where its first member was named.
+//
+// **The cover, the methodology note and the footer are not sections and cannot be
+// deselected.** That is deliberate rather than an omission. The methodology note
+// carries the denominator and the maintenance policy, and §4.3 makes both an
+// obligation of the report face — a figure whose policy can be switched off is a
+// figure that cannot be checked by the person it is handed to, which is the exact
+// failure a report exists to prevent. The frozen enum has no name for any of the
+// three, so nothing is being refused that the API offers.
+func ComposeSections(doc report.Document, brand Brand, sections []string) []Element {
 	var out []Element
+
+	layout := resolveLayout(sections, reportShape{
+		hasSummary:    doc.Summary != nil,
+		hasComparison: doc.Comparison != nil && len(doc.Comparison.Series) > 0,
+		hasIncidents:  len(doc.Incidents) > 0,
+	})
 
 	period := formatPeriod(doc.Meta.PeriodStart, doc.Meta.PeriodEnd)
 	out = append(out, Cover{
@@ -94,54 +119,113 @@ func Compose(doc report.Document, brand Brand) []Element {
 	// number has already been misread.
 	out = append(out, Paragraph{Muted: true, Text: methodology(doc)})
 
-	if doc.Summary != nil {
-		out = append(out, Heading{Text: "Summary", Level: 1})
-		out = append(out, KeyValues{Items: uptimeFigures(doc.Summary.Uptime)})
-		out = append(out, KeyValues{Items: latencyFigures(doc.Summary.ResponseTime)})
-	}
-
-	for _, s := range doc.Monitors {
-		out = append(out, Heading{Text: s.Name, Level: 1})
-
-		if len(s.DailyUptime) > 0 {
-			out = append(out, Chart{
-				Kind:    ChartUptimeStrip,
-				Title:   "Daily availability",
-				Caption: "Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage.",
-				Days:    s.DailyUptime,
-			})
-		}
-		out = append(out, KeyValues{Items: uptimeFigures(s.Uptime)})
-
-		if s.SLA != nil {
-			out = append(out, Heading{Text: "Service level", Level: 2})
-			out = append(out, KeyValues{Items: slaFigures(*s.SLA)})
-			if len(s.Breaches) > 0 {
-				out = append(out, breachTable(s.Breaches))
+	for _, block := range layout.order {
+		switch block {
+		case model.SectionSummary:
+			if doc.Summary != nil {
+				out = append(out, Heading{Text: "Summary", Level: 1})
+				out = append(out, KeyValues{Items: uptimeFigures(doc.Summary.Uptime)})
+				out = append(out, KeyValues{Items: latencyFigures(doc.Summary.ResponseTime)})
 			}
+		case monitorBlock:
+			for _, s := range doc.Monitors {
+				out = append(out, monitorSection(s, layout)...)
+			}
+		case model.SectionComparison:
+			if doc.Comparison != nil && len(doc.Comparison.Series) > 0 {
+				out = append(out, comparisonSection(*doc.Comparison)...)
+			}
+		case model.SectionIncidentLog:
+			if len(doc.Incidents) > 0 {
+				out = append(out, incidentSection(doc)...)
+			}
+		case model.SectionMaintenanceLog, model.SectionCertificateExpiry:
+			// **Named by the frozen enum and not composed by anything.**
+			//
+			// Selecting one is accepted at the API — it is a valid section — and
+			// contributes no block, which is the honest behaviour while the
+			// document model has no element for either. A maintenance log needs a
+			// windows query the report store does not have; a certificate expiry
+			// table is the expiry-calendar report type, which is its own piece of
+			// work with its own entry on the Phase 2 checklist.
+			//
+			// Silently absent rather than refused, because refusing at render
+			// time would fail a queued run over a choice the API accepted, and
+			// refusing at the API would narrow a frozen enum.
 		}
-
-		out = append(out, Heading{Text: "Response time", Level: 2})
-		if len(s.ResponseTime.Daily) > 0 {
-			out = append(out, Chart{
-				Kind:    ChartLatencyLine,
-				Title:   "Daily average",
-				Caption: "The line breaks where nothing was measured rather than joining across it.",
-				Latency: s.ResponseTime.Daily,
-			})
-		}
-		out = append(out, KeyValues{Items: latencyFigures(s.ResponseTime)})
-	}
-
-	if doc.Comparison != nil && len(doc.Comparison.Series) > 0 {
-		out = append(out, comparisonSection(*doc.Comparison)...)
-	}
-	if len(doc.Incidents) > 0 {
-		out = append(out, incidentSection(doc)...)
 	}
 
 	out = append(out, Footer{Text: brand.FooterText, HidePoweredBy: brand.HidePoweredBy})
 	return out
+}
+
+// monitorSection draws one monitor's blocks, in the order the template named
+// them.
+//
+// The heading is emitted only when there is something under it. A selection of
+// document-level sections alone should not produce a page of monitor names with
+// nothing beneath each — which is what an unconditional heading would give, and
+// which reads as a rendering fault rather than as a choice somebody made.
+func monitorSection(s report.MonitorSection, layout layout) []Element {
+	var body []Element
+
+	for _, block := range layout.within {
+		switch block {
+		case model.SectionUptimeChart:
+			if len(s.DailyUptime) > 0 {
+				body = append(body, Chart{
+					Kind:    ChartUptimeStrip,
+					Title:   "Daily availability",
+					Caption: "Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage.",
+					Days:    s.DailyUptime,
+				})
+			}
+		case model.SectionUptimeTable:
+			body = append(body, KeyValues{Items: uptimeFigures(s.Uptime)})
+		case model.SectionSLABreakdown, model.SectionErrorBudget:
+			// One block for two names. The spec separates them and ADR-006 does
+			// not: the error budget is computed from the same up and down counts
+			// as the target-versus-actual line and is rendered beside it, so
+			// splitting the block would put a budget on one page and the target
+			// it is a budget against on another. Selecting either gives the
+			// whole service-level block; selecting both gives it once, which the
+			// guard below is for.
+			if s.SLA != nil && !slaAlreadyDrawn(body) {
+				body = append(body, Heading{Text: "Service level", Level: 2})
+				body = append(body, KeyValues{Items: slaFigures(*s.SLA)})
+				if len(s.Breaches) > 0 {
+					body = append(body, breachTable(s.Breaches))
+				}
+			}
+		case model.SectionResponseTime:
+			body = append(body, Heading{Text: "Response time", Level: 2})
+			if len(s.ResponseTime.Daily) > 0 {
+				body = append(body, Chart{
+					Kind:    ChartLatencyLine,
+					Title:   "Daily average",
+					Caption: "The line breaks where nothing was measured rather than joining across it.",
+					Latency: s.ResponseTime.Daily,
+				})
+			}
+			body = append(body, KeyValues{Items: latencyFigures(s.ResponseTime)})
+		}
+	}
+
+	if len(body) == 0 {
+		return nil
+	}
+	return append([]Element{Heading{Text: s.Name, Level: 1}}, body...)
+}
+
+// slaAlreadyDrawn stops sla_breakdown and error_budget drawing the block twice
+// when a template names both.
+func slaAlreadyDrawn(body []Element) bool {
+	for _, e := range body {
+		if h, ok := e.(Heading); ok && h.Text == "Service level" {
+			return true
+		}
+	}
+	return false
 }
 
 // comparisonSection draws the comparative block as one table.

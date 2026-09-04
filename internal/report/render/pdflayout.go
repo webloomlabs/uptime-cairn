@@ -78,7 +78,13 @@ type pdfLayout struct {
 // vendored asset and a visual identity commitment that belongs to the
 // maintainer — see the note at the top of font.go.
 func PDFDocument(doc report.Document, brand Brand, family Family) ([]byte, error) {
-	p, err := pdfFor(doc, brand, family)
+	return PDFSections(doc, brand, family, nil)
+}
+
+// PDFSections is PDFDocument with a template's chosen content blocks. A nil
+// selection composes the defaults, which is what PDFDocument passes.
+func PDFSections(doc report.Document, brand Brand, family Family, sections []string) ([]byte, error) {
+	p, err := pdfFor(doc, brand, family, sections)
 	if err != nil {
 		return nil, err
 	}
@@ -89,11 +95,11 @@ func PDFDocument(doc report.Document, brand Brand, family Family) ([]byte, error
 // tests can assert on pages — what broke where, what is on the cover — without
 // restating the flow loop below, which is the way a test ends up passing against
 // a copy of the code rather than against the code.
-func pdfFor(doc report.Document, brand Brand, family Family) (*PDF, error) {
+func pdfFor(doc report.Document, brand Brand, family Family, sections []string) (*PDF, error) {
 	if family.Regular == nil {
 		return nil, fmt.Errorf("render: PDF needs an embedded font family")
 	}
-	l := flow(Compose(doc, brand), family, brand)
+	l := flow(ComposeSections(doc, brand, sections), family, brand)
 	l.runningFooters()
 	return l.pdf, nil
 }

@@ -647,3 +647,61 @@ func TestASharedReportDoesNotOfferMissingFormats(t *testing.T) {
 		t.Errorf("the 410 blames retention for a missing file: %s", body)
 	}
 }
+
+// **`sections` is validated, which it was not until it did something.**
+//
+// The field was stored and round-tripped while nothing read it, so an unknown
+// name was harmless. Now that it selects content, a typo is a block silently
+// missing from every report the template produces — and the composer drops what
+// it cannot recognise rather than failing a queued run, so nothing downstream
+// would ever report it. This is the only place it can be caught while somebody
+// is looking at the form.
+func TestAnUnknownSectionIsRefused(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	resp, body := c.do(http.MethodPost, "/api/v1/report-templates", map[string]any{
+		"name": "Custom", "type": "custom", "formats": []string{"json"},
+		"sections": []string{"summary", "uptime_tables"},
+	})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, body)
+	}
+	// The pointer names the offending element rather than the array, so a form
+	// with ten chips can highlight the one that is wrong.
+	if pointer := firstErrorPointer(body); pointer != "/sections/1" {
+		t.Errorf("pointer = %q, want /sections/1", pointer)
+	}
+	// And the message lists the alternatives, because "invalid" on a closed
+	// vocabulary is a trip to the specification.
+	if !strings.Contains(problemMessages(body), "uptime_table") {
+		t.Errorf("messages = %q, want the vocabulary listed", problemMessages(body))
+	}
+}
+
+// A valid selection round-trips in the order it was given. Order is part of the
+// contract — the spec calls them "ordered content blocks" — so a store that
+// sorted or de-duplicated them would be changing what was asked for.
+func TestSectionsRoundTripInOrder(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	want := []any{"response_time", "summary", "uptime_table"}
+
+	resp, body := c.do(http.MethodPost, "/api/v1/report-templates", map[string]any{
+		"name": "Custom", "type": "custom", "formats": []string{"json"},
+		"sections": want,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (%v)", resp.StatusCode, body)
+	}
+	got, _ := body["sections"].([]any)
+	if len(got) != len(want) {
+		t.Fatalf("sections = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("sections[%d] = %v, want %v (order is part of the contract)", i, got[i], want[i])
+		}
+	}
+}

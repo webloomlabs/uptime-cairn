@@ -27,6 +27,15 @@ them, not which files moved.
 
 ### Added
 
+- **A report template's `sections` now selects what the report contains.** The
+  field was stored and round-tripped while nothing read it, so a `custom` report
+  rendered the full document regardless. It now emits the blocks it names, in the
+  order it names them, and the template editor has a **Content** picker showing
+  each block's position. Selecting nothing keeps the standard blocks for the
+  report type, so no existing template changes. Applies to the PDF and HTML; the
+  JSON and CSV are data exports and still contain the full document. Unknown
+  section names are now refused with the vocabulary listed, which they were not
+  before — while nothing read the field, a typo was harmless.
 - **Public share links for report runs.** `POST /api/v1/report-runs/{id}/share`
   returns a URL anyone can open; `DELETE` withdraws it immediately, leaving the
   files untouched. The link is shown **once** — the token is stored hashed for

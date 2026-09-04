@@ -160,7 +160,7 @@ func (r *Runner) Execute(ctx context.Context, run model.ReportRun, now time.Time
 	// another.
 	settings := r.settingsFor(ctx, run)
 
-	doc, brand, err := r.compose(ctx, run, settings, now)
+	doc, brand, sections, err := r.compose(ctx, run, settings, now)
 	if err != nil {
 		// Nothing rendered because nothing could be computed. This is the one
 		// genuinely failed run: no artifact exists, so there is no partial state
@@ -188,7 +188,7 @@ func (r *Runner) Execute(ctx context.Context, run model.ReportRun, now time.Time
 			return r.interrupted(ctx, run, rendered, now)
 		}
 
-		data, renderErr := r.render(doc, brand, format)
+		data, renderErr := r.render(doc, brand, sections, format)
 		if renderErr == nil {
 			renderErr = r.storeArtifact(ctx, run, settings, format, data, now)
 		}
@@ -291,15 +291,15 @@ func (r *Runner) retentionFor(settings model.Settings) report.Retention {
 }
 
 // compose builds the document and resolves the branding.
-func (r *Runner) compose(ctx context.Context, run model.ReportRun, settings model.Settings, now time.Time) (report.Document, render.Brand, error) {
+func (r *Runner) compose(ctx context.Context, run model.ReportRun, settings model.Settings, now time.Time) (report.Document, render.Brand, []string, error) {
 	template, err := r.store.ReportTemplateForRun(ctx, run.ReportTemplateID)
 	if err != nil {
-		return report.Document{}, render.Brand{}, fmt.Errorf("load template: %w", err)
+		return report.Document{}, render.Brand{}, nil, fmt.Errorf("load template: %w", err)
 	}
 
 	doc, err := report.Build(ctx, r.store, specFor(template, run), r.retentionFor(settings), run.ID, now)
 	if err != nil {
-		return report.Document{}, render.Brand{}, fmt.Errorf("compute report: %w", err)
+		return report.Document{}, render.Brand{}, nil, fmt.Errorf("compute report: %w", err)
 	}
 
 	// **Resolved here and copied onto the document**, so the artifact records
@@ -309,7 +309,14 @@ func (r *Runner) compose(ctx context.Context, run model.ReportRun, settings mode
 	brand := r.brandFor(ctx, template, settings)
 	doc.Meta.Brand = brand.Denormalised()
 
-	return doc, brand, nil
+	// **The sections are the template's, not the run's**, and they are read here
+	// with everything else the template decides. A run records the window it
+	// covered and the branding it was produced under; which blocks it contained
+	// follows the definition, so re-running a report after narrowing a template
+	// produces the narrowed document. That is the same rule the formats already
+	// follow, and the alternative — freezing the selection onto the run — would
+	// need a column the frozen schema does not have.
+	return doc, brand, template.Sections, nil
 }
 
 // specFor reduces a stored template and a run to the questions the computation
@@ -441,27 +448,35 @@ func (r *Runner) formatsFor(ctx context.Context, run model.ReportRun) ([]string,
 // system most likely to meet a shape nobody anticipated. Taking down the run,
 // and with it the three formats that would have rendered, is a worse answer than
 // recording one format's failure.
-func (r *Runner) render(doc report.Document, brand render.Brand, format string) (data []byte, err error) {
+func (r *Runner) render(doc report.Document, brand render.Brand, sections []string, format string) (data []byte, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			data, err = nil, fmt.Errorf("renderer panicked: %v", recovered)
 		}
 	}()
 
+	// **Sections reach the HTML and the PDF and deliberately not the JSON or the
+	// CSV.** A section is a decision about the report's *face* — which blocks a
+	// reader sees and in what order — and those two are not a face. The JSON
+	// artifact is the `ReportDocument` verbatim, which is what the frozen spec
+	// says it is and what a BI tool binds to; the CSV is a row per bucket per
+	// monitor. Filtering either would make a data export whose columns depended
+	// on a presentation choice, and would make the JSON artifact stop being the
+	// document it claims to be.
 	switch format {
 	case model.FormatJSON:
 		return render.JSON(doc)
 	case model.FormatCSV:
 		return render.CSV(doc)
 	case model.FormatHTML:
-		return render.HTML(doc, brand)
+		return render.HTMLSections(doc, brand, sections)
 	case model.FormatPDF:
 		if r.opts.Fonts.Regular == nil {
 			// Stated rather than generic, because the fix is an operator action:
 			// no font family is embedded in this build.
 			return nil, errors.New("no embedded font family, so PDF cannot be rendered")
 		}
-		return render.PDFDocument(doc, brand, r.opts.Fonts)
+		return render.PDFSections(doc, brand, r.opts.Fonts, sections)
 	}
 	return nil, fmt.Errorf("unknown format %q", format)
 }

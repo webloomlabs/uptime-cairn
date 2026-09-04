@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
@@ -778,6 +779,20 @@ func applyReportTemplate(t *model.ReportTemplate, body reportTemplateWrite) []Va
 	}
 
 	if body.Sections != nil {
+		// **Validated, which it was not before.** The field was stored and
+		// round-tripped while nothing read it, so an unknown name was harmless.
+		// Now that it selects content, a typo is a block silently missing from
+		// every report the template produces — and the composer drops what it
+		// cannot recognise rather than failing a queued run, so nothing
+		// downstream would ever report it. This is the only place it can be
+		// caught while somebody is looking at the form.
+		for i, section := range *body.Sections {
+			if !model.ValidSection(section) {
+				problems = append(problems, ValidationItem{
+					Pointer: fmt.Sprintf("/sections/%d", i), Code: "invalid",
+					Message: "section must be one of: " + strings.Join(model.ReportSections, ", ")})
+			}
+		}
 		t.Sections = *body.Sections
 	}
 	if body.Formats != nil {

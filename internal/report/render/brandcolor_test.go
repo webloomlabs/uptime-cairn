@@ -24,7 +24,7 @@ func TestABrandColourReachesBothBackends(t *testing.T) {
 		t.Error("the brand colour does not appear in the rendered HTML")
 	}
 
-	pdf, err := pdfFor(doc, brand, testFamily())
+	pdf, err := pdfFor(doc, brand, testFamily(), nil)
 	if err != nil {
 		t.Fatalf("pdf: %v", err)
 	}

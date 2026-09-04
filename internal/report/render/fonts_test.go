@@ -149,7 +149,7 @@ func TestTheEmbeddedFamilyDrawsTheWholeSampleReport(t *testing.T) {
 	t.Parallel()
 
 	family := embeddedOrSkip(t)
-	drawn, err := pdfFor(sample(), brandFixture(), family)
+	drawn, err := pdfFor(sample(), brandFixture(), family, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

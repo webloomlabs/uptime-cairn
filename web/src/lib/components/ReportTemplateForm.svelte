@@ -57,6 +57,20 @@
 	let maintenance = $state(template?.maintenance_handling ?? 'exclude');
 	let formats = $state<ReportFormat[]>(template?.formats ?? ['pdf', 'html']);
 
+	/**
+	 * The content blocks this template emits, **in the order it names them**.
+	 *
+	 * Empty means the defaults for the type, which is what every template that
+	 * has never touched this has and what most will keep — narrowing the
+	 * document is what makes `custom` a builder rather than a synonym for
+	 * "everything", and the other four types are what a scheduled report
+	 * actually is.
+	 *
+	 * Held as an array rather than a set because order is part of the contract:
+	 * the blocks come out the way they were named.
+	 */
+	let sections = $state<string[]>(template?.sections ?? []);
+
 	let slaTarget = $state(template?.sla_target === null ? '' : String(template?.sla_target ?? ''));
 	let responseTarget = $state(
 		template?.response_time_target_ms === null
@@ -81,6 +95,25 @@
 	let failure = $state<string | null>(null);
 
 	const ALL_FORMATS: ReportFormat[] = ['pdf', 'html', 'csv', 'json'];
+
+	/**
+	 * The section vocabulary, in the order the API documents it.
+	 *
+	 * `maintenance_log` and `certificate_expiry` are in the API's enum and are
+	 * not offered here, deliberately: nothing composes them yet, so a chip that
+	 * silently contributed no block would be a control that appears to do
+	 * nothing. They will appear when there is something behind them.
+	 */
+	const ALL_SECTIONS = [
+		'summary',
+		'uptime_table',
+		'uptime_chart',
+		'response_time',
+		'sla_breakdown',
+		'error_budget',
+		'incident_log',
+		'comparison'
+	];
 
 	$effect(() => {
 		untrack(() => void loadReferences());
@@ -147,6 +180,10 @@
 			period_style: periodStyle,
 			maintenance_handling: maintenance,
 			formats,
+			// Sent as given. An empty array is meaningful — it selects the
+			// defaults for the type — so it is not omitted when nothing is
+			// chosen.
+			sections,
 			scope: {
 				monitor_ids: monitors.map((m) => m.id),
 				group_ids: groupIDs,
@@ -415,6 +452,46 @@
 			</div>
 			{#if fieldErrors['/formats']}
 				<p class="mt-1 text-sm" style="color: var(--color-down)">{fieldErrors['/formats']}</p>
+			{/if}
+		</fieldset>
+
+		<fieldset>
+			<legend class="mb-1 block text-sm font-medium">{t('reports.sections')}</legend>
+			<p class="muted mb-2 text-sm">
+				{sections.length === 0 ? t('reports.sectionsDefault') : t('reports.sectionsHint')}
+			</p>
+			<div class="flex flex-wrap gap-3">
+				{#each ALL_SECTIONS as section (section)}
+					{@const at = sections.indexOf(section)}
+					<label class="flex items-center gap-1.5 text-sm">
+						<input
+							type="checkbox"
+							checked={at >= 0}
+							onchange={() => (sections = toggle(sections, section))}
+						/>
+						{t(`reports.section.${section}`)}
+						<!--
+							The position, shown because order is part of what this
+							control sets and is otherwise invisible: the blocks come
+							out the way they were named, and a checkbox alone would
+							hide that the second thing ticked is the second thing
+							rendered.
+						-->
+						{#if at >= 0}
+							<span class="muted text-xs">{at + 1}</span>
+						{/if}
+					</label>
+				{/each}
+			</div>
+			<!--
+				Only the JSON and CSV artifacts ignore this, and saying so beats
+				letting somebody discover it: they are the data document and a row
+				per bucket, not a page, and a data export whose columns depended on
+				a presentation choice would be worse than one that ignores it.
+			-->
+			<p class="muted mt-2 text-xs">{t('reports.sectionsFormatsNote')}</p>
+			{#if fieldErrors['/sections']}
+				<p class="mt-1 text-sm" style="color: var(--color-down)">{fieldErrors['/sections']}</p>
 			{/if}
 		</fieldset>
 
