@@ -24,6 +24,18 @@ them, not which files moved.
   failing looks exactly like one that is working. Keep taking the local copy, or
   alert on `artifacts[].mirror.state`.
 - The same page said report files are written `0640`; they are written `0600`.
+- **A report covering a day or two now charts hours instead of days.** The
+  availability strip and the response-time line were always drawn from the daily
+  series, so a daily report produced a strip of one cell and a line of one point
+  — a picture of a number printed directly beneath it. A window of 48 hours or
+  less now draws both from the hourly tier, labelled in hours and captioned with
+  the grain. Longer reports are unchanged, and the published `ReportDocument`
+  keeps its daily array: `response_time.daily` is one point per day typed
+  `format: date`, and the hourly series reaches the rendered page only.
+- "Best day" and "worst day" are omitted from a rendered report when they are the
+  same day, which is every daily report — three headings over one number invite a
+  reader to look for a difference that cannot be there. Both stay in the JSON
+  artifact, where a consumer can compare the dates itself.
 
 ### Added
 

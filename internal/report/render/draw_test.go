@@ -35,10 +35,10 @@ var _ Backend = (*SVG)(nil)
 
 func ms(v float64) *float64 { return &v }
 
-func series(values ...*float64) []report.DayLatency {
-	out := make([]report.DayLatency, 0, len(values))
+func series(values ...*float64) []ChartPoint {
+	out := make([]ChartPoint, 0, len(values))
 	for i, v := range values {
-		out = append(out, report.DayLatency{Date: march.AddDate(0, 0, i), AverageMs: v})
+		out = append(out, ChartPoint{At: march.AddDate(0, 0, i), Value: v})
 	}
 	return out
 }
@@ -126,10 +126,10 @@ func TestUnobservedDayIsNotDrawnAsDowntime(t *testing.T) {
 	t.Parallel()
 
 	svg := NewSVG(300, 40)
-	UptimeStrip(svg, Rect{X: 0, Y: 0, W: 300, H: 20}, []report.DayUptime{
-		{Date: march, Uptime: report.ComputeUptime(store.HistoryBucket{Up: 100}, report.MaintenanceExclude)},
-		{Date: march.AddDate(0, 0, 1), Uptime: report.ComputeUptime(store.HistoryBucket{Unknown: 100}, report.MaintenanceExclude)},
-		{Date: march.AddDate(0, 0, 2), Uptime: report.ComputeUptime(store.HistoryBucket{Up: 90, Down: 10}, report.MaintenanceExclude)},
+	UptimeStrip(svg, Rect{X: 0, Y: 0, W: 300, H: 20}, []ChartPoint{
+		{At: march, Value: report.ComputeUptime(store.HistoryBucket{Up: 100}, report.MaintenanceExclude).Ratio},
+		{At: march.AddDate(0, 0, 1), Value: report.ComputeUptime(store.HistoryBucket{Unknown: 100}, report.MaintenanceExclude).Ratio},
+		{At: march.AddDate(0, 0, 2), Value: report.ComputeUptime(store.HistoryBucket{Up: 90, Down: 10}, report.MaintenanceExclude).Ratio},
 	})
 
 	out := svg.Document()

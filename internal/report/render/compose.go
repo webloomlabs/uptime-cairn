@@ -100,6 +100,12 @@ func ComposeSections(doc report.Document, brand Brand, sections []string) []Elem
 		hasIncidents:  len(doc.Incidents) > 0,
 	})
 
+	// The zone the window was cut in, resolved once. It is what the hourly
+	// charts are labelled in: an hour axis reading 00:00–23:00 in UTC on a report
+	// an Australian client was sent describes a day that is not the day on the
+	// cover, and the label is the only place a reader could notice.
+	loc := locationOf(doc.Meta.Timezone)
+
 	period := formatPeriod(doc.Meta.PeriodStart, doc.Meta.PeriodEnd)
 	out = append(out, Cover{
 		Title:      titleOr(doc.Meta.TemplateName, "Uptime report"),
@@ -129,7 +135,7 @@ func ComposeSections(doc report.Document, brand Brand, sections []string) []Elem
 			}
 		case monitorBlock:
 			for _, s := range doc.Monitors {
-				out = append(out, monitorSection(s, layout)...)
+				out = append(out, monitorSection(s, layout, loc)...)
 			}
 		case model.SectionComparison:
 			if doc.Comparison != nil && len(doc.Comparison.Series) > 0 {
@@ -166,19 +172,14 @@ func ComposeSections(doc report.Document, brand Brand, sections []string) []Elem
 // document-level sections alone should not produce a page of monitor names with
 // nothing beneath each — which is what an unconditional heading would give, and
 // which reads as a rendering fault rather than as a choice somebody made.
-func monitorSection(s report.MonitorSection, layout layout) []Element {
+func monitorSection(s report.MonitorSection, layout layout, loc *time.Location) []Element {
 	var body []Element
 
 	for _, block := range layout.within {
 		switch block {
 		case model.SectionUptimeChart:
-			if len(s.DailyUptime) > 0 {
-				body = append(body, Chart{
-					Kind:    ChartUptimeStrip,
-					Title:   "Daily availability",
-					Caption: "Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage.",
-					Days:    s.DailyUptime,
-				})
+			if chart, ok := uptimeChart(s, loc); ok {
+				body = append(body, chart)
 			}
 		case model.SectionUptimeTable:
 			body = append(body, KeyValues{Items: uptimeFigures(s.Uptime)})
@@ -199,13 +200,8 @@ func monitorSection(s report.MonitorSection, layout layout) []Element {
 			}
 		case model.SectionResponseTime:
 			body = append(body, Heading{Text: "Response time", Level: 2})
-			if len(s.ResponseTime.Daily) > 0 {
-				body = append(body, Chart{
-					Kind:    ChartLatencyLine,
-					Title:   "Daily average",
-					Caption: "The line breaks where nothing was measured rather than joining across it.",
-					Latency: s.ResponseTime.Daily,
-				})
+			if chart, ok := latencyChart(s, loc); ok {
+				body = append(body, chart)
 			}
 			body = append(body, KeyValues{Items: latencyFigures(s.ResponseTime)})
 		}
@@ -215,6 +211,114 @@ func monitorSection(s report.MonitorSection, layout layout) []Element {
 		return nil
 	}
 	return append([]Element{Heading{Text: s.Name, Level: 1}}, body...)
+}
+
+// hourAxisFormat labels an hourly axis. Hours and minutes without a date,
+// because every bucket on the chart falls on the day already named on the cover
+// and repeating it twice under a 24-cell strip is noise.
+const hourAxisFormat = "15:04"
+
+// uptimeChart draws availability at the finest grain the document carries.
+//
+// **A report covering one day gets one daily cell**, which is a picture of the
+// uptime percentage printed directly beneath it and tells a reader nothing they
+// did not already have. Where the document carries an hourly series — which is
+// exactly where the window was too short for the daily one to be a chart — that
+// is what gets drawn, and the caption says which grain it is looking at rather
+// than leaving the reader to count cells.
+func uptimeChart(s report.MonitorSection, loc *time.Location) (Chart, bool) {
+	const legend = "Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage."
+
+	if len(s.Hourly) > 0 {
+		points := make([]ChartPoint, 0, len(s.Hourly))
+		for _, h := range s.Hourly {
+			points = append(points, ChartPoint{At: h.Start.In(loc), Value: h.Uptime.Ratio})
+		}
+		return Chart{
+			Kind:       ChartUptimeStrip,
+			Title:      "Hourly availability",
+			Caption:    "One cell per hour, " + zoneWords(loc) + ". " + legend,
+			Points:     points,
+			AxisFormat: hourAxisFormat,
+		}, true
+	}
+
+	if len(s.DailyUptime) == 0 {
+		return Chart{}, false
+	}
+	points := make([]ChartPoint, 0, len(s.DailyUptime))
+	for _, d := range s.DailyUptime {
+		points = append(points, ChartPoint{At: d.Date, Value: d.Uptime.Ratio})
+	}
+	return Chart{
+		Kind:    ChartUptimeStrip,
+		Title:   "Daily availability",
+		Caption: legend,
+		Points:  points,
+	}, true
+}
+
+// latencyChart is the same choice for the response-time series, and it is made
+// the same way for the same reason: a line of one point is a dot.
+func latencyChart(s report.MonitorSection, loc *time.Location) (Chart, bool) {
+	const gapNote = "The line breaks where nothing was measured rather than joining across it."
+
+	if len(s.Hourly) > 0 {
+		points := make([]ChartPoint, 0, len(s.Hourly))
+		for _, h := range s.Hourly {
+			points = append(points, ChartPoint{At: h.Start.In(loc), Value: h.AverageMs})
+		}
+		return Chart{
+			Kind:       ChartLatencyLine,
+			Title:      "Hourly average",
+			Caption:    "One point per hour, " + zoneWords(loc) + ". " + gapNote,
+			Points:     points,
+			AxisFormat: hourAxisFormat,
+		}, true
+	}
+
+	if len(s.ResponseTime.Daily) == 0 {
+		return Chart{}, false
+	}
+	points := make([]ChartPoint, 0, len(s.ResponseTime.Daily))
+	for _, d := range s.ResponseTime.Daily {
+		points = append(points, ChartPoint{At: d.Date, Value: d.AverageMs})
+	}
+	return Chart{
+		Kind:    ChartLatencyLine,
+		Title:   "Daily average",
+		Caption: gapNote,
+		Points:  points,
+	}, true
+}
+
+// locationOf resolves the zone the window was cut in, falling back to UTC.
+//
+// A zone name the runtime cannot load is not worth failing a report over — the
+// figures are unaffected and only two axis labels move — but it is worth
+// resolving here rather than in each caller, so that the two charts of one
+// monitor cannot end up labelled in different zones.
+func locationOf(name string) *time.Location {
+	if name == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// zoneWords names the zone an hour axis is read in.
+//
+// The IANA name rather than an abbreviation: "AEST" is ambiguous across
+// hemispheres and silently wrong for half the year, and a client checking a
+// report against their own logs needs the zone the boundaries were cut in.
+func zoneWords(loc *time.Location) string {
+	if loc == nil || loc == time.UTC {
+		return "in UTC"
+	}
+	return "in " + loc.String()
 }
 
 // slaAlreadyDrawn stops sla_breakdown and error_budget drawing the block twice
@@ -571,19 +675,23 @@ func latencyFigures(l report.Latency) []KeyValue {
 		Note:  fmt.Sprintf("over %s successful checks", thousands(l.SampleCount)),
 	}}
 
-	if l.BestDay != nil {
-		items = append(items, KeyValue{
-			Key:   "Best day",
-			Value: millis(l.BestDay.AverageMs),
-			Note:  l.BestDay.Date.Format("2 January"),
-		})
-	}
-	if l.WorstDay != nil {
-		items = append(items, KeyValue{
-			Key:   "Worst day",
-			Value: millis(l.WorstDay.AverageMs),
-			Note:  l.WorstDay.Date.Format("2 January"),
-		})
+	// Best and worst, and only where they are two different days. A window with
+	// one observed day in it — every daily report — has a best day, a worst day
+	// and a window average that are the same number printed three times under
+	// three headings, which invites a reader to look for a difference that
+	// cannot be there.
+	if l.BestDay != nil && l.WorstDay != nil && !l.BestDay.Date.Equal(l.WorstDay.Date) {
+		items = append(items,
+			KeyValue{
+				Key:   "Best day",
+				Value: millis(l.BestDay.AverageMs),
+				Note:  l.BestDay.Date.Format("2 January"),
+			},
+			KeyValue{
+				Key:   "Worst day",
+				Value: millis(l.WorstDay.AverageMs),
+				Note:  l.WorstDay.Date.Format("2 January"),
+			})
 	}
 	if l.DaysOverTarget != nil && l.TargetMs != nil {
 		items = append(items, KeyValue{

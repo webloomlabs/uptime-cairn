@@ -157,6 +157,32 @@ There is **no percentile over the whole window at any tier**, and there cannot b
 a quantile is a rank statistic and does not merge, so no coarser tier holds one.
 The daily average series is the primary latency exhibit instead.
 
+### Charts on a short window
+
+A report covering one day drew a strip of one cell and a line of one point — both
+pictures of a number already printed beneath them. So a window of **48 hours or
+less** gets its two per-monitor charts from the hourly tier instead: one cell per
+hour, one point per hour, and the axis labelled in hours rather than dates. The
+caption says which grain it is, so a 24-cell strip is never mistaken for 24 days.
+
+Two things do not change with it:
+
+- **The published document keeps its grain.** `response_time.daily` is one point
+  per day typed `format: date` in the contract, and twenty-four points carrying
+  one date would not be a finer reading of that field. The hourly series is a
+  second exhibit of the same window and reaches the page only.
+- **The window totals are unaffected.** Uptime, the average, and the SLA block
+  are computed from the same tier they always were.
+
+Where retention has left only the daily tier for that period, the hourly series
+is not read at all and the daily charts stand — the same rule as everywhere else
+here: retention limits resolution, and the document says what answered.
+
+"Best day" and "worst day" are omitted from the rendered page when they are the
+same day, which is every daily report: three headings over one number invite a
+reader to look for a difference that cannot be there. They stay in the JSON,
+where a consumer can compare the dates itself.
+
 ---
 
 ## Formats

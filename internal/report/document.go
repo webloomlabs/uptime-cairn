@@ -124,6 +124,41 @@ type DayUptime struct {
 	Uptime Uptime
 }
 
+// HourBucket is one hour of a short window, carrying both figures the two
+// per-monitor charts draw.
+//
+// Present only where the window is short enough that the daily series is a
+// bucket or two — a daily report, or a custom window of a day or so. A strip of
+// one cell and a line of one point are a picture of a number already printed
+// beside them, and this is what makes those two exhibits say something.
+//
+// **Not in the JSON artifact, and it cannot be.** ReportResponseTimeBlock.daily
+// is one point per day typed `format: date`; twenty-four hours of one day would
+// be twenty-four points carrying the same date, which is not a finer reading of
+// that field but a different field. The hourly series is a drawing on the
+// rendered page, and the published document keeps the grain its contract fixes.
+type HourBucket struct {
+	Start  time.Time
+	Uptime Uptime
+
+	// AverageMs is nil for an hour with no successful check, which draws as a
+	// gap rather than as zero — exactly as a day does.
+	AverageMs   *float64
+	SampleCount int
+}
+
+// HourlySeriesMaxWindow is the longest window that gets an hourly series.
+//
+// Two days rather than one. The complaint the hourly series answers is a chart
+// of one or two buckets, and a two-day report has that complaint just as a
+// one-day report does; beyond it the daily series is a chart in its own right
+// and forty-nine hourly cells would be a denser drawing of the same shape.
+//
+// It is also what keeps this off the runs the load gate measures: forty-eight
+// rows per monitor is less than the daily series of a two-month window, and a
+// monthly report never reaches this branch at all.
+const HourlySeriesMaxWindow = 48 * time.Hour
+
 // MonitorSection is one monitor's figures.
 type MonitorSection struct {
 	MonitorID model.ID
@@ -133,6 +168,7 @@ type MonitorSection struct {
 
 	Uptime       Uptime
 	DailyUptime  []DayUptime
+	Hourly       []HourBucket
 	SLA          *SLA
 	ResponseTime Latency
 	Breaches     []Breach
@@ -246,6 +282,17 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 	if err != nil {
 		return Document{}, fmt.Errorf("daily series: %w", err)
 	}
+
+	// The fifth read, and only for a window the daily series cannot draw. Every
+	// other report — including every scheduled monthly one — takes the four
+	// above and no more.
+	var hourly map[model.ID][]store.HistoryBucket
+	if wantsHourlySeries(window, res) {
+		hourly, err = s.HourlySeries(ctx, ids, from, window.To)
+		if err != nil {
+			return Document{}, fmt.Errorf("hourly series: %w", err)
+		}
+	}
 	targets, err := s.SLOTargets(ctx, ids)
 	if err != nil {
 		return Document{}, fmt.Errorf("slo targets: %w", err)
@@ -269,6 +316,18 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 				Date:   b.Start,
 				Uptime: ComputeUptime(b, spec.MaintenanceHandling),
 			})
+		}
+		for _, b := range hourly[m.ID] {
+			point := HourBucket{
+				Start:       b.Start,
+				Uptime:      ComputeUptime(b, spec.MaintenanceHandling),
+				SampleCount: b.ResponseTimeCount,
+			}
+			if b.ResponseTimeCount > 0 {
+				avg := b.ResponseTimeSum / float64(b.ResponseTimeCount)
+				point.AverageMs = &avg
+			}
+			section.Hourly = append(section.Hourly, point)
 		}
 		section.ResponseTime = ComputeLatency(total, daily, spec.ResponseTimeTargetMs)
 		section.Breaches = ComputeBreaches(daily, spec.MaintenanceHandling)
@@ -317,6 +376,18 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 	}
 
 	return doc, nil
+}
+
+// wantsHourlySeries decides whether the hourly exhibit is worth the extra read.
+//
+// Two conditions, and the second is not a refinement of the first. A window
+// short enough to want hourly cells can still have no hourly data behind it: if
+// the daily tier is what answered, retention no longer holds anything finer for
+// this period, and asking would return an empty map and draw nothing. Skipping
+// the query says the same thing without the round trip.
+func wantsHourlySeries(w Window, res Resolution) bool {
+	d := w.Duration()
+	return d > 0 && d <= HourlySeriesMaxWindow && res.Tier != "1d"
 }
 
 // IncidentPageSize bounds the incident log.

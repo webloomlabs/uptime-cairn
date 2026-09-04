@@ -36,6 +36,24 @@ func seedDay(t *testing.T, s *Store, id model.ID, day time.Time, up, down, unkno
 	}
 }
 
+// seedHour is the same for the 1h tier, which is what a report over a single day
+// draws its charts from.
+func seedHour(t *testing.T, s *Store, id model.ID, hour time.Time, up, down, unknown int, rtSum float64, rtCount int) {
+	t.Helper()
+
+	_, err := s.db.ExecContext(t.Context(), `
+		INSERT INTO heartbeat_1h (bucket_start, monitor_id, org_id,
+		    up_count, down_count, pending_count, maintenance_count,
+		    unknown_count, skipped_count,
+		    response_time_sum, response_time_count, response_time_min, response_time_max)
+		VALUES (?, ?, ?, ?, ?, 0, 0, ?, 0, ?, ?, ?, ?)`,
+		millis(hour), id[:], model.SentinelOrgID[:], up, down, unknown,
+		rtSum, rtCount, 10.0, 90.0)
+	if err != nil {
+		t.Fatalf("seed hour: %v", err)
+	}
+}
+
 func mustCreate(t *testing.T, s *Store, m model.Monitor) model.Monitor {
 	t.Helper()
 	if err := s.CreateMonitor(t.Context(), m); err != nil {
@@ -204,6 +222,43 @@ func TestDailySeriesIsOrderedAndKeepsGapsAbsent(t *testing.T) {
 	}
 }
 
+// The hourly series is the same query one tier down, and it has to stay that
+// way: two implementations would be two places for a column to be added to one
+// and forgotten in the other, and the symptom is two exhibits of one window that
+// disagree by a number nobody can trace.
+func TestHourlySeriesReadsTheHourTierAndNotTheDaily(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	m := mustCreate(t, s, testMonitor("checkout"))
+	day := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
+
+	// A day's worth of hours, seeded out of order, with one hour missing.
+	for _, n := range []int{2, 0, 3} {
+		seedHour(t, s, m.ID, day.Add(time.Duration(n)*time.Hour), 60, 0, 0, 60*float64(600+n), 60)
+	}
+	// And the daily bucket that summarises them, which this query must not read.
+	seedDay(t, s, m.ID, day, 180, 0, 0, 999999, 180)
+
+	series, err := s.HourlySeries(t.Context(), []model.ID{m.ID}, day, day.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatalf("hourly series: %v", err)
+	}
+
+	got := series[m.ID]
+	if len(got) != 3 {
+		t.Fatalf("hours = %d, want 3 — the unobserved hour must be absent, not zero", len(got))
+	}
+	for i, want := range []int{0, 2, 3} {
+		if !got[i].Start.Equal(day.Add(time.Duration(want) * time.Hour)) {
+			t.Errorf("hour %d is %s, want %02d:00", i, got[i].Start, want)
+		}
+	}
+	if avg := got[0].ResponseTimeSum / float64(got[0].ResponseTimeCount); avg != 600 {
+		t.Errorf("first hour average = %v, want 600 — this is reading the daily tier", avg)
+	}
+}
+
 // Both batched reads must seek per monitor rather than scan the tier. This is
 // the invariant that does not show up in any result, and the one that regressed
 // once already: the embeds' MAX(time) GROUP BY monitor_id read 26ms of index at
@@ -278,6 +333,27 @@ func TestBatchedReadsSeekRatherThanScan(t *testing.T) {
 		FROM heartbeat_1d
 		WHERE monitor_id IN (`+placeholders(len(ids))+`) AND bucket_start >= ? AND bucket_start < ?
 		ORDER BY monitor_id, bucket_start`, args[1:]...))
+
+	// The hourly series is the same shape against heartbeat_1h, and it is read
+	// on a window where the daily tier holds one row per monitor — so a scan
+	// here would be twenty-four times as expensive on the exhibit that replaced
+	// the cheap one.
+	hourly := plan(`
+		SELECT monitor_id, up_count, down_count, pending_count, maintenance_count,
+		       unknown_count, skipped_count,
+		       response_time_sum, response_time_count, response_time_min, response_time_max,
+		       NULL, bucket_start
+		FROM heartbeat_1h
+		WHERE monitor_id IN (`+placeholders(len(ids))+`) AND bucket_start >= ? AND bucket_start < ?
+		ORDER BY monitor_id, bucket_start`, args[1:]...)
+	switch {
+	case strings.Contains(hourly, "SCAN heartbeat_1h"):
+		t.Errorf("HourlySeries scans the tier rather than seeking: %s", hourly)
+	case !strings.Contains(hourly, "SEARCH heartbeat_1h"),
+		!strings.Contains(hourly, "monitor_id=?"),
+		!strings.Contains(hourly, "bucket_start>"):
+		t.Errorf("HourlySeries is not a bounded per-monitor seek: %s", hourly)
+	}
 }
 
 // Scope is a union evaluated in one predicate, so a monitor selected twice over

@@ -141,6 +141,13 @@ func (f *fakeStore) DailySeries(context.Context, []model.ID, time.Time, time.Tim
 	return f.daily, nil
 }
 
+// HourlySeries answers nothing: the runner's tests are about the run's
+// lifecycle, and a window short enough to ask for one is the report package's
+// business rather than this one's.
+func (f *fakeStore) HourlySeries(context.Context, []model.ID, time.Time, time.Time) (map[model.ID][]store.HistoryBucket, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) RawCovers(context.Context, model.ID, time.Time, string) (bool, error) {
 	return false, nil
 }

@@ -322,18 +322,18 @@ func (l *pdfLayout) chart(c Chart) {
 	area := Rect{X: marginX, Y: l.y, W: contentW, H: body}
 	switch c.Kind {
 	case ChartUptimeStrip:
-		UptimeStrip(l.pdf, area, c.Days)
+		UptimeStrip(l.pdf, area, c.Points)
 	case ChartLatencyLine:
 		plot := Rect{X: area.X + latencyAxisRoom, Y: area.Y + 6, W: area.W - latencyAxisRoom - 4, H: area.H - 28}
-		low, high, ok := LatencyLine(l.pdf, plot, c.Latency)
+		low, high, ok := LatencyLine(l.pdf, plot, c.Points)
 		if ok {
 			l.text(area.X+latencyAxisRoom-6, plot.Y+8, millisLabel(high), sizeCaption-0.5, Regular, mutedColor, End)
 			l.text(area.X+latencyAxisRoom-6, plot.Y+plot.H, millisLabel(low), sizeCaption-0.5, Regular, mutedColor, End)
-			if len(c.Latency) > 0 {
+			if len(c.Points) > 0 {
 				l.text(area.X+latencyAxisRoom, area.Y+area.H-6,
-					c.Latency[0].Date.Format("2 Jan"), sizeCaption-0.5, Regular, mutedColor, Start)
+					c.Points[0].At.Format(c.axisFormat()), sizeCaption-0.5, Regular, mutedColor, Start)
 				l.text(area.X+area.W-4, area.Y+area.H-6,
-					c.Latency[len(c.Latency)-1].Date.Format("2 Jan"), sizeCaption-0.5, Regular, mutedColor, End)
+					c.Points[len(c.Points)-1].At.Format(c.axisFormat()), sizeCaption-0.5, Regular, mutedColor, End)
 			}
 		} else {
 			l.text(area.X+area.W/2, area.Y+area.H/2, "No measurements in this period",

@@ -114,6 +114,22 @@ type Store interface {
 	// monitor, which is small per monitor and is not small at 5,000 of them.
 	DailySeries(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.HistoryBucket, error)
 
+	// HourlySeries is the same series at the 1h tier, and is read only for a
+	// window short enough that the daily one would be a single bucket.
+	//
+	// A report over one day draws a strip of one cell and a line of one point
+	// from DailySeries — a picture of a number that is already printed beside
+	// it. The hourly series is what makes those two exhibits say something, and
+	// it is confined to short windows so that the monthly runs the load gate
+	// measures still cost four reads: twenty-four rows per monitor over a day is
+	// less than the thirty-one a month already pays for.
+	//
+	// Not a replacement for DailySeries even where both are read. The document's
+	// daily array is a published field — `format: date`, one point per day — and
+	// an hourly series cannot be expressed in it; the two are different exhibits
+	// of the same window rather than two resolutions of one.
+	HourlySeries(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.HistoryBucket, error)
+
 	// RawCovers reports whether raw heartbeats reach back far enough to answer a
 	// range completely. It is the gate on the trailing-seven-day p95 and it is
 	// not advisory: RawDays is operator-configurable down to one, and a p95 over
