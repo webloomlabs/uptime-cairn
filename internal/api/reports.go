@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
@@ -42,6 +44,12 @@ type ReportStore interface {
 	GetReportRun(ctx context.Context, id model.ID) (model.ReportRun, error)
 	ListReportRuns(ctx context.Context, after *store.Cursor, limit int, filter store.ReportRunFilter) ([]model.ReportRun, bool, error)
 
+	// ReportTemplateForRun rather than GetReportTemplate: a run may name a
+	// template that has since been soft-deleted, and a shared report whose title
+	// disappeared because somebody tidied up is a broken link from the client's
+	// side.
+	ReportTemplateForRun(ctx context.Context, id model.ID) (model.ReportTemplate, error)
+
 	GetReportArtifact(ctx context.Context, id model.ID) (model.ReportArtifact, error)
 	ArtifactByFormat(ctx context.Context, runID model.ID, format string) (model.ReportArtifact, error)
 	ArtifactsForRuns(ctx context.Context, runIDs []model.ID) (map[model.ID][]model.ReportArtifact, error)
@@ -58,6 +66,35 @@ type Reporter interface {
 // because one read path is the property being protected.
 type ArtifactFiles interface {
 	Open(path string) (io.ReadCloser, error)
+
+	// Exists answers whether the bytes are actually on disk, which the database
+	// cannot: a row and its file are two stores. ADR-008's Consequences require
+	// the artifact list to render a missing file **as a missing file** rather
+	// than offering a download that fails, and this is what lets it.
+	Exists(path string) bool
+}
+
+// artifactAvailable reports whether an artifact can actually be downloaded.
+//
+// A rendered row is not the same claim as a readable file. The state that pulls
+// them apart is a `cairn.db` restored without `<data-dir>/reports/` — the silent
+// half of the backup procedure — and until this existed, the UI offered a
+// download link per row and the server answered each one with a problem
+// document. Offering a link that cannot work is a worse way to learn a file is
+// gone than not being offered one, which is the rule the expired and failed
+// states already follow.
+//
+// A build with no artifact storage answers true rather than false: it has no
+// basis for the negative, and reporting every artifact as missing would be worse
+// than reporting them optimistically.
+func (s *Server) artifactAvailable(a model.ReportArtifact) bool {
+	if a.State != model.ArtifactRendered || a.Path == "" {
+		return false
+	}
+	if s.artifacts == nil {
+		return true
+	}
+	return s.artifacts.Exists(a.Path)
 }
 
 // --- templates --------------------------------------------------------------
@@ -339,10 +376,21 @@ func (s *Server) listReportRuns(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, "list report artifacts", err)
 		return
 	}
+	// One query for the page rather than one per row: a listing of twenty-five
+	// runs would otherwise issue twenty-five extra lookups, which is the N+1 that
+	// makes a page slow at exactly the scale this product promises to stay fast
+	// at. A failure is logged and leaves the column empty rather than failing the
+	// listing — a run list that will not load because a share link would not is
+	// the wrong trade.
+	shares, err := s.store.ReportShareLinksForRuns(r.Context(), ids)
+	if err != nil {
+		s.log.Error("list report share links", "error", err)
+	}
 
 	body := page[reportRunJSON]{Data: []reportRunJSON{}, Pagination: pagination{HasMore: hasMore}}
 	for _, run := range runs {
-		body.Data = append(body.Data, reportRunToJSON(run, artifacts[run.ID], nil))
+		body.Data = append(body.Data, reportRunToJSON(run, artifacts[run.ID], nil,
+			shareFor(shares, run.ID), s.artifactAvailable))
 	}
 	if hasMore && len(runs) > 0 {
 		last := runs[len(runs)-1]
@@ -378,7 +426,29 @@ func (s *Server) toReportRunJSON(ctx context.Context, run model.ReportRun) repor
 	if err != nil {
 		s.log.Error("load report deliveries", "error", err, "run_id", run.ID.String())
 	}
-	return reportRunToJSON(run, byRun[run.ID], deliveries)
+
+	var share *model.ReportShareLink
+	switch link, err := s.store.ReportShareLinkForRun(ctx, run.ID); {
+	case err == nil:
+		share = &link
+	case !errors.Is(err, store.ErrNotFound):
+		// Most runs have no link, and ErrNotFound is the ordinary answer rather
+		// than a fault worth logging.
+		s.log.Error("load report share link", "error", err, "run_id", run.ID.String())
+	}
+	return reportRunToJSON(run, byRun[run.ID], deliveries, share, s.artifactAvailable)
+}
+
+// shareFor picks one run's link out of the batch read. A helper rather than an
+// inline index because a map lookup returning a zero-valued struct is not the
+// same as no link, and the distinction is the difference between a run that
+// reports `"share": null` and one that reports a link created at the zero time.
+func shareFor(links map[model.ID]model.ReportShareLink, runID model.ID) *model.ReportShareLink {
+	link, ok := links[runID]
+	if !ok {
+		return nil
+	}
+	return &link
 }
 
 // --- download ---------------------------------------------------------------
@@ -459,10 +529,37 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, a model.R
 	}
 
 	body, err := s.artifacts.Open(a.Path)
-	if err != nil {
-		// A row whose file is missing. It is the dangling-row case ADR-008's
-		// write-then-commit ordering exists to prevent, so seeing one here is a
-		// fault worth logging rather than a 404 worth returning.
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// **A row whose file is not on disk, and this is 410 rather than 500.**
+		//
+		// Write-then-commit means normal operation cannot produce one, so an
+		// earlier cut of this treated it as an internal fault. A backup drill
+		// found that wrong on two counts. The frozen spec declares 200, 401, 404
+		// and 410 for this operation and no 500; and ADR-008's Consequences
+		// anticipate exactly this state — "a restore of the database against a
+		// stale reports directory yields rows whose files are missing" — and
+		// require it to render "as a missing file rather than an error page".
+		//
+		// The operator reaching this has almost always restored `cairn.db`
+		// without `<data-dir>/reports/`, which is the silent half of the backup
+		// procedure and the one the documentation warns about. "Internal error,
+		// the cause has been logged" sends them to a log; naming the missing file
+		// sends them to their backup.
+		//
+		// Still logged, because a missing file on an install that was *not* just
+		// restored is a genuine fault and the 410 alone would bury it.
+		s.log.Error("report artifact file is missing from disk",
+			"artifact_id", a.ID.String(), "path", a.Path, "error", err)
+		writeProblem(w, r, s.log, http.StatusGone, "artifact-file-missing",
+			"Report file missing",
+			"This report's row exists but its file is not in the reports directory. "+
+				"The usual cause is a database restored without <data-dir>/reports/; "+
+				"its digest and size are still recorded, so the file can be identified in a backup.")
+		return
+	case err != nil:
+		// A permission problem or an I/O error — the file may well be there and
+		// this process cannot read it. That is genuinely internal.
 		s.internal(w, r, "open report artifact", err)
 		return
 	}
@@ -682,6 +779,20 @@ func applyReportTemplate(t *model.ReportTemplate, body reportTemplateWrite) []Va
 	}
 
 	if body.Sections != nil {
+		// **Validated, which it was not before.** The field was stored and
+		// round-tripped while nothing read it, so an unknown name was harmless.
+		// Now that it selects content, a typo is a block silently missing from
+		// every report the template produces — and the composer drops what it
+		// cannot recognise rather than failing a queued run, so nothing
+		// downstream would ever report it. This is the only place it can be
+		// caught while somebody is looking at the form.
+		for i, section := range *body.Sections {
+			if !model.ValidSection(section) {
+				problems = append(problems, ValidationItem{
+					Pointer: fmt.Sprintf("/sections/%d", i), Code: "invalid",
+					Message: "section must be one of: " + strings.Join(model.ReportSections, ", ")})
+			}
+		}
 		t.Sections = *body.Sections
 	}
 	if body.Formats != nil {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,14 @@ import (
 // the stand-in agrees with itself.
 func reportingClient(t *testing.T) *client {
 	t.Helper()
+	c, _ := reportingClientWithFiles(t)
+	return c
+}
+
+// reportingClientWithFiles also hands back the artifact directory, for the one
+// test that needs to take a file away behind the server's back.
+func reportingClientWithFiles(t *testing.T) (*client, *artifact.Store) {
+	t.Helper()
 
 	server, store, api := testAPI(t)
 	files := artifact.New(t.TempDir(), artifact.DefaultMaxBytes)
@@ -33,7 +42,7 @@ func reportingClient(t *testing.T) *client {
 
 	c := newClient(t, server)
 	c.setup()
-	return c
+	return c, files
 }
 
 func createTemplate(t *testing.T, c *client, body map[string]any) string {
@@ -497,4 +506,202 @@ func (c *client) download(t *testing.T, path string) ([]byte, string) {
 		t.Fatalf("download %s = %d (%s)", path, resp.StatusCode, body)
 	}
 	return body, resp.Header.Get("Content-Type")
+}
+
+// **A row whose file is not on disk answers 410, not 500.**
+//
+// This test exists because a backup drill produced a 500. The state it covers is
+// the one ADR-008's Consequences name — "a restore of the database against a
+// stale reports directory yields rows whose files are missing" — and require to
+// render "as a missing file rather than an error page". It is also the only state
+// in which an operator has restored `cairn.db` without `<data-dir>/reports/`,
+// which is the silent half of the backup procedure.
+//
+// 500 was wrong on two counts: the frozen spec declares 200, 401, 404 and 410 for
+// this operation and no 500, and "Internal error, the cause has been logged"
+// sends an operator to a log where naming the missing file sends them to their
+// backup.
+func TestAnArtifactWhoseFileIsGoneAnswersGoneNotInternalError(t *testing.T) {
+	t.Parallel()
+
+	c, files := reportingClientWithFiles(t)
+	runID := sharedRun(t, c, "json")
+
+	_, run := c.do(http.MethodGet, "/api/v1/report-runs/"+runID, nil)
+	artifact := run["artifacts"].([]any)[0].(map[string]any)
+	downloadURL := artifact["download_url"].(string)
+
+	// It downloads before the file is removed, so the test cannot pass by the
+	// artifact never having existed.
+	if body, _ := c.download(t, downloadURL); len(body) == 0 {
+		t.Fatal("the artifact did not download before its file was removed")
+	}
+
+	// The reports directory, emptied — the restore-without-artifacts case,
+	// reproduced by taking the files away behind the server's back exactly as an
+	// incomplete restore does.
+	if err := os.RemoveAll(files.Root()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, problem := c.do(http.MethodGet, downloadURL, nil)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d, want 410 (%v)", resp.StatusCode, problem)
+	}
+	// The detail has to name the cause an operator can act on. A 410 that says
+	// only "gone" is indistinguishable from retention, which is a different fact
+	// and needs no action at all.
+	detail, _ := problem["detail"].(string)
+	if !strings.Contains(detail, "reports/") {
+		t.Errorf("detail = %q, want it to name the reports directory", detail)
+	}
+
+	// The listing still loads, which is the half ADR-008 states outright: the
+	// artifact list must render this rather than error on it.
+	if resp, body := c.do(http.MethodGet, "/api/v1/report-runs?limit=50", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("the run listing = %d with files missing (%v)", resp.StatusCode, body)
+	}
+}
+
+// **A rendered artifact whose file is gone is not offered for download.**
+//
+// The row still says `rendered` — the state enum is frozen and there is no fourth
+// value for "the bytes are not here" — so the wire says it by withholding
+// `download_url`. ADR-008's Consequences require the artifact list to render this
+// as a missing file rather than as something to click, and a state-based check
+// gets it exactly wrong: the row says rendered, so it would offer a link that
+// answers 410.
+func TestAMissingFileIsNotOfferedForDownload(t *testing.T) {
+	t.Parallel()
+
+	c, files := reportingClientWithFiles(t)
+	runID := sharedRun(t, c, "json", "csv")
+
+	// Offered while the files are there, so the test cannot pass by never having
+	// offered anything.
+	_, before := c.do(http.MethodGet, "/api/v1/report-runs/"+runID, nil)
+	for _, raw := range before["artifacts"].([]any) {
+		if a := raw.(map[string]any); a["download_url"] == nil {
+			t.Fatalf("%v artifact was not offered before its file was removed", a["format"])
+		}
+	}
+
+	if err := os.RemoveAll(files.Root()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The detail read, which is what the expanded row in the UI shows.
+	_, after := c.do(http.MethodGet, "/api/v1/report-runs/"+runID, nil)
+	for _, raw := range after["artifacts"].([]any) {
+		a := raw.(map[string]any)
+		if a["download_url"] != nil {
+			t.Errorf("%v artifact is still offered for download with no file behind it", a["format"])
+		}
+		// The row keeps saying what it was. The digest and size survive the file,
+		// which is what lets somebody find it in a backup.
+		if a["state"] != "rendered" {
+			t.Errorf("state = %v, want rendered — the row is a record and did not change", a["state"])
+		}
+		if a["sha256"] == nil || a["size_bytes"] == nil {
+			t.Errorf("the digest or size was dropped along with the file: %v", a)
+		}
+	}
+
+	// The listing has to agree with the detail. Two screens disagreeing about
+	// whether a file exists is worse than either answer on its own.
+	_, list := c.do(http.MethodGet, "/api/v1/report-runs?limit=50", nil)
+	for _, rawRun := range list["data"].([]any) {
+		for _, raw := range rawRun.(map[string]any)["artifacts"].([]any) {
+			if a := raw.(map[string]any); a["download_url"] != nil {
+				t.Errorf("the listing still offers %v with no file behind it", a["format"])
+			}
+		}
+	}
+}
+
+// A shared report offers only the formats a client can actually fetch, and says
+// so honestly when none of them can be.
+func TestASharedReportDoesNotOfferMissingFormats(t *testing.T) {
+	t.Parallel()
+
+	c, files := reportingClientWithFiles(t)
+	runID := sharedRun(t, c, "json")
+	token, _ := share(t, c, runID, nil)
+
+	if resp, _ := anonymous(t, c, "/api/v1/public/reports/"+token); resp.StatusCode != http.StatusOK {
+		t.Fatal("the link did not resolve before the files were removed")
+	}
+
+	if err := os.RemoveAll(files.Root()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := anonymous(t, c, "/api/v1/public/reports/"+token)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d, want 410 (%s)", resp.StatusCode, body)
+	}
+	// **It must not blame retention.** An earlier version asserted the retention
+	// policy here, which would be a confident lie to a client whose report is
+	// missing because somebody restored a backup without the reports directory.
+	if strings.Contains(string(body), "retention") {
+		t.Errorf("the 410 blames retention for a missing file: %s", body)
+	}
+}
+
+// **`sections` is validated, which it was not until it did something.**
+//
+// The field was stored and round-tripped while nothing read it, so an unknown
+// name was harmless. Now that it selects content, a typo is a block silently
+// missing from every report the template produces — and the composer drops what
+// it cannot recognise rather than failing a queued run, so nothing downstream
+// would ever report it. This is the only place it can be caught while somebody
+// is looking at the form.
+func TestAnUnknownSectionIsRefused(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	resp, body := c.do(http.MethodPost, "/api/v1/report-templates", map[string]any{
+		"name": "Custom", "type": "custom", "formats": []string{"json"},
+		"sections": []string{"summary", "uptime_tables"},
+	})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, body)
+	}
+	// The pointer names the offending element rather than the array, so a form
+	// with ten chips can highlight the one that is wrong.
+	if pointer := firstErrorPointer(body); pointer != "/sections/1" {
+		t.Errorf("pointer = %q, want /sections/1", pointer)
+	}
+	// And the message lists the alternatives, because "invalid" on a closed
+	// vocabulary is a trip to the specification.
+	if !strings.Contains(problemMessages(body), "uptime_table") {
+		t.Errorf("messages = %q, want the vocabulary listed", problemMessages(body))
+	}
+}
+
+// A valid selection round-trips in the order it was given. Order is part of the
+// contract — the spec calls them "ordered content blocks" — so a store that
+// sorted or de-duplicated them would be changing what was asked for.
+func TestSectionsRoundTripInOrder(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	want := []any{"response_time", "summary", "uptime_table"}
+
+	resp, body := c.do(http.MethodPost, "/api/v1/report-templates", map[string]any{
+		"name": "Custom", "type": "custom", "formats": []string{"json"},
+		"sections": want,
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (%v)", resp.StatusCode, body)
+	}
+	got, _ := body["sections"].([]any)
+	if len(got) != len(want) {
+		t.Fatalf("sections = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("sections[%d] = %v, want %v (order is part of the contract)", i, got[i], want[i])
+		}
+	}
 }

@@ -265,6 +265,120 @@ func (s *Server) applySettings(settings *model.Settings, stored model.Settings, 
 	if body.Telemetry != nil && body.Telemetry.Enabled != nil {
 		settings.Telemetry.Enabled = *body.Telemetry.Enabled
 	}
+	if body.ReportStorage != nil {
+		problems = append(problems, s.applyReportStorage(settings, stored, *body.ReportStorage)...)
+	}
+	return problems
+}
+
+// applyReportStorage validates the artifact mirror and seals its secret key.
+//
+// The secret is encrypted rather than hashed for the reason the data model gives
+// and applySMTP above follows: SigV4 replays it on every request, so it has to be
+// recoverable (§12.1). This is ADR-008 item 12, which asks for the SMTP precedent
+// "exactly" — so the three-case handling of the supplied value, the redaction
+// refusal, and the carry-forward of the stored envelope are all the same code
+// shape rather than a second interpretation of the same rule.
+//
+// **The pair rule here is enablement against completeness.** A mirror that is
+// switched on with no bucket is one that fails on the first artifact, and the
+// operator finds out when they go looking for the offsite copy that was the whole
+// point of enabling it. So the tick and the fields are refused together.
+func (s *Server) applyReportStorage(settings *model.Settings, stored model.Settings, body reportStorageWrite) []ValidationItem {
+	var problems []ValidationItem
+	bad := func(pointer, code, message string) {
+		problems = append(problems, ValidationItem{Pointer: pointer, Code: code, Message: message})
+	}
+
+	into := &settings.ReportStorage
+	if body.MirrorEnabled != nil {
+		into.MirrorEnabled = *body.MirrorEnabled
+	}
+	if body.Bucket != nil {
+		into.Bucket = strings.TrimSpace(*body.Bucket)
+	}
+	if body.Prefix != nil {
+		into.Prefix = strings.Trim(strings.TrimSpace(*body.Prefix), "/")
+	}
+	if body.Region != nil {
+		into.Region = strings.TrimSpace(*body.Region)
+	}
+	if body.Endpoint != nil {
+		endpoint := strings.TrimSpace(*body.Endpoint)
+		if endpoint != "" {
+			parsed, err := url.ParseRequestURI(endpoint)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				bad("/report_storage/endpoint", "invalid",
+					"endpoint must be an absolute http or https URL, such as https://minio.example.com:9000")
+			} else {
+				into.Endpoint = strings.TrimSuffix(endpoint, "/")
+			}
+		} else {
+			into.Endpoint = ""
+		}
+	}
+	if body.PathStyle != nil {
+		into.PathStyle = *body.PathStyle
+	}
+	if body.AccessKeyID != nil {
+		into.AccessKeyID = strings.TrimSpace(*body.AccessKeyID)
+	}
+	if body.ServerSideEncryption != nil {
+		switch *body.ServerSideEncryption {
+		case "", model.SSEAES256, model.SSEKMS:
+			into.ServerSideEncryption = *body.ServerSideEncryption
+		default:
+			bad("/report_storage/server_side_encryption", "invalid",
+				"server_side_encryption must be AES256 or aws:kms")
+		}
+	}
+	if body.MaxArtifactBytes != nil {
+		if *body.MaxArtifactBytes < 1 {
+			bad("/report_storage/max_artifact_bytes", "invalid", "max_artifact_bytes must be at least 1")
+		} else {
+			into.MaxArtifactBytes = *body.MaxArtifactBytes
+		}
+	}
+
+	// The stored envelope carries forward unless this request replaced it, so
+	// changing the endpoint does not silently clear the credential and leave a
+	// mirror that authenticates as nobody.
+	into.SecretAccessKeySealed = stored.ReportStorage.SecretAccessKeySealed
+	if len(body.SecretAccessKey) > 0 {
+		var supplied *string
+		if err := json.Unmarshal(body.SecretAccessKey, &supplied); err != nil {
+			bad("/report_storage/secret_access_key", "invalid", "secret_access_key must be a string or null")
+		} else if supplied == nil || *supplied == "" {
+			into.SecretAccessKeySealed = nil
+		} else if *supplied == model.Redacted {
+			bad("/report_storage/secret_access_key", "redacted",
+				"supply the real secret access key, or omit the field to leave the stored one alone")
+		} else {
+			sealed, err := s.reportStorage.Seal(s.orgID[:], s.orgID[:], []byte(*supplied))
+			if err != nil {
+				s.log.Error("seal report storage secret", "error", err)
+				bad("/report_storage/secret_access_key", "unavailable", "the secret access key could not be stored")
+			} else {
+				into.SecretAccessKeySealed = sealed
+			}
+		}
+	}
+
+	if into.MirrorEnabled {
+		for _, field := range []struct{ pointer, value, why string }{
+			{"/report_storage/bucket", into.Bucket, "bucket is required to enable the mirror"},
+			{"/report_storage/region", into.Region,
+				"region is required for the request signature, even where the provider ignores it"},
+			{"/report_storage/access_key_id", into.AccessKeyID, "access_key_id is required to enable the mirror"},
+		} {
+			if field.value == "" {
+				bad(field.pointer, "required", field.why)
+			}
+		}
+		if len(into.SecretAccessKeySealed) == 0 {
+			bad("/report_storage/secret_access_key", "required", "secret_access_key is required to enable the mirror")
+		}
+	}
 	return problems
 }
 

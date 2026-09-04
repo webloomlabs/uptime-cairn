@@ -78,7 +78,13 @@ type pdfLayout struct {
 // vendored asset and a visual identity commitment that belongs to the
 // maintainer — see the note at the top of font.go.
 func PDFDocument(doc report.Document, brand Brand, family Family) ([]byte, error) {
-	p, err := pdfFor(doc, brand, family)
+	return PDFSections(doc, brand, family, nil)
+}
+
+// PDFSections is PDFDocument with a template's chosen content blocks. A nil
+// selection composes the defaults, which is what PDFDocument passes.
+func PDFSections(doc report.Document, brand Brand, family Family, sections []string) ([]byte, error) {
+	p, err := pdfFor(doc, brand, family, sections)
 	if err != nil {
 		return nil, err
 	}
@@ -89,11 +95,11 @@ func PDFDocument(doc report.Document, brand Brand, family Family) ([]byte, error
 // tests can assert on pages — what broke where, what is on the cover — without
 // restating the flow loop below, which is the way a test ends up passing against
 // a copy of the code rather than against the code.
-func pdfFor(doc report.Document, brand Brand, family Family) (*PDF, error) {
+func pdfFor(doc report.Document, brand Brand, family Family, sections []string) (*PDF, error) {
 	if family.Regular == nil {
 		return nil, fmt.Errorf("render: PDF needs an embedded font family")
 	}
-	l := flow(Compose(doc, brand), family, brand)
+	l := flow(ComposeSections(doc, brand, sections), family, brand)
 	l.runningFooters()
 	return l.pdf, nil
 }
@@ -316,18 +322,18 @@ func (l *pdfLayout) chart(c Chart) {
 	area := Rect{X: marginX, Y: l.y, W: contentW, H: body}
 	switch c.Kind {
 	case ChartUptimeStrip:
-		UptimeStrip(l.pdf, area, c.Days)
+		UptimeStrip(l.pdf, area, c.Points)
 	case ChartLatencyLine:
 		plot := Rect{X: area.X + latencyAxisRoom, Y: area.Y + 6, W: area.W - latencyAxisRoom - 4, H: area.H - 28}
-		low, high, ok := LatencyLine(l.pdf, plot, c.Latency)
+		low, high, ok := LatencyLine(l.pdf, plot, c.Points)
 		if ok {
 			l.text(area.X+latencyAxisRoom-6, plot.Y+8, millisLabel(high), sizeCaption-0.5, Regular, mutedColor, End)
 			l.text(area.X+latencyAxisRoom-6, plot.Y+plot.H, millisLabel(low), sizeCaption-0.5, Regular, mutedColor, End)
-			if len(c.Latency) > 0 {
+			if len(c.Points) > 0 {
 				l.text(area.X+latencyAxisRoom, area.Y+area.H-6,
-					c.Latency[0].Date.Format("2 Jan"), sizeCaption-0.5, Regular, mutedColor, Start)
+					c.Points[0].At.Format(c.axisFormat()), sizeCaption-0.5, Regular, mutedColor, Start)
 				l.text(area.X+area.W-4, area.Y+area.H-6,
-					c.Latency[len(c.Latency)-1].Date.Format("2 Jan"), sizeCaption-0.5, Regular, mutedColor, End)
+					c.Points[len(c.Points)-1].At.Format(c.axisFormat()), sizeCaption-0.5, Regular, mutedColor, End)
 			}
 		} else {
 			l.text(area.X+area.W/2, area.Y+area.H/2, "No measurements in this period",

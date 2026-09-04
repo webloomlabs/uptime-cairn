@@ -52,6 +52,11 @@ type fakeStore struct {
 	finished  string
 	failure   string
 	artifacts []model.ReportArtifact
+
+	// mirrored records what the offsite copy reported, keyed by artifact. A map
+	// rather than a slice because the interesting assertion is "what state did
+	// this artifact end in", not "in what order were they written".
+	mirrored map[model.ID]string
 }
 
 func (f *fakeStore) StartReportRun(context.Context, model.ID, time.Time) error {
@@ -76,6 +81,24 @@ func (f *fakeStore) CreateReportArtifact(_ context.Context, a model.ReportArtifa
 	defer f.mu.Unlock()
 	f.artifacts = append(f.artifacts, a)
 	return nil
+}
+
+func (f *fakeStore) RecordArtifactMirror(_ context.Context, id model.ID, state string, _ *time.Time, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mirrored == nil {
+		f.mirrored = map[model.ID]string{}
+	}
+	f.mirrored[id] = state
+	return nil
+}
+
+// mirrorStateOf reads the offsite outcome recorded against one artifact, under
+// the same lock the runner wrote it with.
+func (f *fakeStore) mirrorStateOf(id model.ID) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.mirrored[id]
 }
 
 // outcome is how a test reads what happened, under the same lock the runner
@@ -116,6 +139,13 @@ func (f *fakeStore) WindowTotals(context.Context, []model.ID, time.Time, time.Ti
 
 func (f *fakeStore) DailySeries(context.Context, []model.ID, time.Time, time.Time) (map[model.ID][]store.HistoryBucket, error) {
 	return f.daily, nil
+}
+
+// HourlySeries answers nothing: the runner's tests are about the run's
+// lifecycle, and a window short enough to ask for one is the report package's
+// business rather than this one's.
+func (f *fakeStore) HourlySeries(context.Context, []model.ID, time.Time, time.Time) (map[model.ID][]store.HistoryBucket, error) {
+	return nil, nil
 }
 
 func (f *fakeStore) RawCovers(context.Context, model.ID, time.Time, string) (bool, error) {

@@ -30,7 +30,13 @@ const (
 // record that needs a CDN to render is not one. It is also what makes the file
 // safe to email, which is how most of these actually travel.
 func HTML(doc report.Document, brand Brand) ([]byte, error) {
-	elements := Compose(doc, brand)
+	return HTMLSections(doc, brand, nil)
+}
+
+// HTMLSections is HTML with a template's chosen content blocks. A nil selection
+// composes the defaults, which is what HTML passes.
+func HTMLSections(doc report.Document, brand Brand, sections []string) ([]byte, error) {
+	elements := ComposeSections(doc, brand, sections)
 
 	var b strings.Builder
 	b.WriteString("<!doctype html>\n<html lang=\"en\">\n<head>\n")
@@ -174,13 +180,13 @@ func drawChart(c Chart) string {
 	switch c.Kind {
 	case ChartUptimeStrip:
 		svg := NewSVG(chartWidth, stripHeight)
-		UptimeStrip(svg, Rect{W: chartWidth, H: stripHeight}, c.Days)
+		UptimeStrip(svg, Rect{W: chartWidth, H: stripHeight}, c.Points)
 		return svg.Document()
 
 	case ChartLatencyLine:
 		svg := NewSVG(chartWidth, latencyHeight)
 		plot := Rect{X: latencyAxisRoom, Y: 6, W: chartWidth - latencyAxisRoom - 4, H: latencyHeight - 28}
-		low, high, ok := LatencyLine(svg, plot, c.Latency)
+		low, high, ok := LatencyLine(svg, plot, c.Points)
 		if !ok {
 			// Nothing measured. An empty frame with a word in it beats an empty
 			// box the reader has to interpret.
@@ -193,10 +199,10 @@ func drawChart(c Chart) string {
 			TextStyle{SizePt: 8, Fill: mutedColor, Anchor: End})
 		svg.Text(latencyAxisRoom-6, plot.Y+plot.H, Run{Text: millisLabel(low)},
 			TextStyle{SizePt: 8, Fill: mutedColor, Anchor: End})
-		if len(c.Latency) > 0 {
-			svg.Text(latencyAxisRoom, latencyHeight-6, Run{Text: c.Latency[0].Date.Format("2 Jan")},
+		if len(c.Points) > 0 {
+			svg.Text(latencyAxisRoom, latencyHeight-6, Run{Text: c.Points[0].At.Format(c.axisFormat())},
 				TextStyle{SizePt: 8, Fill: mutedColor, Anchor: Start})
-			svg.Text(chartWidth-4, latencyHeight-6, Run{Text: c.Latency[len(c.Latency)-1].Date.Format("2 Jan")},
+			svg.Text(chartWidth-4, latencyHeight-6, Run{Text: c.Points[len(c.Points)-1].At.Format(c.axisFormat())},
 				TextStyle{SizePt: 8, Fill: mutedColor, Anchor: End})
 		}
 		return svg.Document()

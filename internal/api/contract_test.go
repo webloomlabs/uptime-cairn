@@ -353,23 +353,6 @@ var skippedFromContract = map[string]bool{
 
 	// Not JSON, and answered by the metrics handler rather than the API mux.
 	"GET /metrics": true,
-
-	// --- Phase 2: share links ------------------------------------------------
-	//
-	// **Human-led work, not unbuilt work.** A share link is an unauthenticated
-	// credential: the token in the URL is the whole of the authorisation, and
-	// generating, hashing and sealing it is exactly what AGENTS.md rule 8 puts
-	// in a person's hands ("Do not generate authentication, session, crypto, or
-	// access-control code"). The schema is in migration 0008 and the spec is
-	// merged; what is missing is deliberately missing.
-	//
-	// They are listed here rather than left to fail so that the reason is on the
-	// screen. Deleting these four lines is the last step of building them, and
-	// the test then says whether they work.
-	"POST /api/v1/report-runs/{reportRunId}/share":     true,
-	"DELETE /api/v1/report-runs/{reportRunId}/share":   true,
-	"GET /api/v1/public/reports/{shareToken}":          true,
-	"GET /api/v1/public/reports/{shareToken}/download": true,
 }
 
 // serverRoutes reads the routing table out of Handler's source.

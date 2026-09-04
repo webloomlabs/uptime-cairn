@@ -174,6 +174,13 @@ export type Settings = {
 		rollup_1h_days?: number;
 		rollup_1d_days?: number;
 		webhook_delivery_days?: number;
+		/**
+		 * How long a rendered report's bytes are kept, and **deliberately not a
+		 * tier**: an artifact is expected to outlive the data it was computed
+		 * from, so the coarser-outlives-finer rule does not apply to it. Zero
+		 * keeps them indefinitely.
+		 */
+		report_artifact_days?: number;
 	};
 	smtp: {
 		host: string | null;
@@ -198,6 +205,31 @@ export type Settings = {
 		trusted_proxies?: string[];
 	};
 	telemetry: { enabled: boolean; last_sent_at?: string | null };
+	/**
+	 * The optional offsite **mirror** for report artifacts. Local storage under
+	 * the data directory is the source of truth and the only read path in every
+	 * configuration; this is a durability copy, and a failed upload is recorded
+	 * rather than fatal.
+	 *
+	 * Not to be confused with a report schedule's S3 *delivery*, which drops one
+	 * run's files for a recipient. They share a client and nothing else.
+	 */
+	report_storage: ReportStorageSettings;
+};
+
+export type ReportStorageSettings = {
+	mirror_enabled: boolean;
+	bucket: string | null;
+	prefix: string | null;
+	/** Required for the request signature even where the provider ignores it. */
+	region: string | null;
+	endpoint: string | null;
+	path_style: boolean;
+	access_key_id: string | null;
+	/** Whether a secret is stored. **The value itself is never read back.** */
+	secret_access_key_set: boolean;
+	server_side_encryption: string | null;
+	max_artifact_bytes: number;
 };
 
 /** One check executor. Read-only in this build; enrolment is Phase 4. */
@@ -522,9 +554,30 @@ export type ReportArtifact = {
 	size_bytes: number | null;
 	sha256: string | null;
 	error: string | null;
+	/**
+	 * Null when there is nothing to fetch — and that covers three different
+	 * facts, so read it with `state`. `expired` is retention doing its job;
+	 * `failed` never produced a file; and **`rendered` with a null URL means the
+	 * bytes are not on disk**, which is what a database restored without
+	 * `<data-dir>/reports/` leaves behind. The server does the disk check, because
+	 * a row saying `rendered` is not the same claim as a readable file.
+	 */
 	download_url: string | null;
 	expires_at: string | null;
+	/**
+	 * The offsite copy's state, and null when no mirror was configured — which is
+	 * deliberately not the same as `pending`. The mirror is a durability copy and
+	 * never a read path, so a failure here does not affect `state` and must not be
+	 * rendered as though the report were damaged.
+	 */
+	mirror: ReportArtifactMirror | null;
 	created_at: string;
+};
+
+export type ReportArtifactMirror = {
+	state: 'pending' | 'uploaded' | 'failed';
+	uploaded_at: string | null;
+	error: string | null;
 };
 
 /**
@@ -554,10 +607,30 @@ export type ReportRun = {
 	timezone: string;
 	artifacts: ReportArtifact[];
 	deliveries: ReportDelivery[];
+	/**
+	 * The active share link, and **never the token**. It is shown once when the
+	 * link is created and is not readable back: a screen that could re-display it
+	 * is a screen that leaks it the first time it is screenshotted.
+	 */
+	share: ReportShare | null;
 	late: boolean;
 	error: string | null;
 	started_at: string | null;
 	finished_at: string | null;
+	created_at: string;
+};
+
+export type ReportShare = {
+	expires_at: string | null;
+	created_at: string;
+	/** Answers "has the client opened it yet", which is the first thing anybody asks. */
+	last_accessed_at?: string | null;
+};
+
+/** The create response. **The only place the URL ever appears.** */
+export type ReportShareCreated = {
+	url: string;
+	expires_at: string | null;
 	created_at: string;
 };
 
@@ -566,14 +639,42 @@ export type ReportScheduleDelivery = {
 	recipients?: string[];
 	notification_channel_id?: string | null;
 	url?: string | null;
+	/**
+	 * The **drop**: a delivery target for one run's files. Not the mirror, which
+	 * is a durability copy of every artifact configured once in settings. They
+	 * share a client and nothing else, and an operator who configures this
+	 * believing they have durability has bought nothing.
+	 */
+	s3?: ReportDeliveryS3 | null;
 	formats?: ReportFormat[];
 };
+
+export type ReportDeliveryS3 = {
+	bucket: string;
+	prefix?: string | null;
+	region?: string | null;
+	endpoint?: string | null;
+	path_style?: boolean;
+	/** Write-only. A read never returns either of these. */
+	access_key_id?: string;
+	secret_access_key?: string;
+};
+
+export type ReportFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'cron';
 
 export type ReportSchedule = {
 	id: string;
 	report_template_id: string;
-	frequency: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'cron';
+	name: string;
+	frequency: ReportFrequency;
+	/** Five-field expression, and only accepted when frequency is `cron`. */
 	cron: string | null;
+	/**
+	 * The zone the window is cut in, defaulted from the instance zone **at write
+	 * time** rather than resolved per run — so changing the instance zone does
+	 * not silently move the boundaries of a report somebody has been receiving
+	 * for a year.
+	 */
 	timezone: string;
 	send_at: string | null;
 	enabled: boolean;

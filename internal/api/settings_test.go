@@ -1,9 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 )
 
@@ -343,5 +346,152 @@ func TestOverviewCountsWhatIsThere(t *testing.T) {
 	}
 	if body["active_incidents"] != 1.0 {
 		t.Errorf("active_incidents = %v, want 1", body["active_incidents"])
+	}
+}
+
+// --- the artifact mirror ----------------------------------------------------
+
+// The mirror's secret is sealed and never read back, exactly as the SMTP
+// password is — ADR-008 item 12 asks for that precedent by name, so this asserts
+// the same property in the same words.
+//
+// What is offered instead is `secret_access_key_set`: an operator has to be able
+// to see that the mirror has a credential without the screen being able to hand
+// it to them.
+func TestTheMirrorSecretIsNeverReturned(t *testing.T) {
+	t.Parallel()
+
+	c := newClient(t, testServer(t))
+	c.setup()
+
+	if resp, body := c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"report_storage": map[string]any{
+			"mirror_enabled": true,
+			"bucket":         "cairn-artifacts",
+			"prefix":         "reports",
+			"region":         "ap-southeast-2",
+			"endpoint":       "https://minio.example.com:9000",
+			"path_style":     true,
+			"access_key_id":  "AKIAIOSFODNN7EXAMPLE",
+			// The real one, not a marker.
+			"secret_access_key":      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+			"server_side_encryption": "AES256",
+		},
+	}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch report_storage = %d (%v)", resp.StatusCode, body)
+	}
+
+	_, body := c.do(http.MethodGet, "/api/v1/settings", nil)
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "wJalrXUtnFEMI") {
+		t.Fatalf("the read shape carried the secret access key: %s", raw)
+	}
+	// Nor the sealed envelope: it is base64 in the column and has no business on
+	// the wire either.
+	if strings.Contains(string(raw), "secret_access_key_sealed") {
+		t.Errorf("the read shape carried the sealed envelope: %s", raw)
+	}
+
+	storage := body["report_storage"].(map[string]any)
+	if storage["secret_access_key_set"] != true {
+		t.Error("secret_access_key_set is false after storing one")
+	}
+	for field, want := range map[string]any{
+		"bucket": "cairn-artifacts", "region": "ap-southeast-2",
+		"endpoint": "https://minio.example.com:9000", "path_style": true,
+		"mirror_enabled": true, "server_side_encryption": "AES256",
+	} {
+		if storage[field] != want {
+			t.Errorf("%s = %v, want %v", field, storage[field], want)
+		}
+	}
+
+	// An unrelated edit must not clear the stored credential: the sealed envelope
+	// carries forward, so changing the endpoint does not leave a mirror that
+	// authenticates as nobody.
+	if resp, out := c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"report_storage": map[string]any{"endpoint": "https://minio.internal:9000"},
+	}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("unrelated patch = %d (%v)", resp.StatusCode, out)
+	}
+	_, body = c.do(http.MethodGet, "/api/v1/settings", nil)
+	if body["report_storage"].(map[string]any)["secret_access_key_set"] != true {
+		t.Error("the credential was cleared by an unrelated edit")
+	}
+}
+
+// **Enablement and completeness are refused together.** A mirror switched on with
+// no bucket fails on the first artifact, and the operator finds out when they go
+// looking for the offsite copy that was the whole point of enabling it.
+func TestAnIncompleteMirrorCannotBeEnabled(t *testing.T) {
+	t.Parallel()
+
+	c := newClient(t, testServer(t))
+	c.setup()
+
+	resp, body := c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"report_storage": map[string]any{"mirror_enabled": true, "bucket": "cairn-artifacts"},
+	})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, body)
+	}
+	messages := problemMessages(body)
+	for _, want := range []string{
+		"region is required for the request signature",
+		"access_key_id is required",
+		"secret_access_key is required",
+	} {
+		if !strings.Contains(messages, want) {
+			t.Errorf("messages = %q, want it to name %q", messages, want)
+		}
+	}
+
+	// The same fields are perfectly storable while the mirror is off, which is
+	// what lets somebody fill the form in before switching it on.
+	if resp, out := c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"report_storage": map[string]any{"bucket": "cairn-artifacts"},
+	}); resp.StatusCode != http.StatusOK {
+		t.Errorf("a disabled mirror with a partial configuration = %d (%v)", resp.StatusCode, out)
+	}
+}
+
+// A redaction marker is refused rather than stored. A client round-tripping its
+// own read never sees a secret, so a marker here was typed by a person — and
+// storing it produces a mirror that authenticates as nobody and fails at 09:00 on
+// the first of the month.
+func TestARedactedMirrorSecretIsRefused(t *testing.T) {
+	t.Parallel()
+
+	c := newClient(t, testServer(t))
+	c.setup()
+
+	resp, body := c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"report_storage": map[string]any{"secret_access_key": model.Redacted},
+	})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, body)
+	}
+	if !strings.Contains(problemMessages(body), "supply the real secret access key") {
+		t.Errorf("messages = %q", problemMessages(body))
+	}
+}
+
+// An unknown server-side encryption mode is refused. The header is passed through
+// verbatim, so a typo would be sent to the provider and rejected there — at
+// upload time, against an artifact, rather than here against a form.
+func TestAnUnknownServerSideEncryptionModeIsRefused(t *testing.T) {
+	t.Parallel()
+
+	c := newClient(t, testServer(t))
+	c.setup()
+
+	resp, _ := c.do(http.MethodPatch, "/api/v1/settings", map[string]any{
+		"report_storage": map[string]any{"server_side_encryption": "rot13"},
+	})
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", resp.StatusCode)
 	}
 }

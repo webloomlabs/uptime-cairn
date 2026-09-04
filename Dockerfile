@@ -63,7 +63,14 @@ FROM alpine:3.22
 # file's net.ipv4.ping_group_range has to name the same GID for unprivileged
 # ICMP to open. `adduser -D` alone assigns the next free GID, which is not
 # 10001, and the failure is a container that cannot write to its own volume.
-RUN apk add --no-cache ca-certificates tzdata sqlite \
+# `upgrade` before `add`, and it is not belt-and-braces. The base tag floats to
+# the latest 3.22 patch, but apk will not replace a package the image already
+# carries when something merely depends on it — so a pulled-in libcrypto3 stays
+# at whatever the base image shipped even when the index holds a fixed build.
+# That is exactly how a CVE with an available fix survives a rebuild, and the
+# image scan fails on fixable findings rather than on findings.
+RUN apk upgrade --no-cache \
+ && apk add --no-cache ca-certificates tzdata sqlite \
  && addgroup -g 10001 cairn \
  && adduser -D -u 10001 -G cairn -h /data cairn \
  && mkdir -p /data \

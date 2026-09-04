@@ -246,18 +246,47 @@ func (s *Store) WindowTotals(ctx context.Context, ids []model.ID, from, to time.
 // last week, which is the single most common way a status page lies and would be
 // a worse lie on an invoice attachment.
 func (s *Store) DailySeries(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.HistoryBucket, error) {
+	return s.seriesFromTier(ctx, "1d", ids, from, to)
+}
+
+// HourlySeries is the same series at the 1h tier, for a window too short for the
+// daily one to be a chart.
+//
+// A report over a single day has exactly one daily bucket: a strip of one cell
+// and a line of one point, which is a drawing that carries no information the
+// figures beside it do not already state. The caller decides when to ask —
+// nothing here judges the window — and it asks only for short ones, which is
+// what keeps this from being a fifth query on the monthly runs the load gate
+// measures.
+//
+// Hours with no observations are absent for the same reason days are.
+func (s *Store) HourlySeries(ctx context.Context, ids []model.ID, from, to time.Time) (map[model.ID][]store.HistoryBucket, error) {
+	return s.seriesFromTier(ctx, "1h", ids, from, to)
+}
+
+// seriesFromTier is the per-bucket series over the window, from a named tier.
+//
+// One implementation for both grains rather than two, so that a column added to
+// the daily series cannot be forgotten in the hourly one — the same reasoning
+// scanKeyedBucket is written down for below, and the symptom would be the same:
+// two exhibits of one window that disagree.
+//
+// The tier is interpolated into the table name and is never user input: the two
+// callers above pass literals. That is the same arrangement WindowTotals has,
+// where the tier comes from ResolveTier's own fixed list.
+func (s *Store) seriesFromTier(ctx context.Context, tier string, ids []model.ID, from, to time.Time) (map[model.ID][]store.HistoryBucket, error) {
 	if len(ids) == 0 {
 		return map[model.ID][]store.HistoryBucket{}, nil
 	}
 
-	query := `
+	query := fmt.Sprintf(`
 		SELECT monitor_id, up_count, down_count, pending_count, maintenance_count,
 		       unknown_count, skipped_count,
 		       response_time_sum, response_time_count, response_time_min, response_time_max,
 		       NULL, bucket_start
-		FROM heartbeat_1d
-		WHERE monitor_id IN (` + placeholders(len(ids)) + `) AND bucket_start >= ? AND bucket_start < ?
-		ORDER BY monitor_id, bucket_start`
+		FROM heartbeat_%s
+		WHERE monitor_id IN (%s) AND bucket_start >= ? AND bucket_start < ?
+		ORDER BY monitor_id, bucket_start`, tier, placeholders(len(ids)))
 
 	args := make([]any, 0, len(ids)+2)
 	for _, id := range ids {
@@ -267,7 +296,7 @@ func (s *Store) DailySeries(ctx context.Context, ids []model.ID, from, to time.T
 
 	rows, err := s.ro.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("daily series: %w", err)
+		return nil, fmt.Errorf("%s series: %w", tier, err)
 	}
 	defer func() { _ = rows.Close() }()
 

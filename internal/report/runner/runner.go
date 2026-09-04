@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/artifact"
@@ -57,6 +58,12 @@ type Store interface {
 	// carries the appearance section, which is what an install that has never
 	// opened the brand-profile screen is branded from.
 	GetSettings(ctx context.Context, orgID model.ID) (model.Settings, error)
+
+	// RecordArtifactMirror writes the outcome of one offsite upload. Separate
+	// from CreateReportArtifact because the ordering is the same one ADR-008
+	// item 4 fixes locally: row first, upload second, outcome third — an upload
+	// attempted before the row would have nowhere to record a failure.
+	RecordArtifactMirror(ctx context.Context, id model.ID, state string, uploadedAt *time.Time, failure string) error
 }
 
 // Files is the artifact directory.
@@ -94,10 +101,44 @@ type Runner struct {
 	store Store
 	files Files
 	opts  Options
+
+	// mirrors resolves the offsite durability copy from the settings snapshot
+	// this run read, rather than from a client built at start-up. That is the
+	// same rule retention follows and for the same reason: an operator who
+	// enables the mirror at 09:00 should not have to restart the instance for it
+	// to reach the next report.
+	//
+	// Nil on a build that is not running one, and it resolves to nil on every
+	// install that has not configured one — which is the common case and is why
+	// this is a nil check rather than a no-op implementation. A durability copy
+	// and never a read path: nothing in this package consults it to find bytes.
+	mirrors MirrorSource
+
+	// log carries a mirror failure to where an operator sees it. Nil in tests
+	// that do not assert on logging, which every call site tolerates.
+	log *slog.Logger
 }
 
 func New(store Store, files Files, opts Options) *Runner {
 	return &Runner{store: store, files: files, opts: opts}
+}
+
+// WithMirror attaches the offsite copy's resolver.
+//
+// A setter rather than a fourth argument to New, following WithReporting on the
+// API server and for the same reason: the mirror is optional in a way the other
+// three are not, and a test exercising a render has no reason to construct one.
+func (r *Runner) WithMirror(m MirrorSource, log *slog.Logger) *Runner {
+	r.mirrors, r.log = m, log
+	return r
+}
+
+// mirrorFor resolves this run's mirror from the settings it read.
+func (r *Runner) mirrorFor(settings model.Settings) Uploader {
+	if r.mirrors == nil {
+		return nil
+	}
+	return r.mirrors.For(settings.ReportStorage)
 }
 
 // Execute renders one queued run to completion.
@@ -119,7 +160,7 @@ func (r *Runner) Execute(ctx context.Context, run model.ReportRun, now time.Time
 	// another.
 	settings := r.settingsFor(ctx, run)
 
-	doc, brand, err := r.compose(ctx, run, settings, now)
+	doc, brand, sections, err := r.compose(ctx, run, settings, now)
 	if err != nil {
 		// Nothing rendered because nothing could be computed. This is the one
 		// genuinely failed run: no artifact exists, so there is no partial state
@@ -147,7 +188,7 @@ func (r *Runner) Execute(ctx context.Context, run model.ReportRun, now time.Time
 			return r.interrupted(ctx, run, rendered, now)
 		}
 
-		data, renderErr := r.render(doc, brand, format)
+		data, renderErr := r.render(doc, brand, sections, format)
 		if renderErr == nil {
 			renderErr = r.storeArtifact(ctx, run, settings, format, data, now)
 		}
@@ -250,15 +291,15 @@ func (r *Runner) retentionFor(settings model.Settings) report.Retention {
 }
 
 // compose builds the document and resolves the branding.
-func (r *Runner) compose(ctx context.Context, run model.ReportRun, settings model.Settings, now time.Time) (report.Document, render.Brand, error) {
+func (r *Runner) compose(ctx context.Context, run model.ReportRun, settings model.Settings, now time.Time) (report.Document, render.Brand, []string, error) {
 	template, err := r.store.ReportTemplateForRun(ctx, run.ReportTemplateID)
 	if err != nil {
-		return report.Document{}, render.Brand{}, fmt.Errorf("load template: %w", err)
+		return report.Document{}, render.Brand{}, nil, fmt.Errorf("load template: %w", err)
 	}
 
 	doc, err := report.Build(ctx, r.store, specFor(template, run), r.retentionFor(settings), run.ID, now)
 	if err != nil {
-		return report.Document{}, render.Brand{}, fmt.Errorf("compute report: %w", err)
+		return report.Document{}, render.Brand{}, nil, fmt.Errorf("compute report: %w", err)
 	}
 
 	// **Resolved here and copied onto the document**, so the artifact records
@@ -268,7 +309,14 @@ func (r *Runner) compose(ctx context.Context, run model.ReportRun, settings mode
 	brand := r.brandFor(ctx, template, settings)
 	doc.Meta.Brand = brand.Denormalised()
 
-	return doc, brand, nil
+	// **The sections are the template's, not the run's**, and they are read here
+	// with everything else the template decides. A run records the window it
+	// covered and the branding it was produced under; which blocks it contained
+	// follows the definition, so re-running a report after narrowing a template
+	// produces the narrowed document. That is the same rule the formats already
+	// follow, and the alternative — freezing the selection onto the run — would
+	// need a column the frozen schema does not have.
+	return doc, brand, template.Sections, nil
 }
 
 // specFor reduces a stored template and a run to the questions the computation
@@ -400,27 +448,35 @@ func (r *Runner) formatsFor(ctx context.Context, run model.ReportRun) ([]string,
 // system most likely to meet a shape nobody anticipated. Taking down the run,
 // and with it the three formats that would have rendered, is a worse answer than
 // recording one format's failure.
-func (r *Runner) render(doc report.Document, brand render.Brand, format string) (data []byte, err error) {
+func (r *Runner) render(doc report.Document, brand render.Brand, sections []string, format string) (data []byte, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			data, err = nil, fmt.Errorf("renderer panicked: %v", recovered)
 		}
 	}()
 
+	// **Sections reach the HTML and the PDF and deliberately not the JSON or the
+	// CSV.** A section is a decision about the report's *face* — which blocks a
+	// reader sees and in what order — and those two are not a face. The JSON
+	// artifact is the `ReportDocument` verbatim, which is what the frozen spec
+	// says it is and what a BI tool binds to; the CSV is a row per bucket per
+	// monitor. Filtering either would make a data export whose columns depended
+	// on a presentation choice, and would make the JSON artifact stop being the
+	// document it claims to be.
 	switch format {
 	case model.FormatJSON:
 		return render.JSON(doc)
 	case model.FormatCSV:
 		return render.CSV(doc)
 	case model.FormatHTML:
-		return render.HTML(doc, brand)
+		return render.HTMLSections(doc, brand, sections)
 	case model.FormatPDF:
 		if r.opts.Fonts.Regular == nil {
 			// Stated rather than generic, because the fix is an operator action:
 			// no font family is embedded in this build.
 			return nil, errors.New("no embedded font family, so PDF cannot be rendered")
 		}
-		return render.PDFDocument(doc, brand, r.opts.Fonts)
+		return render.PDFSections(doc, brand, r.opts.Fonts, sections)
 	}
 	return nil, fmt.Errorf("unknown format %q", format)
 }
@@ -433,6 +489,10 @@ func (r *Runner) render(doc report.Document, brand render.Brand, format string) 
 // supply.
 func (r *Runner) storeArtifact(ctx context.Context, run model.ReportRun, settings model.Settings, format string, data []byte, now time.Time) error {
 	id := model.NewID()
+
+	// Resolved from this run's settings snapshot, so the row is created
+	// `pending` exactly when there is a mirror to be pending for.
+	mirror := r.mirrorFor(settings)
 
 	// Dated by the run's period rather than by now, so a report regenerated for
 	// last March is filed under last March and a backup restored by month
@@ -452,9 +512,20 @@ func (r *Runner) storeArtifact(ctx context.Context, run model.ReportRun, setting
 		SizeBytes:   written.SizeBytes,
 		SHA256:      written.SHA256,
 		ExpiresAt:   r.expiryFor(settings, now),
+		MirrorState: mirrorInitialState(mirror != nil),
 		CreatedAt:   now,
 	}
-	return r.store.CreateReportArtifact(ctx, row)
+	if err := r.store.CreateReportArtifact(ctx, row); err != nil {
+		return err
+	}
+
+	// The offsite copy, attempted after the row exists and unable to fail the
+	// run. ADR-008 item 9: local is the source of truth and the only read path,
+	// so a report that rendered, filed and delivered has not failed because a
+	// bucket was unreachable. The outcome lands on the artifact row, where an
+	// operator can see the queue rather than believe in the mirror.
+	r.mirrorArtifact(ctx, mirror, id, written.Path, format, data)
+	return nil
 }
 
 func (r *Runner) recordFailure(ctx context.Context, run model.ReportRun, format string, cause error, now time.Time) error {

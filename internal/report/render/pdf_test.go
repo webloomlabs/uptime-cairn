@@ -73,7 +73,7 @@ func renderPDF(t *testing.T, doc report.Document, brand Brand) ([]byte, *PDF) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	drawn, err := pdfFor(doc, brand, family)
+	drawn, err := pdfFor(doc, brand, family, nil)
 	if err != nil {
 		t.Fatalf("layout: %v", err)
 	}

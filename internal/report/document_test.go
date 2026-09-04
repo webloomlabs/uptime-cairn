@@ -15,6 +15,7 @@ type fakeStore struct {
 	monitors []model.Monitor
 	totals   map[model.ID]store.HistoryBucket
 	series   map[model.ID][]store.HistoryBucket
+	hourly   map[model.ID][]store.HistoryBucket
 	targets  map[model.ID]Target
 
 	// p95 is what UptimeFromRaw reports, and rawFrom/rawTo capture the window it
@@ -52,6 +53,11 @@ func (f *fakeStore) WindowTotals(_ context.Context, _ []model.ID, _, _ time.Time
 func (f *fakeStore) DailySeries(_ context.Context, _ []model.ID, _, _ time.Time) (map[model.ID][]store.HistoryBucket, error) {
 	f.note("DailySeries")
 	return f.series, nil
+}
+
+func (f *fakeStore) HourlySeries(_ context.Context, _ []model.ID, _, _ time.Time) (map[model.ID][]store.HistoryBucket, error) {
+	f.note("HourlySeries")
+	return f.hourly, nil
 }
 
 func (f *fakeStore) SLOTargets(context.Context, []model.ID) (map[model.ID]Target, error) {

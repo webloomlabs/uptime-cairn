@@ -145,6 +145,19 @@
 								>
 									{t('reports.generate')}
 								</button>
+								<!--
+									Generating is a one-off; scheduling is the arrangement.
+									They sit together because somebody looking at a template
+									is deciding between exactly those two, and the schedule
+									link carries the template so the next screen does not ask
+									which report was meant.
+								-->
+								<a
+									class="ml-3 text-sm hover:underline"
+									href="/reports/schedules/new?template={template.id}"
+								>
+									{t('reports.schedule')}
+								</a>
 							{/if}
 						</td>
 					</tr>

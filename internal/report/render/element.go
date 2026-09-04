@@ -1,6 +1,6 @@
 package render
 
-import "github.com/webloomlabs/uptime-cairn/internal/report"
+import "time"
 
 // The document model (ADR-007 item 3): cover block, heading, paragraph,
 // key–value block, table, chart, footer.
@@ -87,8 +87,37 @@ type Chart struct {
 	Title   string
 	Caption string
 
-	Days    []report.DayUptime
-	Latency []report.DayLatency
+	// Points is the series, at whatever grain the window called for — a day on a
+	// monthly report, an hour on a daily one. The primitives that draw it
+	// deliberately do not know which: a strip of thirty days and a strip of
+	// twenty-four hours are the same drawing, and the axis labels are what tell a
+	// reader which one is in front of them.
+	Points []ChartPoint
+
+	// AxisFormat is the layout the end labels are written with. Empty is the
+	// date, which is what every series of days uses.
+	AxisFormat string
+}
+
+// ChartPoint is one bucket of a chart series.
+//
+// One Value serves both kinds — an uptime ratio for the strip, an average
+// response for the line — because the two charts differ in how they draw a
+// number rather than in what they are handed. Nil is "nothing observed", and
+// both draw it as a gap rather than as zero: the separation the rollup tiers
+// keep between unknown and down survives all the way onto the page.
+type ChartPoint struct {
+	At    time.Time
+	Value *float64
+}
+
+// axisFormat is the layout for the two end labels. A series of days is the
+// default because it is every report but the shortest.
+func (c Chart) axisFormat() string {
+	if c.AxisFormat == "" {
+		return "2 Jan"
+	}
+	return c.AxisFormat
 }
 
 // ChartKind enumerates what can be drawn. Growing this means writing the drawing

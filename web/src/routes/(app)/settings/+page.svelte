@@ -55,7 +55,19 @@
 			},
 			monitoring: {},
 			security: {},
-			telemetry: { enabled: false }
+			telemetry: { enabled: false },
+			report_storage: {
+				mirror_enabled: false,
+				bucket: null,
+				prefix: null,
+				region: null,
+				endpoint: null,
+				path_style: false,
+				access_key_id: null,
+				secret_access_key_set: false,
+				server_side_encryption: null,
+				max_artifact_bytes: 0
+			}
 		};
 	}
 	let error = $state<unknown>(null);
@@ -64,6 +76,13 @@
 	let fields = $state<Record<string, string>>({});
 
 	let smtpPassword = $state('');
+	/**
+	 * The mirror's secret, write-only on exactly the same terms as the SMTP
+	 * password above: the read path has no field for it, so an empty box means
+	 * *keep the stored one* and never *clear it*. A form that round-trips its own
+	 * GET must not be able to destroy a credential it was never shown.
+	 */
+	let mirrorSecret = $state('');
 	let trustedProxies = $state('');
 
 	async function load() {
@@ -119,7 +138,8 @@
 					rollup_5m_days: num(settings.retention.rollup_5m_days),
 					rollup_1h_days: num(settings.retention.rollup_1h_days),
 					rollup_1d_days: num(settings.retention.rollup_1d_days),
-					webhook_delivery_days: num(settings.retention.webhook_delivery_days)
+					webhook_delivery_days: num(settings.retention.webhook_delivery_days),
+					report_artifact_days: num(settings.retention.report_artifact_days)
 				},
 				monitoring: {
 					default_interval_seconds: num(settings.monitoring.default_interval_seconds),
@@ -151,9 +171,27 @@
 			if (smtpPassword) smtp.password = smtpPassword;
 			body.smtp = smtp;
 
+			const storage: Record<string, unknown> = {
+				mirror_enabled: settings.report_storage.mirror_enabled,
+				bucket: settings.report_storage.bucket ?? '',
+				prefix: settings.report_storage.prefix ?? '',
+				region: settings.report_storage.region ?? '',
+				endpoint: settings.report_storage.endpoint ?? '',
+				path_style: settings.report_storage.path_style,
+				access_key_id: settings.report_storage.access_key_id ?? '',
+				server_side_encryption: settings.report_storage.server_side_encryption ?? '',
+				max_artifact_bytes: num(settings.report_storage.max_artifact_bytes)
+			};
+			// Omitted when the box is empty, exactly as the SMTP password is: an
+			// explicit null is a request to clear the credential, which is what
+			// somebody saving an unrelated change must not do by accident.
+			if (mirrorSecret) storage.secret_access_key = mirrorSecret;
+			body.report_storage = storage;
+
 			settings = await api.patch<Settings>('/settings', body);
 			trustedProxies = (settings.security.trusted_proxies ?? []).join(', ');
 			smtpPassword = '';
+			mirrorSecret = '';
 			saved = true;
 		} catch (caught) {
 			error = caught;
@@ -419,6 +457,35 @@
 					</Field>
 				{/each}
 			</div>
+
+			<!--
+				Outside the grid above, deliberately. Report files are **not a tier**:
+				an artifact is expected to outlive the data it was computed from, so
+				the coarser-outlives-finer rule the tiers answer to does not apply to
+				it — and putting it in the same row would invite somebody to reason
+				about it as though it did.
+			-->
+			<Field
+				label={t('settings.reportArtifactDays')}
+				id="retention-report_artifact_days"
+				error={fields['/retention/report_artifact_days']}
+				hint={t('settings.reportArtifactDaysHint')}
+			>
+				{#snippet children({ id, describedBy, invalid })}
+					<input
+						{id}
+						class="field sm:max-w-40"
+						type="number"
+						min="0"
+						disabled={!writable}
+						aria-describedby={describedBy}
+						aria-invalid={invalid}
+						value={settings.retention.report_artifact_days ?? ''}
+						oninput={(event) =>
+							(settings.retention.report_artifact_days = num(event.currentTarget.value))}
+					/>
+				{/snippet}
+			</Field>
 		</section>
 
 		<section class="card space-y-5 p-5">
@@ -595,6 +662,192 @@
 				/>
 				<span>{t('settings.requireTotp')}</span>
 			</label>
+		</section>
+
+		<!--
+			The artifact mirror.
+			
+			Kept apart from a report schedule's S3 *delivery* by name and by placement:
+			this is a durability copy of every artifact, and that drops one run's files
+			for a recipient. They share a client and nothing else, and an operator who
+			configures a delivery believing they have durability has bought nothing
+			against the failure this exists for.
+		-->
+		<section class="card space-y-5 p-5">
+			<div>
+				<h2 class="font-semibold">
+					{t('settings.mirror')}<span style="color: var(--color-up)" aria-hidden="true">.</span>
+				</h2>
+				<p class="muted mt-1 text-sm">{t('settings.mirrorHint')}</p>
+			</div>
+
+			<!--
+				Stated on the screen rather than only in the documentation, because a
+				public bucket holding client reports is a breach with no code defect
+				behind it — item 13 and the docs are the whole of the defence.
+			-->
+			<p class="text-sm" style="color: var(--color-pending)">{t('settings.mirrorBucketWarning')}</p>
+
+			<label class="flex items-center gap-2 text-sm">
+				<input
+					type="checkbox"
+					class="h-4 w-4 accent-[var(--accent)]"
+					bind:checked={settings.report_storage.mirror_enabled}
+					disabled={!writable}
+				/>
+				<span>{t('settings.mirrorEnabled')}</span>
+			</label>
+
+			<div class="grid gap-4 sm:grid-cols-2">
+				<Field
+					label={t('settings.mirrorBucket')}
+					id="mirror-bucket"
+					error={fields['/report_storage/bucket']}
+				>
+					{#snippet children({ id, describedBy, invalid })}
+						<input
+							{id}
+							class="field"
+							bind:value={settings.report_storage.bucket}
+							disabled={!writable}
+							aria-describedby={describedBy}
+							aria-invalid={invalid}
+						/>
+					{/snippet}
+				</Field>
+
+				<Field
+					label={t('settings.mirrorPrefix')}
+					id="mirror-prefix"
+					error={fields['/report_storage/prefix']}
+				>
+					{#snippet children({ id, describedBy, invalid })}
+						<input
+							{id}
+							class="field"
+							placeholder="cairn/reports"
+							bind:value={settings.report_storage.prefix}
+							disabled={!writable}
+							aria-describedby={describedBy}
+							aria-invalid={invalid}
+						/>
+					{/snippet}
+				</Field>
+			</div>
+
+			<Field
+				label={t('settings.mirrorRegion')}
+				id="mirror-region"
+				error={fields['/report_storage/region']}
+				hint={t('settings.mirrorRegionHint')}
+			>
+				{#snippet children({ id, describedBy, invalid })}
+					<input
+						{id}
+						class="field"
+						placeholder="us-east-1"
+						bind:value={settings.report_storage.region}
+						disabled={!writable}
+						aria-describedby={describedBy}
+						aria-invalid={invalid}
+					/>
+				{/snippet}
+			</Field>
+
+			<Field
+				label={t('settings.mirrorEndpoint')}
+				id="mirror-endpoint"
+				error={fields['/report_storage/endpoint']}
+				hint={t('settings.mirrorEndpointHint')}
+			>
+				{#snippet children({ id, describedBy, invalid })}
+					<input
+						{id}
+						class="field"
+						placeholder="https://minio.example.com:9000"
+						bind:value={settings.report_storage.endpoint}
+						disabled={!writable}
+						aria-describedby={describedBy}
+						aria-invalid={invalid}
+					/>
+				{/snippet}
+			</Field>
+
+			<label class="flex items-center gap-2 text-sm">
+				<input
+					type="checkbox"
+					class="h-4 w-4 accent-[var(--accent)]"
+					bind:checked={settings.report_storage.path_style}
+					disabled={!writable}
+				/>
+				<span>{t('settings.mirrorPathStyle')}</span>
+			</label>
+			<p class="muted -mt-3 text-xs">{t('settings.mirrorPathStyleHint')}</p>
+
+			<div class="grid gap-4 sm:grid-cols-2">
+				<Field
+					label={t('settings.mirrorAccessKey')}
+					id="mirror-access-key"
+					error={fields['/report_storage/access_key_id']}
+				>
+					{#snippet children({ id, describedBy, invalid })}
+						<input
+							{id}
+							class="field"
+							autocomplete="off"
+							bind:value={settings.report_storage.access_key_id}
+							disabled={!writable}
+							aria-describedby={describedBy}
+							aria-invalid={invalid}
+						/>
+					{/snippet}
+				</Field>
+
+				<Field
+					label={t('settings.mirrorSecretKey')}
+					id="mirror-secret-key"
+					error={fields['/report_storage/secret_access_key']}
+					hint={settings.report_storage.secret_access_key_set
+						? t('settings.mirrorSecretStored')
+						: t('settings.mirrorSecretUnset')}
+				>
+					{#snippet children({ id, describedBy, invalid })}
+						<input
+							{id}
+							class="field"
+							type="password"
+							autocomplete="new-password"
+							placeholder={settings.report_storage.secret_access_key_set ? '••••••••' : ''}
+							bind:value={mirrorSecret}
+							disabled={!writable}
+							aria-describedby={describedBy}
+							aria-invalid={invalid}
+						/>
+					{/snippet}
+				</Field>
+			</div>
+
+			<Field
+				label={t('settings.mirrorEncryption')}
+				id="mirror-sse"
+				error={fields['/report_storage/server_side_encryption']}
+				hint={t('settings.mirrorEncryptionHint')}
+			>
+				{#snippet children({ id, describedBy, invalid })}
+					<select
+						{id}
+						class="field"
+						bind:value={settings.report_storage.server_side_encryption}
+						disabled={!writable}
+						aria-describedby={describedBy}
+						aria-invalid={invalid}
+					>
+						<option value={null}>{t('settings.mirrorEncryptionNone')}</option>
+						<option value="AES256">AES256</option>
+						<option value="aws:kms">aws:kms</option>
+					</select>
+				{/snippet}
+			</Field>
 		</section>
 
 		<section class="card space-y-4 p-5">

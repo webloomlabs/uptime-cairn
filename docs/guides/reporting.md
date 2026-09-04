@@ -1,7 +1,8 @@
 # Reporting
 
 Scheduled, branded reports over your monitoring history: what a template is, how
-a schedule fires, where the files live, and what arrives in a client's inbox.
+a schedule fires, where the files live, what arrives in a client's inbox, and how
+to publish one at a link.
 
 If a figure in a report is disputed, the page you want is
 [sla-methodology.md](sla-methodology.md) — it states exactly what counts as
@@ -156,6 +157,32 @@ There is **no percentile over the whole window at any tier**, and there cannot b
 a quantile is a rank statistic and does not merge, so no coarser tier holds one.
 The daily average series is the primary latency exhibit instead.
 
+### Charts on a short window
+
+A report covering one day drew a strip of one cell and a line of one point — both
+pictures of a number already printed beneath them. So a window of **48 hours or
+less** gets its two per-monitor charts from the hourly tier instead: one cell per
+hour, one point per hour, and the axis labelled in hours rather than dates. The
+caption says which grain it is, so a 24-cell strip is never mistaken for 24 days.
+
+Two things do not change with it:
+
+- **The published document keeps its grain.** `response_time.daily` is one point
+  per day typed `format: date` in the contract, and twenty-four points carrying
+  one date would not be a finer reading of that field. The hourly series is a
+  second exhibit of the same window and reaches the page only.
+- **The window totals are unaffected.** Uptime, the average, and the SLA block
+  are computed from the same tier they always were.
+
+Where retention has left only the daily tier for that period, the hourly series
+is not read at all and the daily charts stand — the same rule as everywhere else
+here: retention limits resolution, and the document says what answered.
+
+"Best day" and "worst day" are omitted from the rendered page when they are the
+same day, which is every daily report: three headings over one number invite a
+reader to look for a difference that cannot be there. They stay in the JSON,
+where a consumer can compare the dates itself.
+
 ---
 
 ## Formats
@@ -262,7 +289,7 @@ digest beside it, and can be downloaded and re-sent.
 | `email` | The report **attached**, through the instance SMTP relay, with a short covering note. |
 | `slack` | A message announcing the report and what it covers. Not the file — an incoming webhook cannot carry an upload. |
 | `webhook` | A JSON description of the run and its artifacts, each with its SHA-256, so a receiver can fetch and verify. |
-| `s3` | **Refused in this release.** The SigV4 client is not built, and accepting a credential nothing can use would leave you believing it was saved. |
+| `s3` | The run's files, dropped into a bucket under a readable key. See [The drop, and the mirror](#the-drop-and-the-mirror) — they are not the same thing. |
 
 Set `formats` on a target to narrow what it receives: an auditor gets the PDF and
 a BI pipeline gets the CSV, from one schedule.
@@ -326,6 +353,189 @@ alone, because a report being produced right now looks exactly like an orphan.
 
 ---
 
+## The drop, and the mirror
+
+Two features that both put report files in an S3-compatible bucket, and they are
+**not the same thing**. Configuring one when you meant the other is the mistake
+this section exists to prevent, because both look like success from the outside.
+
+| | The mirror | The drop |
+|---|---|---|
+| What it is | A durability copy of **every artifact this install produces** | A **delivery**: one schedule's output, for a recipient |
+| Configured in | `settings.report_storage`, once | On a schedule, as an `s3` delivery target |
+| Key layout | The on-disk path: `<prefix>/<yyyy>/<mm>/<artifact-id>.<ext>` | Readable: `<prefix>/<template>/<period>/<template>-<period>.<ext>` |
+| Read by | A restore, which wants the tree reproduced exactly | A person, or somebody's data pipeline |
+| On failure | Recorded on the artifact; **the run still succeeds** | A failed delivery, retried like any other |
+
+**A drop is not a backup.** It sends the formats that target takes, for the
+schedules that have one, to wherever a client asked for them. If you want the
+guarantee that every report this install ever produced exists somewhere other
+than this disk, that is the mirror.
+
+They share one client — a few hundred lines of SigV4 over the standard library,
+rather than a vendor SDK — and nothing else.
+
+### Configuring the mirror
+
+Settings → **Report artifact mirror**, or `PATCH /api/v1/settings`:
+
+```jsonc
+{
+  "report_storage": {
+    "mirror_enabled": true,
+    "bucket": "cairn-artifacts",
+    "prefix": "cairn/reports",
+    "region": "us-east-1",
+    "endpoint": "https://minio.example.com:9000",
+    "path_style": true,
+    "access_key_id": "…",
+    "secret_access_key": "…",
+    "server_side_encryption": "AES256"
+  }
+}
+```
+
+Three fields are worth explaining because they are the ones that go wrong:
+
+- **`region` is required even where your provider ignores it.** It is an input to
+  the signing key, not to routing, so a wrong or missing one produces a `403` that
+  explains nothing. If you are on MinIO, Garage or Ceph and have never needed a
+  region, `us-east-1` is the conventional answer.
+- **`path_style` puts the bucket in the path rather than the hostname.** MinIO,
+  Garage and Ceph commonly need it; AWS prefers the alternative. Without it, the
+  request goes to `<bucket>.<your-endpoint>`, which needs DNS and a certificate
+  that a self-hosted server generally does not have — and the failure is a TLS
+  error naming a hostname you never typed.
+- **`endpoint` is empty for AWS** and set for everything else.
+
+Only static credentials are supported. No instance profiles, no STS, no credential
+chain — those are AWS-specific paths with their own refresh and failure modes.
+
+The secret is **sealed at rest** exactly as the SMTP password is, and no read ever
+returns it. `secret_access_key_set` tells you one is stored. Leaving the field
+empty on a later save keeps the stored one; sending `null` clears it.
+
+Changes take effect on the **next report**, not the next restart.
+
+### The bucket must not be public
+
+> A public bucket holding client reports is a data breach with no code defect
+> behind it. Nothing in this product can detect that you have made one.
+
+Artifacts are **not encrypted before upload**. That is a decision on the record
+rather than an omission: monitor names, uptime figures and incident narratives are
+already plaintext in `cairn.db`, so encrypting the report that renders them would
+be inconsistent without being protective. `server_side_encryption` is passed
+through to the provider as `x-amz-server-side-encryption` when set, and `aws:kms`
+requires KMS to actually be configured at the far end — MinIO without it refuses
+the upload with `NotImplemented`.
+
+**Do not put your encryption key in the same bucket as a database backup.** A
+backup that puts the key beside the database it protects has encrypted nothing
+against the threat that actually happens, which is somebody walking off with the
+backup. Artifacts and a database backup may share a bucket; the key needs a
+different trust boundary.
+
+### When the mirror fails
+
+The upload happens after the local file is written and after its row is committed,
+so a failure has somewhere to be recorded and the artifact is already readable when
+it is attempted. **A failed upload does not fail the run.** Local storage is the
+source of truth and the only read path in every configuration, so a report that
+rendered, filed and delivered has not failed because a bucket was unreachable.
+
+Each artifact carries the outcome, with the provider's own message:
+
+```jsonc
+"mirror": {
+  "state": "failed",
+  "uploaded_at": null,
+  "error": "s3: not found: put cairn/reports/2026/04/…csv: NoSuchBucket: The specified bucket does not exist"
+}
+```
+
+`null` rather than `pending` means no mirror was configured when that artifact was
+written, which is a different fact from "an upload has not happened yet".
+
+**Nothing retries it.** A failed upload stays failed on that artifact; fixing the
+configuration affects the next report, not the backlog, and nothing compares the
+bucket against the database. If you need the gap filled, copy `<data-dir>/reports/`
+into the bucket yourself — the layouts are identical, which is why they are
+identical.
+
+### Configuring a drop
+
+On a schedule's delivery target:
+
+```jsonc
+{
+  "type": "s3",
+  "formats": ["csv", "json"],
+  "s3": {
+    "bucket": "client-drop",
+    "prefix": "acme",
+    "region": "us-east-1",
+    "endpoint": "https://minio.example.com:9000",
+    "path_style": true,
+    "access_key_id": "…",
+    "secret_access_key": "…"
+  }
+}
+```
+
+The secret is sealed on the delivery row and never returned by a read of the
+schedule; the bucket, prefix, region and endpoint come back, and the key id does
+not.
+
+---
+
+## Share links
+
+A report published to anyone holding a URL:
+
+```
+POST   /api/v1/report-runs/{id}/share     → { "url": "…", "expires_at": null }
+DELETE /api/v1/report-runs/{id}/share     → 204
+```
+
+The URL is **shown once**. The token is stored hashed for the lookup and sealed
+for replay, so no read path can produce it again — a run afterwards reports that a
+link exists, when it was created, when it expires and whether the recipient has
+opened it, and never what it is. If you lose it, revoke and create another; a link
+you cannot produce is a link you have lost control of.
+
+**Anyone with the URL can read the report.** There is no password and no second
+factor: the token is the whole of the authorisation. It is 256 bits from
+`crypto/rand`, looked up against a unique index so a guess costs one probe.
+
+What the public path does:
+
+- Serves the **stored artifact, never a re-render**. The figures a client
+  bookmarked do not change when retention drops a tier — and a public URL that
+  triggered a full report computation would be a denial-of-service primitive
+  pointed at your instance.
+- Answers on a **separate public projection**, not a filtered view of the run.
+  There is no run id, no template id, no schedule, no delivery log and no monitor
+  identifier in the response, and no `target` anywhere in the document — a field
+  cannot leak through a shape that has no place to put it.
+- Carries `X-Robots-Tag: noindex, nofollow` and `Referrer-Policy: no-referrer`, on
+  the refusals as well as the successes.
+- Is rate limited per token.
+
+Three answers, not two. `404` for no such link, **`410` for one that was revoked,
+has expired, or whose files retention reclaimed**, and `429` for too many
+requests. "It is gone" and "it was never here" are different facts, and only one of
+them is true for somebody holding a bookmark.
+
+One live link per run, enforced by the database. Creating a second is a `409`
+rather than a silent replacement — quietly revoking a link a colleague already
+sent to a client is a support call that starts with "the report link you sent me
+stopped working". Revoke first, then create.
+
+Revocation is immediate and **leaves the artifacts untouched**.
+
+---
+
 ## Generating one now
 
 ```
@@ -354,9 +564,10 @@ not whatever "last month" resolves to on the day you press the button.
 
 ## Not in this release
 
-- **Share links.** The public read path is specified and the schema is in place;
-  generating the token is security work and is done by a person, not generated.
-- **The S3 mirror and the S3 drop.** An `s3` delivery target is refused with the
-  reason rather than accepted and dropped.
 - **`logo_url`.** The field is defined and no operation serves the bytes, so it is
   emitted as `null` rather than naming an endpoint that answers `405`.
+- **Automatic mirror reconciliation.** A failed upload stays `failed` on the
+  artifact row until the next report is generated. Nothing sweeps the backlog and
+  retries it, and nothing compares the bucket against the database. That is
+  deliberate for this phase rather than an oversight — see
+  [When the mirror fails](#when-the-mirror-fails).

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/webloomlabs/uptime-cairn/internal/artifact"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
 )
@@ -1303,6 +1304,29 @@ type settingsJSON struct {
 	Monitoring model.MonitoringSettings `json:"monitoring"`
 	Security   model.SecuritySettings   `json:"security"`
 	Telemetry  model.TelemetrySettings  `json:"telemetry"`
+
+	ReportStorage reportStorageJSON `json:"report_storage"`
+}
+
+// reportStorageJSON is the mirror section as it is read.
+//
+// The secret is not in this shape at all, which is the same discipline
+// smtpSettingsJSON follows and for the same reason: a field that does not exist
+// cannot be leaked by a handler that forgets to clear it. What is offered
+// instead is secret_access_key_set — whether one is stored — because an operator
+// looking at this screen needs to know the mirror has a credential without the
+// screen being able to hand it to them.
+type reportStorageJSON struct {
+	MirrorEnabled        bool    `json:"mirror_enabled"`
+	Bucket               *string `json:"bucket"`
+	Prefix               *string `json:"prefix"`
+	Region               *string `json:"region"`
+	Endpoint             *string `json:"endpoint"`
+	PathStyle            bool    `json:"path_style"`
+	AccessKeyID          *string `json:"access_key_id"`
+	SecretAccessKeySet   bool    `json:"secret_access_key_set"`
+	ServerSideEncryption *string `json:"server_side_encryption"`
+	MaxArtifactBytes     int64   `json:"max_artifact_bytes"`
 }
 
 // smtpSettingsJSON is the SMTP section as it is read. password_configured is not
@@ -1327,6 +1351,27 @@ type settingsWrite struct {
 	Monitoring *model.MonitoringSettings `json:"monitoring"`
 	Security   *model.SecuritySettings   `json:"security"`
 	Telemetry  *telemetryWrite           `json:"telemetry"`
+
+	ReportStorage *reportStorageWrite `json:"report_storage"`
+}
+
+// reportStorageWrite is the PATCH body for the mirror.
+//
+// SecretAccessKey is json.RawMessage rather than *string for the reason
+// smtpWrite.Password is: the three cases a client can express — omitted, null,
+// and a value — are three different instructions (leave it alone, clear it, and
+// replace it), and a *string collapses the first two into nil.
+type reportStorageWrite struct {
+	MirrorEnabled        *bool           `json:"mirror_enabled"`
+	Bucket               *string         `json:"bucket"`
+	Prefix               *string         `json:"prefix"`
+	Region               *string         `json:"region"`
+	Endpoint             *string         `json:"endpoint"`
+	PathStyle            *bool           `json:"path_style"`
+	AccessKeyID          *string         `json:"access_key_id"`
+	SecretAccessKey      json.RawMessage `json:"secret_access_key"`
+	ServerSideEncryption *string         `json:"server_side_encryption"`
+	MaxArtifactBytes     *int64          `json:"max_artifact_bytes"`
 }
 
 type smtpWrite struct {
@@ -1365,6 +1410,21 @@ func toSettingsJSON(set model.Settings) settingsJSON {
 	if set.SMTP.Port > 0 {
 		port := set.SMTP.Port
 		out.SMTP.Port = &port
+	}
+	out.ReportStorage = reportStorageJSON{
+		MirrorEnabled:        set.ReportStorage.MirrorEnabled,
+		Bucket:               optional(set.ReportStorage.Bucket),
+		Prefix:               optional(set.ReportStorage.Prefix),
+		Region:               optional(set.ReportStorage.Region),
+		Endpoint:             optional(set.ReportStorage.Endpoint),
+		PathStyle:            set.ReportStorage.PathStyle,
+		AccessKeyID:          optional(set.ReportStorage.AccessKeyID),
+		SecretAccessKeySet:   len(set.ReportStorage.SecretAccessKeySealed) > 0,
+		ServerSideEncryption: optional(set.ReportStorage.ServerSideEncryption),
+		MaxArtifactBytes:     set.ReportStorage.MaxArtifactBytes,
+	}
+	if out.ReportStorage.MaxArtifactBytes == 0 {
+		out.ReportStorage.MaxArtifactBytes = artifact.DefaultMaxBytes
 	}
 	return out
 }
@@ -1527,7 +1587,21 @@ type reportArtifactJSON struct {
 	Error       *string    `json:"error"`
 	DownloadURL *string    `json:"download_url"`
 	ExpiresAt   *time.Time `json:"expires_at"`
-	CreatedAt   time.Time  `json:"created_at"`
+
+	Mirror *reportArtifactMirrorJSON `json:"mirror"`
+
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// reportArtifactMirrorJSON is the offsite copy's state.
+//
+// Null when no mirror was configured, which is deliberately not the same as
+// `pending`: "no offsite copy was ever intended" and "one is intended and has not
+// happened" are different facts, and only the second is a queue.
+type reportArtifactMirrorJSON struct {
+	State      string     `json:"state"`
+	UploadedAt *time.Time `json:"uploaded_at"`
+	Error      *string    `json:"error"`
 }
 
 type reportDeliveryJSON struct {
@@ -1548,11 +1622,18 @@ type reportRunJSON struct {
 	Timezone         string               `json:"timezone"`
 	Artifacts        []reportArtifactJSON `json:"artifacts"`
 	Deliveries       []reportDeliveryJSON `json:"deliveries"`
-	Late             bool                 `json:"late"`
-	Error            *string              `json:"error"`
-	StartedAt        *time.Time           `json:"started_at"`
-	FinishedAt       *time.Time           `json:"finished_at"`
-	CreatedAt        time.Time            `json:"created_at"`
+
+	// Share is the active link, if there is one, and **never contains the
+	// token**. What an operator's screen needs is whether a link exists, when it
+	// expires and whether the client has opened it; the URL itself was shown once
+	// at creation, which is the property that keeps a listing from being a page
+	// full of live credentials.
+	Share      *reportShareJSON `json:"share"`
+	Late       bool             `json:"late"`
+	Error      *string          `json:"error"`
+	StartedAt  *time.Time       `json:"started_at"`
+	FinishedAt *time.Time       `json:"finished_at"`
+	CreatedAt  time.Time        `json:"created_at"`
 }
 
 func toReportTemplateJSON(t model.ReportTemplate) reportTemplateJSON {
@@ -1596,7 +1677,20 @@ func toReportTemplateJSON(t model.ReportTemplate) reportTemplateJSON {
 	return out
 }
 
-func reportRunToJSON(run model.ReportRun, artifacts []model.ReportArtifact, deliveries []model.ReportDelivery) reportRunJSON {
+// reportRunToJSON renders one run.
+//
+// `available` answers whether an artifact's bytes are actually on disk, which the
+// row cannot: a rendered row and a readable file are two stores, and a database
+// restored without its reports directory has the first without the second. A nil
+// `available` treats every rendered artifact as present, which is what a caller
+// with no artifact storage has to assume.
+func reportRunToJSON(
+	run model.ReportRun,
+	artifacts []model.ReportArtifact,
+	deliveries []model.ReportDelivery,
+	share *model.ReportShareLink,
+	available func(model.ReportArtifact) bool,
+) reportRunJSON {
 	out := reportRunJSON{
 		ID:               run.ID.String(),
 		ReportTemplateID: run.ReportTemplateID.String(),
@@ -1616,6 +1710,13 @@ func reportRunToJSON(run model.ReportRun, artifacts []model.ReportArtifact, deli
 		id := run.ReportScheduleID.String()
 		out.ReportScheduleID = &id
 	}
+	if share != nil {
+		out.Share = &reportShareJSON{
+			ExpiresAt:      share.ExpiresAt,
+			CreatedAt:      share.CreatedAt,
+			LastAccessedAt: share.LastAccessedAt,
+		}
+	}
 
 	for _, a := range artifacts {
 		item := reportArtifactJSON{
@@ -1627,17 +1728,37 @@ func reportRunToJSON(run model.ReportRun, artifacts []model.ReportArtifact, deli
 			ExpiresAt: a.ExpiresAt,
 			CreatedAt: a.CreatedAt,
 		}
+		// Null where no mirror was configured when this was written, which is a
+		// different fact from "an upload has not happened yet" — and the reason
+		// the state is beside the artifact's own rather than folded into it: a
+		// bucket that was briefly unreachable must not take a downloadable
+		// report out of the UI (ADR-008 item 9).
+		if a.MirrorState != "" {
+			item.Mirror = &reportArtifactMirrorJSON{
+				State:      a.MirrorState,
+				UploadedAt: a.MirrorUploadedAt,
+				Error:      optional(a.MirrorError),
+			}
+		}
 		if a.SizeBytes > 0 {
 			size := a.SizeBytes
 			item.SizeBytes = &size
 		}
-		// Offered only where there is something to fetch. A download link on an
-		// expired or failed artifact is a link that answers with a problem
-		// document, which is a worse way to learn the file is gone than not
-		// being offered one.
-		if a.State == model.ArtifactRendered {
-			url := "/api/v1/report-runs/" + run.ID.String() + "/artifacts/" + a.ID.String()
-			item.DownloadURL = &url
+		// Offered only where there is something to fetch, and **that now includes
+		// checking the file is there**. A download link on an expired, failed or
+		// missing artifact is a link that answers with a problem document, which
+		// is a worse way to learn a file is gone than not being offered one.
+		//
+		// A rendered artifact with a null download_url is therefore the wire's way
+		// of saying "this was produced and its bytes are not here" — the state a
+		// restore without `<data-dir>/reports/` leaves behind. It is expressed
+		// this way rather than as a fourth `state` because the enum is frozen, and
+		// `download_url` being nullable already means "nothing to fetch".
+		if available == nil || available(a) {
+			if a.State == model.ArtifactRendered {
+				url := "/api/v1/report-runs/" + run.ID.String() + "/artifacts/" + a.ID.String()
+				item.DownloadURL = &url
+			}
 		}
 		out.Artifacts = append(out.Artifacts, item)
 	}
@@ -1742,11 +1863,28 @@ func toBrandProfileJSON(p model.BrandProfile) brandProfileJSON {
 }
 
 type reportScheduleDeliveryJSON struct {
-	Type                  string   `json:"type"`
-	Recipients            []string `json:"recipients,omitempty"`
-	URL                   *string  `json:"url,omitempty"`
-	NotificationChannelID *string  `json:"notification_channel_id"`
-	Formats               []string `json:"formats"`
+	Type                  string        `json:"type"`
+	Recipients            []string      `json:"recipients,omitempty"`
+	URL                   *string       `json:"url,omitempty"`
+	NotificationChannelID *string       `json:"notification_channel_id"`
+	Formats               []string      `json:"formats"`
+	S3                    *s3TargetJSON `json:"s3,omitempty"`
+}
+
+// s3TargetJSON is the drop's non-secret configuration as it is read back.
+//
+// `access_key_id` and `secret_access_key` are writeOnly in the spec and neither
+// appears here: the key id is not a credential on its own, but it names the
+// principal, and a read shape that hands back half a credential pair is a read
+// shape somebody will paste into a support ticket. The secret is not merely
+// omitted — it is not in Config to omit, because it is sealed on a different
+// field entirely.
+type s3TargetJSON struct {
+	Bucket    string  `json:"bucket"`
+	Prefix    *string `json:"prefix"`
+	Region    *string `json:"region"`
+	Endpoint  *string `json:"endpoint"`
+	PathStyle bool    `json:"path_style,omitempty"`
 }
 
 type reportScheduleJSON struct {
@@ -1772,11 +1910,25 @@ type reportScheduleDeliveryWrite struct {
 	NotificationChannelID *string  `json:"notification_channel_id"`
 	Formats               []string `json:"formats"`
 
-	// S3 is accepted by the shape and refused by the handler while the SigV4
-	// client does not exist. Declared rather than omitted so that a request
-	// carrying one gets a validation error naming the reason, instead of a body
-	// silently missing a field it thought it sent.
-	S3 json.RawMessage `json:"s3"`
+	// S3 is the drop: a delivery target for one run's files, and deliberately
+	// not the mirror. They share a client and nothing else — the mirror is a
+	// durability copy of every artifact configured once in settings, and this is
+	// a place one schedule's output is dropped for a recipient. Keeping them
+	// apart by name here is what stops an operator configuring a delivery and
+	// believing they have durability.
+	S3 *s3TargetWrite `json:"s3"`
+}
+
+// s3TargetWrite is the drop's configuration on the way in. The secret is sealed
+// out of this struct and into the row's own envelope before anything is stored.
+type s3TargetWrite struct {
+	Bucket          *string `json:"bucket"`
+	Prefix          *string `json:"prefix"`
+	Region          *string `json:"region"`
+	Endpoint        *string `json:"endpoint"`
+	PathStyle       *bool   `json:"path_style"`
+	AccessKeyID     *string `json:"access_key_id"`
+	SecretAccessKey *string `json:"secret_access_key"`
 }
 
 type reportScheduleWrite struct {
@@ -1821,6 +1973,11 @@ func toReportScheduleJSON(s model.ReportSchedule, targets []model.ReportSchedule
 		var config struct {
 			Recipients []string `json:"recipients"`
 			URL        string   `json:"url"`
+			Bucket     string   `json:"bucket"`
+			Prefix     string   `json:"prefix"`
+			Region     string   `json:"region"`
+			Endpoint   string   `json:"endpoint"`
+			PathStyle  bool     `json:"path_style"`
 		}
 		if len(target.Config) > 0 {
 			_ = json.Unmarshal(target.Config, &config)
@@ -1829,9 +1986,90 @@ func toReportScheduleJSON(s model.ReportSchedule, targets []model.ReportSchedule
 		if config.URL != "" {
 			item.URL = &config.URL
 		}
+		if target.Type == model.ReportDeliveryS3 {
+			item.S3 = &s3TargetJSON{
+				Bucket:    config.Bucket,
+				Prefix:    optional(config.Prefix),
+				Region:    optional(config.Region),
+				Endpoint:  optional(config.Endpoint),
+				PathStyle: config.PathStyle,
+			}
+		}
 		out.Deliveries = append(out.Deliveries, item)
 	}
 	return out
+}
+
+// --- share links ------------------------------------------------------------
+
+// reportShareLinkWrite is the create body. One optional field: null never
+// expires, and revocation is available regardless.
+type reportShareLinkWrite struct {
+	ExpiresAt *time.Time `json:"expires_at"`
+}
+
+// reportShareLinkCreatedJSON is the create response, and **the only place the
+// plaintext token appears outside the sealed envelope**. Shown once.
+type reportShareLinkCreatedJSON struct {
+	URL       string     `json:"url"`
+	ExpiresAt *time.Time `json:"expires_at"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// reportShareJSON is the share summary on a run, for the operator's screen.
+//
+// **Never contains the token**, which is what makes it safe on a listing: the URL
+// is shown once at creation and is thereafter recoverable only by opening the
+// envelope deliberately. What this carries is the existence, the expiry and
+// whether anybody has opened it — which is what the screen actually asks.
+type reportShareJSON struct {
+	ExpiresAt      *time.Time `json:"expires_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	LastAccessedAt *time.Time `json:"last_accessed_at,omitempty"`
+}
+
+// publicReportJSON is the public projection of a shared report.
+//
+// **A separate shape rather than a filter over reportRunJSON**, following the
+// status-page discipline: a field cannot leak through a projection that has no
+// place to put it. There is deliberately no run id, no template id, no schedule,
+// no delivery log and no monitor identifier here — and adding one would mean
+// adding a field to this struct, which is a decision somebody makes rather than
+// an omission somebody forgets.
+type publicReportJSON struct {
+	Title       string                 `json:"title"`
+	PeriodStart time.Time              `json:"period_start"`
+	PeriodEnd   time.Time              `json:"period_end"`
+	Timezone    string                 `json:"timezone"`
+	GeneratedAt time.Time              `json:"generated_at"`
+	Brand       *publicReportBrandJSON `json:"brand"`
+	Formats     []string               `json:"formats"`
+
+	// Document is the rendered document, when the run produced a JSON artifact,
+	// and null otherwise. **Read from the stored artifact, never re-computed** —
+	// ADR-008 item 15, so the figures a client bookmarked do not change when
+	// retention drops a tier, and so a public URL is not a full report
+	// computation somebody can point at the instance.
+	Document json.RawMessage `json:"document"`
+}
+
+// publicReportBrandJSON is the client-facing chrome.
+//
+// The profile's own name — an internal label like "Acme, retainer clients" — is
+// not in this shape at all, which is the projection doing its job: it is a field
+// an operator names for themselves and a stranger has no business reading.
+type publicReportBrandJSON struct {
+	CompanyName  *string `json:"company_name"`
+	PrimaryColor *string `json:"primary_color"`
+	FooterText   *string `json:"footer_text"`
+
+	// LogoURL is null for the reason brandProfileJSON.LogoURL is: PUT .../logo
+	// exists and there is no GET beside it, so a URL here would name an endpoint
+	// that answers 405. An honest null beats an invented path, and inventing one
+	// is not a handler's to invent (AGENTS.md rule 4).
+	LogoURL *string `json:"logo_url"`
+
+	HidePoweredBy bool `json:"hide_powered_by"`
 }
 
 // upcomingExpiryJSON is one row of the expiry calendar.

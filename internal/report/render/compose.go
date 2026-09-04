@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/report"
 )
 
@@ -73,7 +74,37 @@ func (b Brand) Denormalised() *report.Brand {
 //     different lawful percentages, and a figure without its policy cannot be
 //     checked by the person it is handed to.
 func Compose(doc report.Document, brand Brand) []Element {
+	return ComposeSections(doc, brand, nil)
+}
+
+// ComposeSections is Compose with a template's chosen content blocks.
+//
+// A nil or empty selection composes the defaults for the document, which is what
+// Compose passes and what every template that has never named a section gets. See
+// sections.go for what selection and ordering mean, and for the one structural
+// rule: the per-monitor group is emitted once, where its first member was named.
+//
+// **The cover, the methodology note and the footer are not sections and cannot be
+// deselected.** That is deliberate rather than an omission. The methodology note
+// carries the denominator and the maintenance policy, and §4.3 makes both an
+// obligation of the report face — a figure whose policy can be switched off is a
+// figure that cannot be checked by the person it is handed to, which is the exact
+// failure a report exists to prevent. The frozen enum has no name for any of the
+// three, so nothing is being refused that the API offers.
+func ComposeSections(doc report.Document, brand Brand, sections []string) []Element {
 	var out []Element
+
+	layout := resolveLayout(sections, reportShape{
+		hasSummary:    doc.Summary != nil,
+		hasComparison: doc.Comparison != nil && len(doc.Comparison.Series) > 0,
+		hasIncidents:  len(doc.Incidents) > 0,
+	})
+
+	// The zone the window was cut in, resolved once. It is what the hourly
+	// charts are labelled in: an hour axis reading 00:00–23:00 in UTC on a report
+	// an Australian client was sent describes a day that is not the day on the
+	// cover, and the label is the only place a reader could notice.
+	loc := locationOf(doc.Meta.Timezone)
 
 	period := formatPeriod(doc.Meta.PeriodStart, doc.Meta.PeriodEnd)
 	out = append(out, Cover{
@@ -94,54 +125,211 @@ func Compose(doc report.Document, brand Brand) []Element {
 	// number has already been misread.
 	out = append(out, Paragraph{Muted: true, Text: methodology(doc)})
 
-	if doc.Summary != nil {
-		out = append(out, Heading{Text: "Summary", Level: 1})
-		out = append(out, KeyValues{Items: uptimeFigures(doc.Summary.Uptime)})
-		out = append(out, KeyValues{Items: latencyFigures(doc.Summary.ResponseTime)})
-	}
-
-	for _, s := range doc.Monitors {
-		out = append(out, Heading{Text: s.Name, Level: 1})
-
-		if len(s.DailyUptime) > 0 {
-			out = append(out, Chart{
-				Kind:    ChartUptimeStrip,
-				Title:   "Daily availability",
-				Caption: "Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage.",
-				Days:    s.DailyUptime,
-			})
-		}
-		out = append(out, KeyValues{Items: uptimeFigures(s.Uptime)})
-
-		if s.SLA != nil {
-			out = append(out, Heading{Text: "Service level", Level: 2})
-			out = append(out, KeyValues{Items: slaFigures(*s.SLA)})
-			if len(s.Breaches) > 0 {
-				out = append(out, breachTable(s.Breaches))
+	for _, block := range layout.order {
+		switch block {
+		case model.SectionSummary:
+			if doc.Summary != nil {
+				out = append(out, Heading{Text: "Summary", Level: 1})
+				out = append(out, KeyValues{Items: uptimeFigures(doc.Summary.Uptime)})
+				out = append(out, KeyValues{Items: latencyFigures(doc.Summary.ResponseTime)})
 			}
+		case monitorBlock:
+			for _, s := range doc.Monitors {
+				out = append(out, monitorSection(s, layout, loc)...)
+			}
+		case model.SectionComparison:
+			if doc.Comparison != nil && len(doc.Comparison.Series) > 0 {
+				out = append(out, comparisonSection(*doc.Comparison)...)
+			}
+		case model.SectionIncidentLog:
+			if len(doc.Incidents) > 0 {
+				out = append(out, incidentSection(doc)...)
+			}
+		case model.SectionMaintenanceLog, model.SectionCertificateExpiry:
+			// **Named by the frozen enum and not composed by anything.**
+			//
+			// Selecting one is accepted at the API — it is a valid section — and
+			// contributes no block, which is the honest behaviour while the
+			// document model has no element for either. A maintenance log needs a
+			// windows query the report store does not have; a certificate expiry
+			// table is the expiry-calendar report type, which is its own piece of
+			// work with its own entry on the Phase 2 checklist.
+			//
+			// Silently absent rather than refused, because refusing at render
+			// time would fail a queued run over a choice the API accepted, and
+			// refusing at the API would narrow a frozen enum.
 		}
-
-		out = append(out, Heading{Text: "Response time", Level: 2})
-		if len(s.ResponseTime.Daily) > 0 {
-			out = append(out, Chart{
-				Kind:    ChartLatencyLine,
-				Title:   "Daily average",
-				Caption: "The line breaks where nothing was measured rather than joining across it.",
-				Latency: s.ResponseTime.Daily,
-			})
-		}
-		out = append(out, KeyValues{Items: latencyFigures(s.ResponseTime)})
-	}
-
-	if doc.Comparison != nil && len(doc.Comparison.Series) > 0 {
-		out = append(out, comparisonSection(*doc.Comparison)...)
-	}
-	if len(doc.Incidents) > 0 {
-		out = append(out, incidentSection(doc)...)
 	}
 
 	out = append(out, Footer{Text: brand.FooterText, HidePoweredBy: brand.HidePoweredBy})
 	return out
+}
+
+// monitorSection draws one monitor's blocks, in the order the template named
+// them.
+//
+// The heading is emitted only when there is something under it. A selection of
+// document-level sections alone should not produce a page of monitor names with
+// nothing beneath each — which is what an unconditional heading would give, and
+// which reads as a rendering fault rather than as a choice somebody made.
+func monitorSection(s report.MonitorSection, layout layout, loc *time.Location) []Element {
+	var body []Element
+
+	for _, block := range layout.within {
+		switch block {
+		case model.SectionUptimeChart:
+			if chart, ok := uptimeChart(s, loc); ok {
+				body = append(body, chart)
+			}
+		case model.SectionUptimeTable:
+			body = append(body, KeyValues{Items: uptimeFigures(s.Uptime)})
+		case model.SectionSLABreakdown, model.SectionErrorBudget:
+			// One block for two names. The spec separates them and ADR-006 does
+			// not: the error budget is computed from the same up and down counts
+			// as the target-versus-actual line and is rendered beside it, so
+			// splitting the block would put a budget on one page and the target
+			// it is a budget against on another. Selecting either gives the
+			// whole service-level block; selecting both gives it once, which the
+			// guard below is for.
+			if s.SLA != nil && !slaAlreadyDrawn(body) {
+				body = append(body, Heading{Text: "Service level", Level: 2})
+				body = append(body, KeyValues{Items: slaFigures(*s.SLA)})
+				if len(s.Breaches) > 0 {
+					body = append(body, breachTable(s.Breaches))
+				}
+			}
+		case model.SectionResponseTime:
+			body = append(body, Heading{Text: "Response time", Level: 2})
+			if chart, ok := latencyChart(s, loc); ok {
+				body = append(body, chart)
+			}
+			body = append(body, KeyValues{Items: latencyFigures(s.ResponseTime)})
+		}
+	}
+
+	if len(body) == 0 {
+		return nil
+	}
+	return append([]Element{Heading{Text: s.Name, Level: 1}}, body...)
+}
+
+// hourAxisFormat labels an hourly axis. Hours and minutes without a date,
+// because every bucket on the chart falls on the day already named on the cover
+// and repeating it twice under a 24-cell strip is noise.
+const hourAxisFormat = "15:04"
+
+// uptimeChart draws availability at the finest grain the document carries.
+//
+// **A report covering one day gets one daily cell**, which is a picture of the
+// uptime percentage printed directly beneath it and tells a reader nothing they
+// did not already have. Where the document carries an hourly series — which is
+// exactly where the window was too short for the daily one to be a chart — that
+// is what gets drawn, and the caption says which grain it is looking at rather
+// than leaving the reader to count cells.
+func uptimeChart(s report.MonitorSection, loc *time.Location) (Chart, bool) {
+	const legend = "Green: no downtime observed. Red: downtime observed. Grey: nothing observed — a gap, not an outage."
+
+	if len(s.Hourly) > 0 {
+		points := make([]ChartPoint, 0, len(s.Hourly))
+		for _, h := range s.Hourly {
+			points = append(points, ChartPoint{At: h.Start.In(loc), Value: h.Uptime.Ratio})
+		}
+		return Chart{
+			Kind:       ChartUptimeStrip,
+			Title:      "Hourly availability",
+			Caption:    "One cell per hour, " + zoneWords(loc) + ". " + legend,
+			Points:     points,
+			AxisFormat: hourAxisFormat,
+		}, true
+	}
+
+	if len(s.DailyUptime) == 0 {
+		return Chart{}, false
+	}
+	points := make([]ChartPoint, 0, len(s.DailyUptime))
+	for _, d := range s.DailyUptime {
+		points = append(points, ChartPoint{At: d.Date, Value: d.Uptime.Ratio})
+	}
+	return Chart{
+		Kind:    ChartUptimeStrip,
+		Title:   "Daily availability",
+		Caption: legend,
+		Points:  points,
+	}, true
+}
+
+// latencyChart is the same choice for the response-time series, and it is made
+// the same way for the same reason: a line of one point is a dot.
+func latencyChart(s report.MonitorSection, loc *time.Location) (Chart, bool) {
+	const gapNote = "The line breaks where nothing was measured rather than joining across it."
+
+	if len(s.Hourly) > 0 {
+		points := make([]ChartPoint, 0, len(s.Hourly))
+		for _, h := range s.Hourly {
+			points = append(points, ChartPoint{At: h.Start.In(loc), Value: h.AverageMs})
+		}
+		return Chart{
+			Kind:       ChartLatencyLine,
+			Title:      "Hourly average",
+			Caption:    "One point per hour, " + zoneWords(loc) + ". " + gapNote,
+			Points:     points,
+			AxisFormat: hourAxisFormat,
+		}, true
+	}
+
+	if len(s.ResponseTime.Daily) == 0 {
+		return Chart{}, false
+	}
+	points := make([]ChartPoint, 0, len(s.ResponseTime.Daily))
+	for _, d := range s.ResponseTime.Daily {
+		points = append(points, ChartPoint{At: d.Date, Value: d.AverageMs})
+	}
+	return Chart{
+		Kind:    ChartLatencyLine,
+		Title:   "Daily average",
+		Caption: gapNote,
+		Points:  points,
+	}, true
+}
+
+// locationOf resolves the zone the window was cut in, falling back to UTC.
+//
+// A zone name the runtime cannot load is not worth failing a report over — the
+// figures are unaffected and only two axis labels move — but it is worth
+// resolving here rather than in each caller, so that the two charts of one
+// monitor cannot end up labelled in different zones.
+func locationOf(name string) *time.Location {
+	if name == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// zoneWords names the zone an hour axis is read in.
+//
+// The IANA name rather than an abbreviation: "AEST" is ambiguous across
+// hemispheres and silently wrong for half the year, and a client checking a
+// report against their own logs needs the zone the boundaries were cut in.
+func zoneWords(loc *time.Location) string {
+	if loc == nil || loc == time.UTC {
+		return "in UTC"
+	}
+	return "in " + loc.String()
+}
+
+// slaAlreadyDrawn stops sla_breakdown and error_budget drawing the block twice
+// when a template names both.
+func slaAlreadyDrawn(body []Element) bool {
+	for _, e := range body {
+		if h, ok := e.(Heading); ok && h.Text == "Service level" {
+			return true
+		}
+	}
+	return false
 }
 
 // comparisonSection draws the comparative block as one table.
@@ -487,19 +675,23 @@ func latencyFigures(l report.Latency) []KeyValue {
 		Note:  fmt.Sprintf("over %s successful checks", thousands(l.SampleCount)),
 	}}
 
-	if l.BestDay != nil {
-		items = append(items, KeyValue{
-			Key:   "Best day",
-			Value: millis(l.BestDay.AverageMs),
-			Note:  l.BestDay.Date.Format("2 January"),
-		})
-	}
-	if l.WorstDay != nil {
-		items = append(items, KeyValue{
-			Key:   "Worst day",
-			Value: millis(l.WorstDay.AverageMs),
-			Note:  l.WorstDay.Date.Format("2 January"),
-		})
+	// Best and worst, and only where they are two different days. A window with
+	// one observed day in it — every daily report — has a best day, a worst day
+	// and a window average that are the same number printed three times under
+	// three headings, which invites a reader to look for a difference that
+	// cannot be there.
+	if l.BestDay != nil && l.WorstDay != nil && !l.BestDay.Date.Equal(l.WorstDay.Date) {
+		items = append(items,
+			KeyValue{
+				Key:   "Best day",
+				Value: millis(l.BestDay.AverageMs),
+				Note:  l.BestDay.Date.Format("2 January"),
+			},
+			KeyValue{
+				Key:   "Worst day",
+				Value: millis(l.WorstDay.AverageMs),
+				Note:  l.WorstDay.Date.Format("2 January"),
+			})
 	}
 	if l.DaysOverTarget != nil && l.TargetMs != nil {
 		items = append(items, KeyValue{
@@ -509,34 +701,28 @@ func latencyFigures(l report.Latency) []KeyValue {
 		})
 	}
 
-	// The percentile, and its window, and why it is missing when it is. Never a
-	// bare blank: an absent figure with no reason reads as a defect.
-	if l.P95 != nil {
+	// The percentile and its window, and only when there is one. An unavailable
+	// figure is left out of the rendered document altogether rather than printed
+	// as a dash with an explanation of itself: a client reading a PDF has no use
+	// for the retention setting behind a figure they were never shown. The reason
+	// survives where a consumer can act on it — `unavailable_reason` in the JSON
+	// export (json.go) — so nothing is lost, it is only not narrated on the page.
+	if l.P95 != nil && l.P95.Available {
 		items = append(items, p95Figure(*l.P95))
 	}
 	return items
 }
 
+// p95Figure renders an available percentile. Callers check Available first: an
+// unavailable one has no tile at all, so there is no unavailable branch here to
+// keep in step with the reasons in report/latency.go.
 func p95Figure(p report.P95) KeyValue {
-	if p.Available {
-		note := "nearest rank"
-		if p.WindowStart != nil && p.WindowEnd != nil {
-			note = fmt.Sprintf("nearest rank, %s — the last seven days of the period, not the whole of it",
-				formatPeriod(*p.WindowStart, *p.WindowEnd))
-		}
-		return KeyValue{Key: "95th percentile", Value: millis(p.ValueMs), Note: note}
+	note := "nearest rank"
+	if p.WindowStart != nil && p.WindowEnd != nil {
+		note = fmt.Sprintf("nearest rank, %s — the last seven days of the period, not the whole of it",
+			formatPeriod(*p.WindowStart, *p.WindowEnd))
 	}
-
-	reason := "not available"
-	switch p.Reason {
-	case report.ReasonInsufficientRaw:
-		reason = "raw history is kept for less than seven days, so a shorter figure would be reported under a seven-day heading"
-	case report.ReasonNoSuccessfulChecks:
-		reason = "no successful checks in the last seven days"
-	case report.ReasonScopeTooLarge:
-		reason = "not computed for a report of this size"
-	}
-	return KeyValue{Key: "95th percentile", Value: "—", Note: reason}
+	return KeyValue{Key: "95th percentile", Value: millis(p.ValueMs), Note: note}
 }
 
 func breachTable(breaches []report.Breach) Table {

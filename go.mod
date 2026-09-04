@@ -5,7 +5,7 @@ go 1.25.14
 require (
 	golang.org/x/crypto v0.55.0
 	golang.org/x/net v0.57.0
-	google.golang.org/grpc v1.83.0
+	google.golang.org/grpc v1.83.1
 	google.golang.org/protobuf v1.36.12
 	modernc.org/sqlite v1.56.0
 )

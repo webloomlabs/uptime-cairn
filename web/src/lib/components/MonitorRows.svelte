@@ -69,14 +69,22 @@
 
 				<span class="min-w-0 flex-1">
 					<span class="block truncate font-medium">{monitor.name}</span>
-					<span class="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+					<!--
+						Deliberately not `flex-wrap`. The text below carries a live duration
+						("Up 52s" becoming "Up 1m"), so a wrapping line changes the row's
+						height on a timer: every row in the list shifts under the pointer
+						whenever one monitor's duration grows a character. One line that
+						truncates keeps the row a fixed height no matter what the clock
+						does — which is why the badge cannot shrink and the text can.
+					-->
+					<span class="mt-0.5 flex items-center gap-x-2">
 						<span
-							class="rounded px-1.5 py-0.5 text-[11px] font-medium tracking-wide uppercase"
+							class="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium tracking-wide uppercase"
 							style="background-color: var(--surface-sunken); color: var(--text-muted)"
 						>
 							{typeChip(monitor.type)}
 						</span>
-						<span class="muted truncate text-xs">
+						<span class="muted min-w-0 truncate text-xs">
 							{since(monitor)}{target ? ` · ${target}` : ''}
 						</span>
 					</span>

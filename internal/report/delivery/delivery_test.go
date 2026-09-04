@@ -386,12 +386,14 @@ func TestAPermanentFailureIsNotRetried(t *testing.T) {
 	}
 }
 
-// An s3 target is refused with the reason rather than recorded as sent.
+// An s3 target with no way to open its credential is refused with the reason
+// rather than recorded as sent.
 //
-// The failure a mirror is bought to prevent is believing you have a durability
-// copy that does not exist. Recording a success here would produce exactly that
-// belief, and it would be discovered on the day the local copy was needed.
-func TestAnS3TargetIsRefusedWithTheReason(t *testing.T) {
+// The failure a durability copy is bought to prevent is believing you have one
+// that does not exist. Recording a success — or a skip, which reads as "there was
+// nothing to do" — would produce exactly that belief, and it would be discovered
+// on the day the copy was needed.
+func TestAnS3TargetWithNoOpenerIsRefusedWithTheReason(t *testing.T) {
 	t.Parallel()
 
 	s, f := fixture(target(model.ReportDeliveryS3, map[string]any{"bucket": "reports"}))
@@ -405,7 +407,7 @@ func TestAnS3TargetIsRefusedWithTheReason(t *testing.T) {
 		t.Errorf("outcome = %q, want failed — a copy that does not exist must not "+
 			"be recorded as one that does", logged[0].Outcome)
 	}
-	if !strings.Contains(logged[0].Error, "S3 client is not built") {
+	if !strings.Contains(logged[0].Error, "cannot open the delivery credential") {
 		t.Errorf("reason = %q, want it to name what is missing", logged[0].Error)
 	}
 }

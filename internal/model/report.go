@@ -50,6 +50,55 @@ const (
 	FormatJSON = "json"
 )
 
+// Report sections: the content blocks a template may select, and the order it
+// selects them in.
+//
+// The set is closed by the frozen spec and this list is that enum, not a superset
+// of it. Empty selects the defaults for the report type, which is what every
+// template that has never touched this does — a custom report is the only one
+// most people will ever narrow.
+const (
+	SectionSummary           = "summary"
+	SectionUptimeTable       = "uptime_table"
+	SectionUptimeChart       = "uptime_chart"
+	SectionResponseTime      = "response_time"
+	SectionIncidentLog       = "incident_log"
+	SectionSLABreakdown      = "sla_breakdown"
+	SectionErrorBudget       = "error_budget"
+	SectionMaintenanceLog    = "maintenance_log"
+	SectionCertificateExpiry = "certificate_expiry"
+	SectionComparison        = "comparison"
+)
+
+// ReportSections is the vocabulary in the spec's order, for validation and for
+// the section picker in the template editor.
+//
+// A slice rather than a map because both callers want it ordered: a validation
+// message that lists the alternatives should list them the way the documentation
+// does, and a picker that reordered them on every render would be unusable.
+var ReportSections = []string{
+	SectionSummary,
+	SectionUptimeTable,
+	SectionUptimeChart,
+	SectionResponseTime,
+	SectionIncidentLog,
+	SectionSLABreakdown,
+	SectionErrorBudget,
+	SectionMaintenanceLog,
+	SectionCertificateExpiry,
+	SectionComparison,
+}
+
+// ValidSection reports whether s names a content block.
+func ValidSection(s string) bool {
+	for _, known := range ReportSections {
+		if s == known {
+			return true
+		}
+	}
+	return false
+}
+
 // Schedule frequencies. cron is the escape hatch, the same one maintenance
 // windows carry and for the same reason: no enumeration covers "the first
 // Monday of the quarter".
@@ -384,8 +433,29 @@ type ReportArtifact struct {
 	// of 0 selects. Otherwise the instant the sweeper may reclaim the bytes.
 	ExpiresAt *time.Time
 
+	// Mirror is the offsite copy's state, and it is deliberately beside State
+	// rather than inside it. ADR-008 item 9: the mirror is a durability copy and
+	// never a read path, so a failed upload leaves the artifact perfectly
+	// readable — folding the two together would take a downloadable report out
+	// of the UI over a bucket that was briefly unreachable.
+	//
+	// Empty MirrorState means no mirror was configured when this was written,
+	// which is a different fact from "an upload has not happened yet" and is
+	// what the API renders as null.
+	MirrorState      string
+	MirrorUploadedAt *time.Time
+	MirrorError      string
+
 	CreatedAt time.Time
 }
+
+// Mirror states. Pending is set when the artifact is written on an install with
+// a mirror configured; the upload moves it on.
+const (
+	MirrorPending  = "pending"
+	MirrorUploaded = "uploaded"
+	MirrorFailed   = "failed"
+)
 
 // ReportShareLink is an unauthenticated URL onto one run.
 type ReportShareLink struct {
