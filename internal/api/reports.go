@@ -65,6 +65,35 @@ type Reporter interface {
 // because one read path is the property being protected.
 type ArtifactFiles interface {
 	Open(path string) (io.ReadCloser, error)
+
+	// Exists answers whether the bytes are actually on disk, which the database
+	// cannot: a row and its file are two stores. ADR-008's Consequences require
+	// the artifact list to render a missing file **as a missing file** rather
+	// than offering a download that fails, and this is what lets it.
+	Exists(path string) bool
+}
+
+// artifactAvailable reports whether an artifact can actually be downloaded.
+//
+// A rendered row is not the same claim as a readable file. The state that pulls
+// them apart is a `cairn.db` restored without `<data-dir>/reports/` — the silent
+// half of the backup procedure — and until this existed, the UI offered a
+// download link per row and the server answered each one with a problem
+// document. Offering a link that cannot work is a worse way to learn a file is
+// gone than not being offered one, which is the rule the expired and failed
+// states already follow.
+//
+// A build with no artifact storage answers true rather than false: it has no
+// basis for the negative, and reporting every artifact as missing would be worse
+// than reporting them optimistically.
+func (s *Server) artifactAvailable(a model.ReportArtifact) bool {
+	if a.State != model.ArtifactRendered || a.Path == "" {
+		return false
+	}
+	if s.artifacts == nil {
+		return true
+	}
+	return s.artifacts.Exists(a.Path)
 }
 
 // --- templates --------------------------------------------------------------
@@ -359,7 +388,8 @@ func (s *Server) listReportRuns(w http.ResponseWriter, r *http.Request) {
 
 	body := page[reportRunJSON]{Data: []reportRunJSON{}, Pagination: pagination{HasMore: hasMore}}
 	for _, run := range runs {
-		body.Data = append(body.Data, reportRunToJSON(run, artifacts[run.ID], nil, shareFor(shares, run.ID)))
+		body.Data = append(body.Data, reportRunToJSON(run, artifacts[run.ID], nil,
+			shareFor(shares, run.ID), s.artifactAvailable))
 	}
 	if hasMore && len(runs) > 0 {
 		last := runs[len(runs)-1]
@@ -405,7 +435,7 @@ func (s *Server) toReportRunJSON(ctx context.Context, run model.ReportRun) repor
 		// than a fault worth logging.
 		s.log.Error("load report share link", "error", err, "run_id", run.ID.String())
 	}
-	return reportRunToJSON(run, byRun[run.ID], deliveries, share)
+	return reportRunToJSON(run, byRun[run.ID], deliveries, share, s.artifactAvailable)
 }
 
 // shareFor picks one run's link out of the batch read. A helper rather than an

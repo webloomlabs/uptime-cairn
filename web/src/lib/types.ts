@@ -554,6 +554,14 @@ export type ReportArtifact = {
 	size_bytes: number | null;
 	sha256: string | null;
 	error: string | null;
+	/**
+	 * Null when there is nothing to fetch — and that covers three different
+	 * facts, so read it with `state`. `expired` is retention doing its job;
+	 * `failed` never produced a file; and **`rendered` with a null URL means the
+	 * bytes are not on disk**, which is what a database restored without
+	 * `<data-dir>/reports/` leaves behind. The server does the disk check, because
+	 * a row saying `rendered` is not the same claim as a readable file.
+	 */
 	download_url: string | null;
 	expires_at: string | null;
 	/**

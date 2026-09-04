@@ -562,3 +562,88 @@ func TestAnArtifactWhoseFileIsGoneAnswersGoneNotInternalError(t *testing.T) {
 		t.Errorf("the run listing = %d with files missing (%v)", resp.StatusCode, body)
 	}
 }
+
+// **A rendered artifact whose file is gone is not offered for download.**
+//
+// The row still says `rendered` — the state enum is frozen and there is no fourth
+// value for "the bytes are not here" — so the wire says it by withholding
+// `download_url`. ADR-008's Consequences require the artifact list to render this
+// as a missing file rather than as something to click, and a state-based check
+// gets it exactly wrong: the row says rendered, so it would offer a link that
+// answers 410.
+func TestAMissingFileIsNotOfferedForDownload(t *testing.T) {
+	t.Parallel()
+
+	c, files := reportingClientWithFiles(t)
+	runID := sharedRun(t, c, "json", "csv")
+
+	// Offered while the files are there, so the test cannot pass by never having
+	// offered anything.
+	_, before := c.do(http.MethodGet, "/api/v1/report-runs/"+runID, nil)
+	for _, raw := range before["artifacts"].([]any) {
+		if a := raw.(map[string]any); a["download_url"] == nil {
+			t.Fatalf("%v artifact was not offered before its file was removed", a["format"])
+		}
+	}
+
+	if err := os.RemoveAll(files.Root()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The detail read, which is what the expanded row in the UI shows.
+	_, after := c.do(http.MethodGet, "/api/v1/report-runs/"+runID, nil)
+	for _, raw := range after["artifacts"].([]any) {
+		a := raw.(map[string]any)
+		if a["download_url"] != nil {
+			t.Errorf("%v artifact is still offered for download with no file behind it", a["format"])
+		}
+		// The row keeps saying what it was. The digest and size survive the file,
+		// which is what lets somebody find it in a backup.
+		if a["state"] != "rendered" {
+			t.Errorf("state = %v, want rendered — the row is a record and did not change", a["state"])
+		}
+		if a["sha256"] == nil || a["size_bytes"] == nil {
+			t.Errorf("the digest or size was dropped along with the file: %v", a)
+		}
+	}
+
+	// The listing has to agree with the detail. Two screens disagreeing about
+	// whether a file exists is worse than either answer on its own.
+	_, list := c.do(http.MethodGet, "/api/v1/report-runs?limit=50", nil)
+	for _, rawRun := range list["data"].([]any) {
+		for _, raw := range rawRun.(map[string]any)["artifacts"].([]any) {
+			if a := raw.(map[string]any); a["download_url"] != nil {
+				t.Errorf("the listing still offers %v with no file behind it", a["format"])
+			}
+		}
+	}
+}
+
+// A shared report offers only the formats a client can actually fetch, and says
+// so honestly when none of them can be.
+func TestASharedReportDoesNotOfferMissingFormats(t *testing.T) {
+	t.Parallel()
+
+	c, files := reportingClientWithFiles(t)
+	runID := sharedRun(t, c, "json")
+	token, _ := share(t, c, runID, nil)
+
+	if resp, _ := anonymous(t, c, "/api/v1/public/reports/"+token); resp.StatusCode != http.StatusOK {
+		t.Fatal("the link did not resolve before the files were removed")
+	}
+
+	if err := os.RemoveAll(files.Root()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := anonymous(t, c, "/api/v1/public/reports/"+token)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d, want 410 (%s)", resp.StatusCode, body)
+	}
+	// **It must not blame retention.** An earlier version asserted the retention
+	// policy here, which would be a confident lie to a client whose report is
+	// missing because somebody restored a backup without the reports directory.
+	if strings.Contains(string(body), "retention") {
+		t.Errorf("the 410 blames retention for a missing file: %s", body)
+	}
+}

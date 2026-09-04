@@ -218,6 +218,30 @@ func (s *Store) Open(rel string) (io.ReadCloser, error) {
 	return f, nil
 }
 
+// Exists reports whether an artifact's bytes are actually on disk.
+//
+// The question is not rhetorical and it is not answerable from the database. A
+// row and its file are two stores, and ADR-008's own Consequences name the way
+// they come apart: "a restore of the database against a stale reports directory
+// yields rows whose files are missing; the artifact list must render that as a
+// missing file rather than an error page." This is what lets it.
+//
+// A stat rather than an open, because the caller wants an answer and not a
+// handle — and any error at all counts as absent. A file this process cannot
+// stat is one it cannot serve either, so reporting it as available would offer a
+// download that fails.
+func (s *Store) Exists(rel string) bool {
+	if rel == "" {
+		return false
+	}
+	full, err := s.resolve(rel)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(full)
+	return err == nil && !info.IsDir()
+}
+
 // Remove reclaims the bytes. The row stays: the caller turns it into a tombstone
 // so that a bookmarked link answers "this existed and is gone" rather than "no
 // such thing".

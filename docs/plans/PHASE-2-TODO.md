@@ -64,6 +64,21 @@ the one thing an operator in that position can act on, and
 the argument for drilling rather than reading**: the behaviour had a written
 justification in a code comment, and the justification was wrong.
 
+**The other half of ADR-008's requirement is now built too** (maintainer's
+ruling, 2026-09-04): a missing file is rendered *as* a missing file rather than
+offered and refused. A rendered artifact whose bytes are not on disk comes back
+with a null `download_url` and the dashboard shows **File unavailable** beside
+its digest and size — expressed that way rather than as a fourth `state` because
+the enum is frozen, and `download_url` being nullable already means "nothing to
+fetch". A shared link no longer offers a format it cannot serve, and the `410`
+behind one no longer blames retention for what is usually an incomplete restore.
+The concern that held this back was that a `stat` per artifact would be I/O on a
+hot path at 5,000 monitors; **that was the wrong axis and a benchmark says so** —
+the cost is bounded by page size, not estate size, and a worst-case full page of
+400 artifacts measures about 1.3ms against a request that already makes two
+database round trips. [`presence_test.go`](../../internal/artifact/presence_test.go)
+keeps the measurement rather than the assumption.
+
 **What is left is smaller and none of it is security work.** The extended load
 gate is **CI configuration under rule 7**. The remainder is `sections` selecting
 blocks in `Compose` (which is the custom builder), the expiry calendar as a

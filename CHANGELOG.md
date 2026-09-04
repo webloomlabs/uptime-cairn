@@ -61,6 +61,13 @@ them, not which files moved.
 
 ### Fixed
 
+- **A report whose file is missing from disk was offered for download anyway.**
+  The dashboard showed a download link, and clicking it failed. Such an artifact
+  is now shown as **File unavailable**, with its digest and size still listed so
+  the file can be identified in a backup, and a shared link no longer offers a
+  format it cannot serve. The row still reads `rendered`, because it is a record
+  of what was produced; what changed is that the server checks the file is there
+  before offering it.
 - **A report whose file is missing from disk returned `500 Internal error`.** It
   now returns `410 Gone` with a message naming the reports directory. The state
   this covers is a database restored without `<data-dir>/reports/` — the silent

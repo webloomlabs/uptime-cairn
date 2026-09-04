@@ -420,6 +420,8 @@
 	"runs.state.running": "Running",
 	"runs.state.succeeded": "Succeeded",
 	"runs.template": "Template",
+	"runs.unavailable": "File unavailable",
+	"runs.unavailableHint": "This report was produced but its file is not in the reports directory. The usual cause is a database restored without the reports directory; its digest and size are still recorded, so the file can be identified in a backup.",
 	"settings.apiRateLimit": "API requests per minute",
 	"settings.baseUrl": "Base URL",
 	"settings.baseUrlHint": "The public URL of this install. Every alert link, push URL, and subscriber link is built from it — leave it empty and alerts arrive without one.",

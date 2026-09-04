@@ -275,10 +275,16 @@ func (s *Server) getPublicReport(w http.ResponseWriter, r *http.Request) {
 
 	projection := s.publicReport(r.Context(), run, template, rendered)
 	if len(projection.Formats) == 0 {
-		// Every format this run produced has since been reclaimed by retention.
-		// The link resolved and the document is gone, which is 410 — the same
-		// answer the artifact download gives, for the same reason.
-		s.shareGone(w, r, "This report's files were removed by the retention policy.")
+		// The link resolved and there is nothing behind it. Two different causes
+		// reach here — retention reclaimed the bytes, or the files are not on
+		// disk at all — and the answer is 410 either way, because from the
+		// reader's side both are "this existed and is gone".
+		//
+		// The wording does not guess between them. An earlier version asserted
+		// retention, which would have been a confident lie to a client whose
+		// report was missing because somebody restored a backup without the
+		// reports directory.
+		s.shareGone(w, r, "This report's files are no longer available.")
 		return
 	}
 
@@ -442,11 +448,16 @@ func (s *Server) publicReport(
 	}
 
 	for _, a := range artifacts {
-		// Rendered only. An expired or failed artifact is offered to an operator
-		// so the run's own state is explicable; to a stranger it is a download
-		// link that answers with a problem document, which is a worse way to
-		// learn a file is gone than not being offered it.
-		if a.State == model.ArtifactRendered {
+		// Rendered **and actually on disk**. An expired or failed artifact is
+		// offered to an operator so the run's own state is explicable; to a
+		// stranger it is a download link that answers with a problem document,
+		// which is a worse way to learn a file is gone than not being offered it.
+		//
+		// The disk check matters most here. An operator restoring a backup
+		// without `<data-dir>/reports/` still has every share link they ever
+		// issued, and a client following one would otherwise be shown a list of
+		// formats where every download fails.
+		if s.artifactAvailable(a) {
 			out.Formats = append(out.Formats, a.Format)
 		}
 	}
@@ -472,7 +483,7 @@ func (s *Server) publicDocument(artifacts []model.ReportArtifact) json.RawMessag
 		return nil
 	}
 	for _, a := range artifacts {
-		if a.Format != model.FormatJSON || a.State != model.ArtifactRendered || a.Path == "" {
+		if a.Format != model.FormatJSON || !s.artifactAvailable(a) {
 			continue
 		}
 		body, err := s.artifacts.Open(a.Path)

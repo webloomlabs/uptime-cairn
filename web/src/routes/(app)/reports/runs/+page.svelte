@@ -3,6 +3,7 @@
 	import { api } from '$lib/api';
 	import type {
 		Page as ApiPage,
+		ReportArtifact,
 		ReportRun,
 		ReportRunState,
 		ReportShareCreated,
@@ -174,15 +175,33 @@
 	};
 
 	/**
-	 * Only a rendered artifact is downloadable.
+	 * Only an artifact the server offered a link for is downloadable.
 	 *
-	 * An expired one answers 410 and a failed one answers 409 — both with a
-	 * reason — so offering the link and letting the server refuse would be a
-	 * broken link with an explanation behind it. The explanation belongs beside
-	 * the row instead.
+	 * **Keyed on `download_url` rather than on `state`, and the difference is the
+	 * whole point.** An expired one answers 410 and a failed one answers 409, both
+	 * with a reason — and a *rendered* one whose file is not on disk answers 410
+	 * too. That last case is a database restored without `<data-dir>/reports/`,
+	 * which is the silent half of the backup procedure, and it is the one a
+	 * state-based check would get wrong: the row says `rendered`, so the old check
+	 * offered a link that could not work.
+	 *
+	 * The server does the disk check and expresses the answer by withholding the
+	 * URL. Offering a link and letting the server refuse it is a broken link with
+	 * an explanation behind it; the explanation belongs beside the row.
 	 */
-	function downloadable(state: string): boolean {
-		return state === 'rendered';
+	function downloadable(artifact: ReportArtifact): boolean {
+		return artifact.download_url !== null;
+	}
+
+	/**
+	 * A rendered artifact with no download link: the bytes are not on disk.
+	 *
+	 * Distinct from `expired`, which is retention doing its job and needs no
+	 * action, and from `failed`, which never produced a file at all. This one is
+	 * an operator's to fix, and the hint says how.
+	 */
+	function unavailable(artifact: ReportArtifact): boolean {
+		return artifact.state === 'rendered' && artifact.download_url === null;
 	}
 
 	function sizeOf(bytes: number | null): string {
@@ -287,7 +306,7 @@
 								{#each full.artifacts as artifact (artifact.id)}
 									<li class="flex flex-wrap items-center gap-2 text-sm">
 										<span class="min-w-12 font-medium">{artifact.format.toUpperCase()}</span>
-										{#if downloadable(artifact.state)}
+										{#if downloadable(artifact)}
 											<a
 												class="inline-flex items-center gap-1 hover:underline"
 												href="/api/v1/report-runs/{run.id}/artifacts/{artifact.id}"
@@ -295,6 +314,20 @@
 												<Icon name="download" size={14} />
 												{t('runs.download')}
 											</a>
+											<span class="muted text-xs">{sizeOf(artifact.size_bytes)}</span>
+										{:else if unavailable(artifact)}
+											<!--
+												The row says this rendered and the file is not there. Almost
+												always a database restored without <data-dir>/reports/, so the
+												hint names that rather than describing the symptom.
+											-->
+											<span
+												class="text-xs"
+												style="color: var(--color-pending)"
+												title={t('runs.unavailableHint')}
+											>
+												{t('runs.unavailable')}
+											</span>
 											<span class="muted text-xs">{sizeOf(artifact.size_bytes)}</span>
 										{:else if artifact.state === 'expired'}
 											<span class="muted text-xs" title={t('runs.expiredHint')}>

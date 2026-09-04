@@ -1677,11 +1677,19 @@ func toReportTemplateJSON(t model.ReportTemplate) reportTemplateJSON {
 	return out
 }
 
+// reportRunToJSON renders one run.
+//
+// `available` answers whether an artifact's bytes are actually on disk, which the
+// row cannot: a rendered row and a readable file are two stores, and a database
+// restored without its reports directory has the first without the second. A nil
+// `available` treats every rendered artifact as present, which is what a caller
+// with no artifact storage has to assume.
 func reportRunToJSON(
 	run model.ReportRun,
 	artifacts []model.ReportArtifact,
 	deliveries []model.ReportDelivery,
 	share *model.ReportShareLink,
+	available func(model.ReportArtifact) bool,
 ) reportRunJSON {
 	out := reportRunJSON{
 		ID:               run.ID.String(),
@@ -1736,13 +1744,21 @@ func reportRunToJSON(
 			size := a.SizeBytes
 			item.SizeBytes = &size
 		}
-		// Offered only where there is something to fetch. A download link on an
-		// expired or failed artifact is a link that answers with a problem
-		// document, which is a worse way to learn the file is gone than not
-		// being offered one.
-		if a.State == model.ArtifactRendered {
-			url := "/api/v1/report-runs/" + run.ID.String() + "/artifacts/" + a.ID.String()
-			item.DownloadURL = &url
+		// Offered only where there is something to fetch, and **that now includes
+		// checking the file is there**. A download link on an expired, failed or
+		// missing artifact is a link that answers with a problem document, which
+		// is a worse way to learn a file is gone than not being offered one.
+		//
+		// A rendered artifact with a null download_url is therefore the wire's way
+		// of saying "this was produced and its bytes are not here" — the state a
+		// restore without `<data-dir>/reports/` leaves behind. It is expressed
+		// this way rather than as a fourth `state` because the enum is frozen, and
+		// `download_url` being nullable already means "nothing to fetch".
+		if available == nil || available(a) {
+			if a.State == model.ArtifactRendered {
+				url := "/api/v1/report-runs/" + run.ID.String() + "/artifacts/" + a.ID.String()
+				item.DownloadURL = &url
+			}
 		}
 		out.Artifacts = append(out.Artifacts, item)
 	}
