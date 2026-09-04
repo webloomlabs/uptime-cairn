@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/artifact"
@@ -57,6 +58,12 @@ type Store interface {
 	// carries the appearance section, which is what an install that has never
 	// opened the brand-profile screen is branded from.
 	GetSettings(ctx context.Context, orgID model.ID) (model.Settings, error)
+
+	// RecordArtifactMirror writes the outcome of one offsite upload. Separate
+	// from CreateReportArtifact because the ordering is the same one ADR-008
+	// item 4 fixes locally: row first, upload second, outcome third — an upload
+	// attempted before the row would have nowhere to record a failure.
+	RecordArtifactMirror(ctx context.Context, id model.ID, state string, uploadedAt *time.Time, failure string) error
 }
 
 // Files is the artifact directory.
@@ -94,10 +101,44 @@ type Runner struct {
 	store Store
 	files Files
 	opts  Options
+
+	// mirrors resolves the offsite durability copy from the settings snapshot
+	// this run read, rather than from a client built at start-up. That is the
+	// same rule retention follows and for the same reason: an operator who
+	// enables the mirror at 09:00 should not have to restart the instance for it
+	// to reach the next report.
+	//
+	// Nil on a build that is not running one, and it resolves to nil on every
+	// install that has not configured one — which is the common case and is why
+	// this is a nil check rather than a no-op implementation. A durability copy
+	// and never a read path: nothing in this package consults it to find bytes.
+	mirrors MirrorSource
+
+	// log carries a mirror failure to where an operator sees it. Nil in tests
+	// that do not assert on logging, which every call site tolerates.
+	log *slog.Logger
 }
 
 func New(store Store, files Files, opts Options) *Runner {
 	return &Runner{store: store, files: files, opts: opts}
+}
+
+// WithMirror attaches the offsite copy's resolver.
+//
+// A setter rather than a fourth argument to New, following WithReporting on the
+// API server and for the same reason: the mirror is optional in a way the other
+// three are not, and a test exercising a render has no reason to construct one.
+func (r *Runner) WithMirror(m MirrorSource, log *slog.Logger) *Runner {
+	r.mirrors, r.log = m, log
+	return r
+}
+
+// mirrorFor resolves this run's mirror from the settings it read.
+func (r *Runner) mirrorFor(settings model.Settings) Uploader {
+	if r.mirrors == nil {
+		return nil
+	}
+	return r.mirrors.For(settings.ReportStorage)
 }
 
 // Execute renders one queued run to completion.
@@ -434,6 +475,10 @@ func (r *Runner) render(doc report.Document, brand render.Brand, format string) 
 func (r *Runner) storeArtifact(ctx context.Context, run model.ReportRun, settings model.Settings, format string, data []byte, now time.Time) error {
 	id := model.NewID()
 
+	// Resolved from this run's settings snapshot, so the row is created
+	// `pending` exactly when there is a mirror to be pending for.
+	mirror := r.mirrorFor(settings)
+
 	// Dated by the run's period rather than by now, so a report regenerated for
 	// last March is filed under last March and a backup restored by month
 	// contains what its name says.
@@ -452,9 +497,20 @@ func (r *Runner) storeArtifact(ctx context.Context, run model.ReportRun, setting
 		SizeBytes:   written.SizeBytes,
 		SHA256:      written.SHA256,
 		ExpiresAt:   r.expiryFor(settings, now),
+		MirrorState: mirrorInitialState(mirror != nil),
 		CreatedAt:   now,
 	}
-	return r.store.CreateReportArtifact(ctx, row)
+	if err := r.store.CreateReportArtifact(ctx, row); err != nil {
+		return err
+	}
+
+	// The offsite copy, attempted after the row exists and unable to fail the
+	// run. ADR-008 item 9: local is the source of truth and the only read path,
+	// so a report that rendered, filed and delivered has not failed because a
+	// bucket was unreachable. The outcome lands on the artifact row, where an
+	// operator can see the queue rather than believe in the mirror.
+	r.mirrorArtifact(ctx, mirror, id, written.Path, format, data)
+	return nil
 }
 
 func (r *Runner) recordFailure(ctx context.Context, run model.ReportRun, format string, cause error, now time.Time) error {

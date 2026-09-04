@@ -1,7 +1,13 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import { api } from '$lib/api';
-	import type { Page as ApiPage, ReportRun, ReportRunState, ReportTemplate } from '$lib/types';
+	import type {
+		Page as ApiPage,
+		ReportRun,
+		ReportRunState,
+		ReportShareCreated,
+		ReportTemplate
+	} from '$lib/types';
 	import { t } from '$lib/i18n/index.svelte';
 	import { formatAbsolute } from '$lib/format';
 	import Spinner from '$lib/components/Spinner.svelte';
@@ -44,6 +50,76 @@
 	 * somebody has asked the question.
 	 */
 	let detail = $state<Record<string, ReportRun>>({});
+
+	/**
+	 * Share links.
+	 *
+	 * **The URL is held here and nowhere else.** The server returns it once, at
+	 * creation, and no read path can produce it again — the token is hashed for
+	 * lookup and sealed for replay, and the sealed copy is not on the wire. So
+	 * this map is the only place it exists in the browser, it is not persisted,
+	 * and a page reload loses it. That is the intended behaviour rather than a
+	 * limitation: a screen that could re-display a live credential is a screen
+	 * that leaks one the first time it is screenshotted or pasted into a ticket.
+	 *
+	 * Somebody who has lost the URL revokes and creates another, which is also
+	 * the honest thing to do — a link you cannot produce is a link you have lost
+	 * control of.
+	 */
+	let freshLinks = $state<Record<string, string>>({});
+	let shareExpiryDays = $state<Record<string, number>>({});
+	let sharing = $state<string | null>(null);
+	let shareError = $state<Record<string, string>>({});
+	let copied = $state<string | null>(null);
+
+	async function createShare(run: ReportRun) {
+		sharing = run.id;
+		delete shareError[run.id];
+		try {
+			const days = shareExpiryDays[run.id] ?? 0;
+			const body: Record<string, unknown> = {};
+			if (days > 0) {
+				body.expires_at = new Date(Date.now() + days * 86_400_000).toISOString();
+			}
+			const created = await api.post<ReportShareCreated>(`/report-runs/${run.id}/share`, body);
+			freshLinks[run.id] = created.url;
+			// Re-read so the row shows the link exists, its expiry and — later —
+			// whether the client has opened it. The URL above is not in that read
+			// and never will be.
+			detail[run.id] = await api.get<ReportRun>(`/report-runs/${run.id}`);
+		} catch (caught) {
+			shareError[run.id] = caught instanceof Error ? caught.message : String(caught);
+		} finally {
+			sharing = null;
+		}
+	}
+
+	async function revokeShare(run: ReportRun) {
+		sharing = run.id;
+		delete shareError[run.id];
+		try {
+			await api.delete(`/report-runs/${run.id}/share`);
+			delete freshLinks[run.id];
+			detail[run.id] = await api.get<ReportRun>(`/report-runs/${run.id}`);
+		} catch (caught) {
+			shareError[run.id] = caught instanceof Error ? caught.message : String(caught);
+		} finally {
+			sharing = null;
+		}
+	}
+
+	async function copyLink(runId: string, url: string) {
+		try {
+			await navigator.clipboard.writeText(url);
+			copied = runId;
+			setTimeout(() => (copied === runId ? (copied = null) : null), 2000);
+		} catch {
+			// Clipboard access is refused in plenty of ordinary configurations —
+			// an insecure origin, a browser policy. The URL is on screen and
+			// selectable, so failing quietly leaves the operator with a working
+			// path rather than an error over a convenience.
+		}
+	}
 
 	async function expand(run: ReportRun) {
 		if (expanded === run.id) {
@@ -229,10 +305,118 @@
 												{t('runs.failedFormat')}{artifact.error ? ` — ${artifact.error}` : ''}
 											</span>
 										{/if}
+
+										<!--
+											The offsite copy, and **never coloured as though the report
+											were damaged**. The mirror is a durability copy and never a
+											read path, so a bucket that was briefly unreachable leaves a
+											perfectly downloadable report — rendering this in the failure
+											colour would send an operator looking for a problem with a
+											file that is fine.
+										-->
+										{#if artifact.mirror}
+											<span
+												class="muted text-xs"
+												title={artifact.mirror.state === 'failed'
+													? `${t('runs.mirrorFailedHint')} ${artifact.mirror.error ?? ''}`
+													: undefined}
+											>
+												· {t(`runs.mirror.${artifact.mirror.state}`)}
+											</span>
+										{/if}
 									</li>
 								{/each}
 							</ul>
 						</div>
+
+						<!--
+							Share links.
+							
+							Offered only on a run that produced something. A link onto a run
+							with no rendered artifact resolves to a page with nothing to
+							download, which is a worse thing to hand a client than no link.
+						-->
+						{#if full.artifacts.some((a) => a.state === 'rendered')}
+							<div>
+								<h3 class="muted mb-2 text-xs font-medium">{t('runs.share')}</h3>
+
+								{#if freshLinks[run.id]}
+									<!--
+										Shown once. The server returns the URL at creation and no
+										read path can produce it again, so this is the only moment
+										it exists outside the recipient's inbox.
+									-->
+									<div class="rounded p-3 text-sm" style="background-color: var(--color-up-soft)">
+										<p class="mb-2 font-medium">{t('runs.shareOnce')}</p>
+										<div class="flex flex-wrap items-center gap-2">
+											<code class="flex-1 break-all text-xs">{freshLinks[run.id]}</code>
+											<button
+												type="button"
+												class="inline-flex items-center gap-1 text-xs hover:underline"
+												onclick={() => copyLink(run.id, freshLinks[run.id])}
+											>
+												<Icon name="copy" size={13} />
+												{copied === run.id ? t('runs.shareCopied') : t('runs.shareCopy')}
+											</button>
+										</div>
+									</div>
+								{/if}
+
+								{#if full.share}
+									<div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+										<span>{t('runs.shareExists')}</span>
+										<span class="muted text-xs">
+											{t('runs.shareCreated')}: {formatAbsolute(full.share.created_at)}
+										</span>
+										<span class="muted text-xs">
+											{full.share.expires_at
+												? `${t('runs.shareExpires')}: ${formatAbsolute(full.share.expires_at)}`
+												: t('runs.shareNeverExpires')}
+										</span>
+										<span class="muted text-xs">
+											{full.share.last_accessed_at
+												? `${t('runs.shareOpened')}: ${formatAbsolute(full.share.last_accessed_at)}`
+												: t('runs.shareNotOpened')}
+										</span>
+										<button
+											type="button"
+											class="text-xs hover:underline"
+											style="color: var(--color-down)"
+											disabled={sharing === run.id}
+											onclick={() => revokeShare(run)}
+										>
+											{t('runs.shareRevoke')}
+										</button>
+									</div>
+								{:else}
+									<p class="muted mb-2 text-sm">{t('runs.shareHint')}</p>
+									<div class="flex flex-wrap items-center gap-2">
+										<label class="flex items-center gap-2 text-sm">
+											<span class="muted text-xs">{t('runs.shareExpiry')}</span>
+											<select class="field w-auto text-sm" bind:value={shareExpiryDays[run.id]}>
+												<option value={0}>{t('runs.shareExpiryNever')}</option>
+												{#each [7, 30, 90] as days (days)}
+													<option value={days}>{t('runs.shareExpiryDays', { n: days })}</option>
+												{/each}
+											</select>
+										</label>
+										<button
+											type="button"
+											class="text-sm hover:underline"
+											style="color: var(--accent)"
+											disabled={sharing === run.id}
+											onclick={() => createShare(run)}
+										>
+											{t('runs.shareCreate')}
+										</button>
+									</div>
+								{/if}
+
+								{#if shareError[run.id]}
+									<p class="mt-2 text-sm" style="color: var(--color-down)">{shareError[run.id]}</p>
+								{/if}
+							</div>
+						{/if}
 
 						<div>
 							<h3 class="muted mb-2 text-xs font-medium">{t('runs.deliveries')}</h3>

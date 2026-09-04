@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -179,10 +180,13 @@ func TestAScheduleNeedsADeliveryTarget(t *testing.T) {
 	}
 }
 
-// **An s3 target is refused rather than stored with a credential nothing can
-// use.** The SigV4 client is not built; accepting a secret_access_key and
-// dropping it would leave an operator believing it was saved.
-func TestAnS3TargetIsRefusedWhileTheClientIsUnbuilt(t *testing.T) {
+// **An incomplete s3 target is refused with the missing field named**, rather
+// than stored with a credential that authenticates as nobody.
+//
+// `region` is the one an operator on MinIO will reasonably leave blank, never
+// having needed one — so the message says why it is required rather than merely
+// that it is.
+func TestAnIncompleteS3TargetIsRefusedWithTheMissingFieldNamed(t *testing.T) {
 	t.Parallel()
 
 	c := reportingClient(t)
@@ -197,7 +201,72 @@ func TestAnS3TargetIsRefusedWhileTheClientIsUnbuilt(t *testing.T) {
 	if resp.StatusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, out)
 	}
-	if !strings.Contains(problemMessages(out), "S3 client is not implemented") {
+	messages := problemMessages(out)
+	for _, want := range []string{"region is required for the request signature", "access_key_id is required"} {
+		if !strings.Contains(messages, want) {
+			t.Errorf("messages = %q, want it to contain %q", messages, want)
+		}
+	}
+}
+
+// A complete s3 target is stored, and **the credential never comes back out**.
+//
+// The split is at the storage boundary rather than the API boundary: the secret
+// is sealed onto its own column, so the map the read path serialises has no
+// credential in it to leak. This asserts the consequence rather than the
+// mechanism — a read of the schedule returns the bucket and not the key.
+func TestACompleteS3TargetIsStoredAndItsSecretIsNotReadableBack(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	tpl := createTemplate(t, c, map[string]any{"name": "Monthly", "type": "sla", "formats": []string{"pdf"}})
+
+	body := scheduleFixtureBody(tpl)
+	body["deliveries"] = []map[string]any{{
+		"type": "s3",
+		"s3": map[string]any{
+			"bucket": "client-reports", "prefix": "acme", "region": "ap-southeast-2",
+			"endpoint": "https://minio.example.com:9000", "path_style": true,
+			"access_key_id": "AKIAIOSFODNN7EXAMPLE", "secret_access_key": "hunter2",
+		},
+	}}
+
+	resp, out := createSchedule(t, c, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (%v)", resp.StatusCode, out)
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "hunter2") {
+		t.Errorf("the secret access key came back in the response: %s", raw)
+	}
+	if !strings.Contains(string(raw), "client-reports") {
+		t.Errorf("the bucket did not round-trip: %s", raw)
+	}
+	if !strings.Contains(string(raw), "minio.example.com") {
+		t.Errorf("the endpoint did not round-trip: %s", raw)
+	}
+}
+
+// An s3 target with no s3 block is refused. Accepting one and storing a delivery
+// that names no bucket would produce a schedule that fails on every firing.
+func TestAnS3TargetNeedsAnS3Block(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	tpl := createTemplate(t, c, map[string]any{"name": "Monthly", "type": "sla", "formats": []string{"pdf"}})
+
+	body := scheduleFixtureBody(tpl)
+	body["deliveries"] = []map[string]any{{"type": "s3"}}
+
+	resp, out := createSchedule(t, c, body)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, out)
+	}
+	if !strings.Contains(problemMessages(out), "needs an s3 block") {
 		t.Errorf("messages = %q, want the reason stated", problemMessages(out))
 	}
 }

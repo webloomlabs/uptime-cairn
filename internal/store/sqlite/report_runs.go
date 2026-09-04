@@ -31,7 +31,7 @@ const reportRunColumns = `
 
 const reportArtifactColumns = `
 	id, org_id, report_run_id, format, state, path, size_bytes, sha256, error,
-	expires_at, created_at`
+	expires_at, created_at, mirror_state, mirror_uploaded_at, mirror_error`
 
 // CreateReportRun writes a queued run.
 func (s *Store) CreateReportRun(ctx context.Context, r model.ReportRun) error {
@@ -221,10 +221,11 @@ func (s *Store) ListReportRuns(ctx context.Context, after *Cursor, limit int, fi
 func (s *Store) CreateReportArtifact(ctx context.Context, a model.ReportArtifact) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO report_artifacts (`+reportArtifactColumns+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		a.ID[:], a.OrgID[:], a.ReportRunID[:], a.Format, a.State, nullString(a.Path),
 		nullInt64(a.SizeBytes), nullString(a.SHA256), nullString(a.Error),
-		nullMillis(a.ExpiresAt), millis(a.CreatedAt))
+		nullMillis(a.ExpiresAt), millis(a.CreatedAt),
+		nullString(a.MirrorState), nullMillis(a.MirrorUploadedAt), nullString(a.MirrorError))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return ErrConflict
@@ -472,15 +473,18 @@ func scanReportRun(row scanner) (model.ReportRun, error) {
 
 func scanReportArtifact(row scanner) (model.ReportArtifact, error) {
 	var (
-		a                  model.ReportArtifact
-		id, orgID, runID   []byte
-		path, sha, failure sql.NullString
-		size, expires      sql.NullInt64
-		createdAt          int64
+		a                          model.ReportArtifact
+		id, orgID, runID           []byte
+		path, sha, failure         sql.NullString
+		size, expires              sql.NullInt64
+		createdAt                  int64
+		mirrorState, mirrorFailure sql.NullString
+		mirrorUploaded             sql.NullInt64
 	)
 
 	if err := row.Scan(&id, &orgID, &runID, &a.Format, &a.State, &path, &size,
-		&sha, &failure, &expires, &createdAt); err != nil {
+		&sha, &failure, &expires, &createdAt,
+		&mirrorState, &mirrorUploaded, &mirrorFailure); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.ReportArtifact{}, ErrNotFound
 		}
@@ -496,7 +500,34 @@ func scanReportArtifact(row scanner) (model.ReportArtifact, error) {
 	a.Error = failure.String
 	a.ExpiresAt = nullableTime(expires)
 	a.CreatedAt = fromMillis(createdAt)
+	a.MirrorState = mirrorState.String
+	a.MirrorUploadedAt = nullableTime(mirrorUploaded)
+	a.MirrorError = mirrorFailure.String
 	return a, nil
+}
+
+// RecordArtifactMirror writes the outcome of one offsite upload.
+//
+// Separate from the artifact insert because the ordering matters and is the same
+// ordering ADR-008 item 4 fixes for local storage: the row exists first, the
+// upload is attempted second, and the result is recorded third. An upload
+// attempted before the row would have nowhere to record a failure, which is the
+// state that turns a mirror into a thing an operator believes in without
+// evidence.
+//
+// Never returns ErrNotFound as a failure the caller must handle: an artifact
+// deleted between the upload and this write is a race with retention, and
+// failing the run over it would be reporting a successful report as broken.
+func (s *Store) RecordArtifactMirror(ctx context.Context, id model.ID, state string, uploadedAt *time.Time, failure string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE report_artifacts
+		SET mirror_state = ?, mirror_uploaded_at = ?, mirror_error = ?
+		WHERE id = ?`,
+		state, nullMillis(uploadedAt), nullString(failure), id[:])
+	if err != nil {
+		return fmt.Errorf("record artifact mirror: %w", err)
+	}
+	return nil
 }
 
 // isUniqueViolation is matched on the message because modernc.org/sqlite does not

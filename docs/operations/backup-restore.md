@@ -76,17 +76,13 @@ docker cp uptime-cairn:/data/cairn.key ./cairn.key   # then store it elsewhere
 
 ## Report artifacts
 
-> **This section describes a directory the current release does not create.** It
-> is written against [ADR-008](../adr/008-report-artifact-storage.md), which
-> fixes the layout, and it is here ahead of the code so that a backup script
-> written today does not have to be found and changed later. The end-to-end
-> drill that the rest of this page reports has not been run for it.
-
 Generated reports are files under `<data-dir>/reports/<yyyy>/<mm>/`, named by
 artifact id, with the database holding the index and not the bytes. **Backing up
 `cairn.db` alone therefore leaves you with rows describing files you do not
-have.** That install starts, runs, and serves everything except a download,
-which is precisely why the omission is not noticed until somebody asks for one.
+have.** That install starts, runs, lists every report it ever produced, and
+answers `410 Gone` on the download — naming the missing directory, because that
+is the one thing you can act on. It is precisely why the omission is not noticed
+until somebody asks for a file.
 
 **They cannot be regenerated, and this is the part worth reading before deciding
 to skip them.** A report over last March re-run in 2028 reads whatever rollup
@@ -117,16 +113,32 @@ In Docker, the directory comes out the same way the database does:
 docker cp uptime-cairn:/data/reports ./reports
 ```
 
-Permissions are `0750` on the directories and `0640` on the files, matching what
-the rest of the data directory uses. `rsync -a` and `docker cp` both preserve
+Permissions are `0750` on the directories and `0600` on the files — the same
+`0600` the root key is written with, because a report is a client's operational
+data and there is no second user on the box who needs to read it. `rsync -a` and `docker cp` both preserve
 that; `cp` without `-p` does not.
 
 ### If the S3 mirror is enabled
 
-Where `settings.report_storage.mirror_enabled` is on, every artifact is already
-copied offsite as it is written, and the local `rsync` step above may be
-skipped. That is a real reason to enable it beyond durability — it removes the
-half of this procedure most likely to be forgotten.
+Where `settings.report_storage.mirror_enabled` is on, every artifact is copied
+offsite as it is written. That is a real reason to enable it beyond durability —
+it covers the half of this procedure most likely to be forgotten.
+
+**It does not let you skip the local `rsync` above, and you should not treat it
+as though it does.** An upload that fails is recorded on the artifact row and
+does not fail the run, deliberately — a bucket outage must not take reporting
+down — and **nothing retries it**. So a mirror that has been quietly failing for
+a fortnight looks exactly like one that is working, from everywhere except the
+artifact rows. If you intend to rely on the mirror instead of the local copy,
+alert on it:
+
+```
+GET /api/v1/report-runs?limit=50
+```
+
+and check `artifacts[].mirror.state` for anything that is not `uploaded`. Until
+you have that, the mirror is a second copy rather than a replacement for the
+first.
 
 Two constraints come with it, and neither is optional:
 
@@ -168,13 +180,29 @@ $ sqlite3 backup.db "SELECT version, name FROM schema_migrations ORDER BY versio
 3|alerting_and_pages
 4|monitor_config_secrets
 5|subscriber_delivery
+6|monitor_probe_pinning
+7|import_vocabulary
+8|reporting
+9|artifact_mirror
 ```
 
 `foreign_key_check` printing nothing is the pass. The migration list is the
 check that matters for restores: it tells you which build can open this file,
-which is the question you will be asking under pressure. That drill ran against
-a build whose highest migration was 5; a current install lists more, and what
-you are reading off it is the **highest number**, not the count.
+which is the question you will be asking under pressure. What you are reading
+off it is the **highest number**, not the count.
+
+Where the install holds report artifacts, one more check is worth the seconds it
+costs, because it is the one that catches the failure this page exists to
+prevent — a database and a reports directory that do not agree:
+
+```sh
+sqlite3 backup.db "SELECT path FROM report_artifacts WHERE state = 'rendered';" |
+  while read -r p; do [ -f "/backups/reports/$p" ] || echo "MISSING: $p"; done
+```
+
+Printing nothing is the pass. Anything it names is a row whose file is not in
+the backup, which is a report you will not be able to produce if the figure in
+it is ever disputed.
 
 ## Restore
 
@@ -279,10 +307,15 @@ product. Both are worth having and neither is built; today this is a cron job
 you own. Schedule the `VACUUM INTO` above, keep the retention policy outside the
 data directory, and test a restore on a cadence you actually keep to.
 
-Once reporting ships, that cron job is **two** commands rather than one, and
-nothing in the product checks that you run the second. That is the known cost of
-holding artifacts as files rather than as blobs in the database, recorded in
-[ADR-008](../adr/008-report-artifact-storage.md) rather than discovered later —
-along with the honest statement that documentation, the S3 mirror, and a warning
-where artifacts exist with no mirror configured all reduce the risk and none of
-them makes it zero.
+Now that reporting has shipped, that cron job is **two** commands rather than
+one, and nothing in the product checks that you run the second. That is the
+known cost of holding artifacts as files rather than as blobs in the database,
+recorded in [ADR-008](../adr/008-report-artifact-storage.md) rather than
+discovered later — along with the honest statement that documentation, the S3
+mirror, and the consistency check above all reduce the risk and none of them
+makes it zero.
+
+**The S3 mirror does not close it either.** A failed upload is recorded on the
+artifact and never retried, so a mirror that has been quietly failing looks
+exactly like one that is working from everywhere except the artifact rows. It is
+a second copy, not a substitute for the first.

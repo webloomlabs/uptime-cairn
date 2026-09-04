@@ -384,8 +384,29 @@ type ReportArtifact struct {
 	// of 0 selects. Otherwise the instant the sweeper may reclaim the bytes.
 	ExpiresAt *time.Time
 
+	// Mirror is the offsite copy's state, and it is deliberately beside State
+	// rather than inside it. ADR-008 item 9: the mirror is a durability copy and
+	// never a read path, so a failed upload leaves the artifact perfectly
+	// readable — folding the two together would take a downloadable report out
+	// of the UI over a bucket that was briefly unreachable.
+	//
+	// Empty MirrorState means no mirror was configured when this was written,
+	// which is a different fact from "an upload has not happened yet" and is
+	// what the API renders as null.
+	MirrorState      string
+	MirrorUploadedAt *time.Time
+	MirrorError      string
+
 	CreatedAt time.Time
 }
+
+// Mirror states. Pending is set when the artifact is written on an install with
+// a mirror configured; the upload moves it on.
+const (
+	MirrorPending  = "pending"
+	MirrorUploaded = "uploaded"
+	MirrorFailed   = "failed"
+)
 
 // ReportShareLink is an unauthenticated URL onto one run.
 type ReportShareLink struct {

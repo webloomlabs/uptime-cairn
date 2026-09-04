@@ -92,6 +92,18 @@ type Vault interface {
 	Open(orgID, channelID model.ID, envelope []byte) (map[string]any, error)
 }
 
+// Secrets opens a delivery target's own sealed credential.
+//
+// A second interface rather than a method on Vault, because the two envelopes
+// hold different shapes and are bound to different rows: a channel's secrets are
+// a map under (notification_channels, secrets), and a drop's is one string under
+// (report_schedule_deliveries, secrets). Conflating them would mean one AAD for
+// two tables, which is the property that stops a ciphertext being relocated from
+// a row somebody controls onto one they do not.
+type Secrets interface {
+	Open(orgID, rowID, envelope []byte) ([]byte, error)
+}
+
 // Dispatcher delivers finished runs.
 type Dispatcher struct {
 	store Store
@@ -99,12 +111,28 @@ type Dispatcher struct {
 	vault Vault
 	log   *slog.Logger
 
+	// drops opens an s3 delivery target's sealed secret access key. Nil in a
+	// build or a test that is not exercising one, which sendS3 reports as a skip
+	// naming the reason rather than panicking on — the same treatment a missing
+	// SMTP relay gets, and for the same reason: an operator has to be told which
+	// of the two it was.
+	drops Secrets
+
 	// instanceName goes on the covering message, so a client receiving reports
 	// from two installs can tell which one sent this.
 	instanceName string
 
 	// sleep is injectable so retry can be tested without waiting.
 	sleep func(context.Context, time.Duration)
+}
+
+// WithDrops attaches the opener for an s3 delivery target's credential.
+//
+// A setter rather than a sixth argument to New, following the convention the API
+// server already uses: the drop is optional in a way the other five are not.
+func (d *Dispatcher) WithDrops(s Secrets) *Dispatcher {
+	d.drops = s
+	return d
 }
 
 // New builds the dispatcher.
@@ -312,12 +340,7 @@ func (d *Dispatcher) send(
 	case model.ReportDeliveryWebhook:
 		return d.sendWebhook(ctx, run, template, target, config, channel, haveChannel, artifacts)
 	case model.ReportDeliveryS3:
-		// The one target that is refused rather than attempted. Accepting it and
-		// recording a success would tell an operator their durability copy
-		// exists when it does not, which is the failure mode a mirror is bought
-		// to prevent.
-		return "s3", permanent("the S3 client is not built in this release, so an s3 " +
-			"delivery target cannot be honoured; remove it or deliver by email or webhook")
+		return d.sendS3(ctx, run, template, target, config, artifacts)
 	}
 	return "", permanent("unknown delivery type %q", target.Type)
 }

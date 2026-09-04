@@ -260,7 +260,37 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		log.Error("embedded report font unavailable; PDF reports will fail", "error", err)
 	}
 
-	artifacts := artifact.New(cfg.DataDir, artifact.DefaultMaxBytes)
+	// The per-artifact size cap is the one piece of reporting configuration read
+	// here rather than per run, because it sizes the store the runner is
+	// constructed with. Everything else — retention, branding, the mirror — is
+	// read on every execution, so that an operator changing it at 09:00 does not
+	// have to restart for the change to reach the next report.
+	//
+	// Not fatal. An install whose settings row cannot be read should still
+	// monitor, and it does so with the compiled-in default.
+	stored, err := store.GetSettings(ctx, model.SentinelOrgID)
+	if err != nil {
+		log.Warn("read report storage settings", "error", err)
+	}
+
+	artifacts := artifact.New(cfg.DataDir, stored.ReportStorage.MaxArtifactBytes)
+
+	// The offsite mirror (ADR-008 item 9): a durability copy of every artifact,
+	// and never a read path.
+	//
+	// **Resolved per run rather than built here**, from the settings snapshot the
+	// runner already reads on every execution. Building a client at start-up was
+	// the first cut and it reintroduced exactly the drift that per-run read
+	// exists to close: an operator enables the mirror, the settings surface
+	// accepts it, and nothing is uploaded until somebody happens to restart.
+	//
+	// What is built here is the opener, because unsealing the credential needs
+	// the keeper and the keeper belongs to this composition root — the same
+	// division applySMTP makes for the mail relay.
+	mirrors := runner.NewMirrorProvider(
+		secrets.NewVault(keeper, "settings", "report_storage"),
+		model.SentinelOrgID,
+		log.With("component", "reports"))
 
 	// Runs a previous process was killed in the middle of are finished before any
 	// worker starts, which is the only moment it can be done without a threshold:
@@ -280,7 +310,7 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 			Retention:    reportRetention(rollup.DefaultRetention()),
 			ArtifactDays: model.DefaultReportArtifactDays,
 			Fonts:        fonts,
-		}),
+		}).WithMirror(mirrors, log.With("component", "reports")),
 		runner.DefaultWorkers, runner.DefaultQueue, log.With("component", "reports")).
 		// Delivery hangs off the pool rather than being part of a run, which is
 		// what makes "the PDF failed but the HTML went out" and "re-send last
@@ -292,7 +322,12 @@ func Run(ctx context.Context, cfg config.Config, out io.Writer) error {
 		// channel reads that channel's credentials rather than a copy — which is
 		// what makes a rotated Slack token a one-place change.
 		WithDeliverer(delivery.New(store, artifacts, notify.NewVault(keeper),
-			cfg.InstanceName, log.With("component", "reports")))
+			cfg.InstanceName, log.With("component", "reports")).
+			// The drop's credential opener, and a different vault from the
+			// channels' above: the AAD binds a ciphertext to its table, column
+			// and row, so one vault for two tables would let a credential be
+			// moved from a row somebody controls onto one they do not.
+			WithDrops(secrets.NewVault(keeper, "report_schedule_deliveries", "secrets")))
 	reportPool.Start(ctx)
 
 	// The scheduler turns saved schedules into queued runs and does nothing

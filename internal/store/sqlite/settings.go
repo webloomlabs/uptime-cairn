@@ -10,7 +10,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
-// Instance settings: one row per organisation, seven JSON columns.
+// Instance settings: one row per organisation, eight JSON columns.
 //
 // A column per section rather than one blob, because the sections have different
 // audiences and different sensitivities — `smtp` carries an encrypted credential
@@ -26,17 +26,18 @@ import (
 // site.
 func (s *Store) GetSettings(ctx context.Context, orgID model.ID) (model.Settings, error) {
 	row := s.ro.QueryRowContext(ctx, `
-		SELECT general, appearance, retention, smtp, monitoring, security, telemetry, updated_at
+		SELECT general, appearance, retention, smtp, monitoring, security, telemetry,
+		       report_storage, updated_at
 		FROM settings WHERE org_id = ?`, orgID[:])
 
 	var (
 		general, appearance, retention string
 		smtp, monitoring, security     string
-		telemetry                      string
+		telemetry, reportStorage       string
 		updatedAt                      int64
 	)
 	err := row.Scan(&general, &appearance, &retention, &smtp, &monitoring,
-		&security, &telemetry, &updatedAt)
+		&security, &telemetry, &reportStorage, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Settings{OrgID: orgID}, nil
 	}
@@ -56,6 +57,7 @@ func (s *Store) GetSettings(ctx context.Context, orgID model.ID) (model.Settings
 		{monitoring, &out.Monitoring},
 		{security, &out.Security},
 		{telemetry, &out.Telemetry},
+		{reportStorage, &out.ReportStorage},
 	} {
 		if err := json.Unmarshal([]byte(section.raw), section.into); err != nil {
 			return model.Settings{}, fmt.Errorf("decode settings section: %w", err)
@@ -68,10 +70,10 @@ func (s *Store) GetSettings(ctx context.Context, orgID model.ID) (model.Settings
 // onto the stored value, so this is a full write rather than a partial one — the
 // merge belongs where the validation is, not spread across two layers.
 func (s *Store) SaveSettings(ctx context.Context, set model.Settings) error {
-	sections := make([]any, 0, 7)
+	sections := make([]any, 0, 8)
 	for _, section := range []any{
 		set.General, set.Appearance, set.Retention, set.SMTP,
-		set.Monitoring, set.Security, set.Telemetry,
+		set.Monitoring, set.Security, set.Telemetry, set.ReportStorage,
 	} {
 		encoded, err := json.Marshal(section)
 		if err != nil {
@@ -85,13 +87,15 @@ func (s *Store) SaveSettings(ctx context.Context, set model.Settings) error {
 
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO settings (org_id, general, appearance, retention, smtp, monitoring,
-		                      security, telemetry, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?)
+		                      security, telemetry, report_storage, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT (org_id) DO UPDATE SET
 		    general = excluded.general, appearance = excluded.appearance,
 		    retention = excluded.retention, smtp = excluded.smtp,
 		    monitoring = excluded.monitoring, security = excluded.security,
-		    telemetry = excluded.telemetry, updated_at = excluded.updated_at`,
+		    telemetry = excluded.telemetry,
+		    report_storage = excluded.report_storage,
+		    updated_at = excluded.updated_at`,
 		args...); err != nil {
 		return fmt.Errorf("save settings: %w", err)
 	}

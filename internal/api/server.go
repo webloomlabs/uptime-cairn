@@ -101,6 +101,7 @@ type IdentityStore interface {
 type Store interface {
 	MonitorStore
 	ReportStore
+	ReportShareStore
 	ReportScheduleStore
 	BrandStore
 	ExpiryStore
@@ -132,8 +133,13 @@ type Server struct {
 	keeper   *secrets.Keeper
 	log      *slog.Logger
 	limiter  *loginLimiter
-	checks   *checkLimiter
-	retuner  Retuner
+
+	// shares throttles the unauthenticated share-link read. Its own limiter
+	// rather than the login one: five attempts in fifteen minutes is right for
+	// credential guessing and absurd for a document somebody was sent.
+	shares  *shareLimiter
+	checks  *checkLimiter
+	retuner Retuner
 
 	// vault seals and opens notification-channel secrets, and configs does the
 	// same for the credential half of a monitor's configuration. Both are built
@@ -150,6 +156,23 @@ type Server struct {
 	webhooks      *secrets.Vault
 	settingsVault *secrets.Vault
 	subscribers   *secrets.Vault
+
+	// reportDrops seals an s3 delivery target's secret access key, and
+	// reportStorage seals the artifact mirror's. Each has its own vault rather
+	// than sharing one, because the AAD binds a ciphertext to its table, column
+	// and row: without that separation, somebody who can write to the database
+	// can move a credential from a row they control onto one they do not, and
+	// GCM would open it happily. The mirror's is bound to the settings row's
+	// report_storage column specifically, so an SMTP password cannot be
+	// relocated into it either.
+	reportDrops   *secrets.Vault
+	reportStorage *secrets.Vault
+
+	// reportShares seals a share token so the operator can be shown the link
+	// again. Bound to the share row, so a ciphertext lifted from one link's row
+	// fails to open against another rather than opening as somebody else's
+	// credential.
+	reportShares *secrets.Vault
 
 	// outbound is the webhook delivery engine. Nil in a build or a test that is
 	// not running one, which the redeliver endpoint reports rather than panics
@@ -238,8 +261,12 @@ func New(s Store, publisher Notifier, sweeps Notifier, push PushIngest, alerts A
 		webhooks:      secrets.NewVault(keeper, "webhooks", "secret_encrypted"),
 		settingsVault: secrets.NewVault(keeper, "settings", "smtp"),
 		subscribers:   secrets.NewVault(keeper, "subscribers", "target"),
+		reportDrops:   secrets.NewVault(keeper, "report_schedule_deliveries", "secrets"),
+		reportStorage: secrets.NewVault(keeper, "settings", "report_storage"),
+		reportShares:  secrets.NewVault(keeper, "report_share_links", "token_encrypted"),
 		log:           log,
 		limiter:       newLoginLimiter(),
+		shares:        newShareLimiter(),
 		streams:       newLiveStreams(),
 		running:       &importRunner{},
 
@@ -367,6 +394,13 @@ func (s *Server) Handler() http.Handler {
 
 	// The status page read path. Unauthenticated because a status page whose
 	// audience needs a credential is not a status page.
+	// The share pair: unauthenticated, rate limited, noindex, and answering on a
+	// separate public projection. The token in the path is the whole of the
+	// authorisation, which is why it is bounded and hashed before it is looked
+	// up and why the read path has no place to put a monitor identifier.
+	public.HandleFunc("GET /api/v1/public/reports/{shareToken}", s.getPublicReport)
+	public.HandleFunc("GET /api/v1/public/reports/{shareToken}/download", s.downloadPublicReport)
+
 	public.HandleFunc("GET /api/v1/public/status-pages/{slug}", s.getPublicStatusPage)
 	public.HandleFunc("POST /api/v1/public/status-pages/{slug}/authenticate", s.authenticatePublicStatusPage)
 	public.HandleFunc("POST /api/v1/public/status-pages/{slug}/subscribers", s.subscribeToStatusPage)
@@ -484,6 +518,8 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}", s.require(auth.ScopeReportsRead, s.getReportRun))
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}/download", s.require(auth.ScopeReportsRead, s.downloadReportArtifact))
 	authed.HandleFunc("GET /api/v1/report-runs/{reportRunId}/artifacts/{artifactId}", s.require(auth.ScopeReportsRead, s.downloadReportArtifactByID))
+	authed.HandleFunc("POST /api/v1/report-runs/{reportRunId}/share", s.require(auth.ScopeReportsWrite, s.createReportShareLink))
+	authed.HandleFunc("DELETE /api/v1/report-runs/{reportRunId}/share", s.require(auth.ScopeReportsWrite, s.revokeReportShareLink))
 
 	// monitors:read rather than reports:read, which is the spec's choice: the
 	// rows are facts about monitors, and a key that can see a monitor can

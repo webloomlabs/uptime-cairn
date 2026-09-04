@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
+	"github.com/webloomlabs/uptime-cairn/internal/s3"
 )
 
 // The three transports, each of which is somebody else's machinery with a report
@@ -471,4 +473,136 @@ func stringMap(v any) map[string]string {
 		}
 	}
 	return out
+}
+
+// --- s3 (the drop) ----------------------------------------------------------
+
+// sendS3 drops one run's files into a bucket.
+//
+// # The drop is not the mirror
+//
+// They share the client in internal/s3 and nothing else, and the distinction is
+// worth holding onto because the two look identical from the outside and answer
+// opposite questions. The **mirror** is a durability copy of every artifact this
+// install produces, configured once in settings, and it exists so that a disk
+// failure does not take the evidence with it. The **drop** is a delivery: one
+// schedule's output, in the formats that target takes, put where a recipient's
+// pipeline will find it. An operator who configures a drop and believes they have
+// durability has bought nothing against the failure the mirror exists for, which
+// is why the two are named apart everywhere they appear.
+//
+// # Why the key layout is what it is
+//
+// `<prefix>/<template-slug>/<period>/<name>.<ext>` — a human-readable path, and
+// deliberately not the artifact-id layout the mirror uses. The mirror's consumer
+// is a restore, which wants the on-disk tree reproduced exactly; a drop's
+// consumer is somebody's data pipeline or somebody's colleague, and a bucket full
+// of UUIDs serves neither. This is the same reasoning attachmentName follows, and
+// it uses the same sanitiser: it is one of the two places in this subsystem where
+// a user-supplied string reaches a path, and the sanitising is what makes that
+// safe.
+//
+// # Failure is a delivery failure, not a run failure
+//
+// A drop that cannot reach its bucket records a failed delivery and is retried
+// like any other target. The run is untouched: the report exists, and what failed
+// is one attempt to hand it over.
+func (d *Dispatcher) sendS3(
+	ctx context.Context,
+	run model.ReportRun,
+	template model.ReportTemplate,
+	target model.ReportScheduleDelivery,
+	config map[string]any,
+	artifacts []model.ReportArtifact,
+) (string, error) {
+	bucket := stringValue(config["bucket"])
+	description := "s3://" + bucket
+	if prefix := stringValue(config["prefix"]); prefix != "" {
+		description += "/" + strings.Trim(prefix, "/")
+	}
+
+	if d.drops == nil {
+		// A build with no opener cannot read the credential, so the upload would
+		// authenticate as nobody.
+		//
+		// **Failed rather than skipped**, and the difference is the point. A skip
+		// reads as "there was nothing to do"; an operator who configured a drop
+		// and reads that will believe their files went out. The failure a mirror
+		// is bought to prevent is believing in a copy that does not exist, and
+		// recording this as anything softer produces exactly that belief — to be
+		// discovered on the day the copy is needed. Permanent, because a build
+		// does not grow the opener between attempts.
+		return description, permanent("this build cannot open the delivery credential, " +
+			"so nothing was uploaded to the s3 target")
+	}
+	if len(target.SecretsSealed) == 0 {
+		return description, permanent("no secret access key is stored for this s3 target; re-save the schedule with one")
+	}
+
+	secret, err := d.drops.Open(target.OrgID[:], target.ID[:], target.SecretsSealed)
+	if err != nil {
+		// The envelope is bound by AAD to this row, so a failure here is either
+		// a key problem or a relocated ciphertext. Neither is fixed by retrying.
+		return description, permanent("the s3 credential could not be opened: %s", err)
+	}
+
+	cfg := s3.Config{
+		Bucket:          bucket,
+		Prefix:          stringValue(config["prefix"]),
+		Region:          stringValue(config["region"]),
+		Endpoint:        stringValue(config["endpoint"]),
+		PathStyle:       boolValue(config["path_style"]),
+		AccessKeyID:     stringValue(config["access_key_id"]),
+		SecretAccessKey: string(secret),
+	}
+	if err := cfg.Validate(); err != nil {
+		return description, permanent("the s3 target is incompletely configured: %s", err)
+	}
+	client := s3.New(cfg, nil)
+
+	// Sorted, so a bucket listing after a run reads in a stable order rather than
+	// in whatever order the map came back in.
+	sorted := append([]model.ReportArtifact(nil), artifacts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Format < sorted[j].Format })
+
+	for _, a := range sorted {
+		data, err := readAll(d.files, a.Path)
+		if err != nil {
+			// The row says the bytes are there and they are not. The orphan
+			// sweeper cannot produce this; a restore from an older backup can.
+			// Permanent, because reading the same missing file twice more is not
+			// a strategy.
+			return description, permanent("the %s artifact could not be read from disk: %s", a.Format, err)
+		}
+		key := dropKey(template, run, a.Format)
+		if err := client.Put(ctx, key, data, contentTypeFor(a.Format)); err != nil {
+			// Transient by default: a bucket that is unreachable now may not be
+			// in fifteen seconds, and the retry loop is what that is for. The
+			// provider's own message travels with it, because 'NoSuchBucket' and
+			// 'SignatureDoesNotMatch' send an operator to two different screens.
+			return description, fmt.Errorf("uploading %s to %s/%s: %w", a.Format, description, key, err)
+		}
+	}
+	return description, nil
+}
+
+// dropKey is where one artifact lands in the bucket.
+//
+// Read by a person or by somebody's pipeline, so it is named rather than
+// identified — the opposite choice from the mirror, which reproduces the on-disk
+// path because its reader is a restore. Sanitised by the same slug the mail
+// attachment uses, which is what keeps a template called `../../etc` from being
+// a path here.
+func dropKey(template model.ReportTemplate, run model.ReportRun, format string) string {
+	stem := slug(template.Name)
+	if stem == "" {
+		stem = "report"
+	}
+	period := run.PeriodStart.Format("2006-01")
+	return fmt.Sprintf("%s/%s/%s-%s%s", stem, period, stem, period, extensionFor(format))
+}
+
+func boolValue(v any) bool {
+	b, _ := v.(bool)
+	return b
 }

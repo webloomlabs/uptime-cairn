@@ -17,12 +17,57 @@ them, not which files moved.
   you receive it under do.
 - README rewritten around what the tool does and how to install it, with
   screenshots of the dashboard, a monitor, and a status page.
+- **The backup guidance for report artifacts is corrected.** It previously said
+  the local copy of `<data-dir>/reports/` "may be skipped" where the S3 mirror is
+  enabled. That was written before there was a mirror, and it is unsafe: an upload
+  that fails is recorded rather than retried, so a mirror that has been quietly
+  failing looks exactly like one that is working. Keep taking the local copy, or
+  alert on `artifacts[].mirror.state`.
+- The same page said report files are written `0640`; they are written `0600`.
 
 ### Added
 
+- **Public share links for report runs.** `POST /api/v1/report-runs/{id}/share`
+  returns a URL anyone can open; `DELETE` withdraws it immediately, leaving the
+  files untouched. The link is shown **once** — the token is stored hashed for
+  lookup and sealed for replay, so no later read can produce it — and the run
+  thereafter reports only that a link exists, when it expires, and whether the
+  recipient has opened it. The public path serves the **stored artifact, never a
+  re-render**, so the figures a client bookmarked do not change when retention
+  drops a tier. It answers on a separate projection carrying no run, template or
+  monitor identifier, is `noindex` and rate limited, and distinguishes `410`
+  ("this existed and is gone") from `404` ("no such link"), because those are
+  different answers to somebody holding a bookmark. One live link per run:
+  creating a second is refused rather than silently replacing the first.
+- **An optional offsite mirror for report artifacts** (Settings → Report artifact
+  mirror). Every rendered report is copied to an S3-compatible bucket under the
+  same relative path it holds on disk. **Local storage stays the source of truth
+  and the only read path**, so a failed upload is recorded against the artifact
+  with the provider's own message and does not fail the report. Nothing retries a
+  failed upload and nothing reconciles the bucket against the database — check
+  `artifacts[].mirror.state` if you intend to rely on it. Configuration changes
+  take effect on the next report, not the next restart.
+- **`s3` as a report delivery target** — the "drop", which puts one schedule's
+  files into a bucket under a readable key for a recipient. Previously refused
+  with a message saying the client was not built. It is **not** the mirror and the
+  documentation keeps them apart: a drop is a delivery, not a durability copy.
+- An S3-compatible client written against the standard library — SigV4 with
+  `crypto/hmac`, `crypto/sha256` and `net/http`, no vendor SDK and nothing added
+  to `go.mod`. Selectable path-style addressing, an overridable endpoint, and
+  server-side encryption headers passed through. Static credentials only.
 - `NOTICE` file recording copyright and attribution, as Apache 2.0 expects.
 - [`docs/why-uptime-cairn.md`](docs/why-uptime-cairn.md) — the design principles
   and the reasoning behind building another uptime monitor.
+
+### Fixed
+
+- **A report whose file is missing from disk returned `500 Internal error`.** It
+  now returns `410 Gone` with a message naming the reports directory. The state
+  this covers is a database restored without `<data-dir>/reports/` — the silent
+  half of the backup procedure — where "Internal error, the cause has been
+  logged" sends you to a log and naming the missing file sends you to your
+  backup. The run listing was already unaffected and still is. Found by running
+  the documented backup and restore procedure end to end.
 
 ## [1.0.1] — 2026-08-22
 

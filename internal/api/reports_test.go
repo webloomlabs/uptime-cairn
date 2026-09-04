@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,14 @@ import (
 // the stand-in agrees with itself.
 func reportingClient(t *testing.T) *client {
 	t.Helper()
+	c, _ := reportingClientWithFiles(t)
+	return c
+}
+
+// reportingClientWithFiles also hands back the artifact directory, for the one
+// test that needs to take a file away behind the server's back.
+func reportingClientWithFiles(t *testing.T) (*client, *artifact.Store) {
+	t.Helper()
 
 	server, store, api := testAPI(t)
 	files := artifact.New(t.TempDir(), artifact.DefaultMaxBytes)
@@ -33,7 +42,7 @@ func reportingClient(t *testing.T) *client {
 
 	c := newClient(t, server)
 	c.setup()
-	return c
+	return c, files
 }
 
 func createTemplate(t *testing.T, c *client, body map[string]any) string {
@@ -497,4 +506,59 @@ func (c *client) download(t *testing.T, path string) ([]byte, string) {
 		t.Fatalf("download %s = %d (%s)", path, resp.StatusCode, body)
 	}
 	return body, resp.Header.Get("Content-Type")
+}
+
+// **A row whose file is not on disk answers 410, not 500.**
+//
+// This test exists because a backup drill produced a 500. The state it covers is
+// the one ADR-008's Consequences name — "a restore of the database against a
+// stale reports directory yields rows whose files are missing" — and require to
+// render "as a missing file rather than an error page". It is also the only state
+// in which an operator has restored `cairn.db` without `<data-dir>/reports/`,
+// which is the silent half of the backup procedure.
+//
+// 500 was wrong on two counts: the frozen spec declares 200, 401, 404 and 410 for
+// this operation and no 500, and "Internal error, the cause has been logged"
+// sends an operator to a log where naming the missing file sends them to their
+// backup.
+func TestAnArtifactWhoseFileIsGoneAnswersGoneNotInternalError(t *testing.T) {
+	t.Parallel()
+
+	c, files := reportingClientWithFiles(t)
+	runID := sharedRun(t, c, "json")
+
+	_, run := c.do(http.MethodGet, "/api/v1/report-runs/"+runID, nil)
+	artifact := run["artifacts"].([]any)[0].(map[string]any)
+	downloadURL := artifact["download_url"].(string)
+
+	// It downloads before the file is removed, so the test cannot pass by the
+	// artifact never having existed.
+	if body, _ := c.download(t, downloadURL); len(body) == 0 {
+		t.Fatal("the artifact did not download before its file was removed")
+	}
+
+	// The reports directory, emptied — the restore-without-artifacts case,
+	// reproduced by taking the files away behind the server's back exactly as an
+	// incomplete restore does.
+	if err := os.RemoveAll(files.Root()); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, problem := c.do(http.MethodGet, downloadURL, nil)
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("status = %d, want 410 (%v)", resp.StatusCode, problem)
+	}
+	// The detail has to name the cause an operator can act on. A 410 that says
+	// only "gone" is indistinguishable from retention, which is a different fact
+	// and needs no action at all.
+	detail, _ := problem["detail"].(string)
+	if !strings.Contains(detail, "reports/") {
+		t.Errorf("detail = %q, want it to name the reports directory", detail)
+	}
+
+	// The listing still loads, which is the half ADR-008 states outright: the
+	// artifact list must render this rather than error on it.
+	if resp, body := c.do(http.MethodGet, "/api/v1/report-runs?limit=50", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("the run listing = %d with files missing (%v)", resp.StatusCode, body)
+	}
 }
