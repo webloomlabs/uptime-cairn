@@ -660,11 +660,21 @@ export type ReportDeliveryS3 = {
 	secret_access_key?: string;
 };
 
+export type ReportFrequency = 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'cron';
+
 export type ReportSchedule = {
 	id: string;
 	report_template_id: string;
-	frequency: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'cron';
+	name: string;
+	frequency: ReportFrequency;
+	/** Five-field expression, and only accepted when frequency is `cron`. */
 	cron: string | null;
+	/**
+	 * The zone the window is cut in, defaulted from the instance zone **at write
+	 * time** rather than resolved per run — so changing the instance zone does
+	 * not silently move the boundaries of a report somebody has been receiving
+	 * for a year.
+	 */
 	timezone: string;
 	send_at: string | null;
 	enabled: boolean;

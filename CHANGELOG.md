@@ -27,6 +27,14 @@ them, not which files moved.
 
 ### Added
 
+- **Report schedules can be set up from the dashboard.** Reports → Schedules
+  creates, edits and deletes them, and each report row has a **Schedule** link
+  beside **Generate**. This is what sends a client their report on the 1st
+  without anybody being at a keyboard, and until now it existed only as an API
+  endpoint — every schedule had to be created by hand-writing JSON. The form
+  covers frequency (including cron), the send time, the timezone the report's
+  window is cut in, and any number of delivery targets: email, Slack, webhook,
+  or an S3 drop, each with its own choice of formats.
 - **A report template's `sections` now selects what the report contains.** The
   field was stored and round-tripped while nothing read it, so a `custom` report
   rendered the full document regardless. It now emits the blocks it names, in the
@@ -70,6 +78,14 @@ them, not which files moved.
 
 ### Fixed
 
+- **A cron report schedule could never be changed to a fixed frequency.** Saving
+  it as daily, weekly, monthly or quarterly was refused with "cron is only
+  accepted when frequency is cron", because clearing the expression was not
+  expressible — `null` and an omitted field were indistinguishable, so the stored
+  one carried forward. The expression is now cleared when the frequency moves off
+  cron. Supplying an expression *alongside* a fixed frequency is still refused,
+  which is deliberate: a stored expression that never runs is a schedule you
+  believe you configured.
 - **A report whose file is missing from disk was offered for download anyway.**
   The dashboard showed a download link, and clicking it failed. Such an artifact
   is now shown as **File unavailable**, with its digest and size still listed so

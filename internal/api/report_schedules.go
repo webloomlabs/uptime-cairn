@@ -229,8 +229,26 @@ func (s *Server) applySchedule(ctx context.Context, sched *model.ReportSchedule,
 			sched.Frequency = *body.Frequency
 		}
 	}
-	if body.Cron != nil {
+	switch {
+	case body.Cron != nil:
 		sched.Cron = *body.Cron
+	case sched.Frequency != model.ReportFrequencyCron:
+		// **The stored expression is cleared when the frequency moves off cron.**
+		//
+		// Without this a cron schedule could never become a monthly one. `cron` is
+		// a `*string`, so `null` and omitted are the same nil — the stale
+		// expression carried forward, `CronFor` refused the combination, and the
+		// schedule was unsaveable for as long as it existed. Found by driving the
+		// schedules screen, which sends `"cron": null` when the frequency changes,
+		// because that is what the spec's nullable field means.
+		//
+		// This does **not** soften the refusal one function below. A body that
+		// supplies an expression alongside a non-cron frequency still lands in the
+		// first branch and is still refused: a stored expression that never runs
+		// is a schedule an operator believes they configured, and silence there
+		// looks like a bug in the product rather than in the request. What is
+		// cleared here is only an expression the caller has stopped asserting.
+		sched.Cron = ""
 	}
 	if body.Timezone != nil {
 		sched.Timezone = *body.Timezone

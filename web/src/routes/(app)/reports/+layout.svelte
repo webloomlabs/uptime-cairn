@@ -8,11 +8,16 @@
 	/**
 	 * The reporting section's own tabs.
 	 *
-	 * Three screens rather than one, because templates, runs and brand profiles
-	 * are three different jobs done at three different times — writing a
-	 * definition, checking what went out, and setting up a client's identity.
-	 * Collapsing them would put a page of run history in front of somebody who
-	 * came to change a target.
+	 * Four screens rather than one, because templates, schedules, runs and brand
+	 * profiles are four different jobs done at four different times — writing a
+	 * definition, arranging for it to be sent, checking what went out, and
+	 * setting up a client's identity. Collapsing them would put a page of run
+	 * history in front of somebody who came to change a target.
+	 *
+	 * Schedules sit second because that is the order the work happens in: a
+	 * template is written once and then arranged for, and the arranging is what
+	 * turns this section from a report generator into something that sends a
+	 * client their report without anybody being at a keyboard.
 	 *
 	 * Brand profiles carry their own scope, so the tab disappears for a principal
 	 * that cannot read them rather than leading to a 403.
@@ -20,6 +25,7 @@
 	const tabs = $derived(
 		[
 			{ href: '/reports', label: t('reports.templates'), exact: true },
+			{ href: '/reports/schedules', label: t('reports.schedules'), exact: false },
 			{ href: '/reports/runs', label: t('reports.runs'), exact: false },
 			{
 				href: '/reports/brands',

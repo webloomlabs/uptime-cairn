@@ -370,3 +370,117 @@ func problemMessages(body map[string]any) string {
 	}
 	return strings.Join(out, " | ")
 }
+
+// **A cron schedule can be changed to a fixed frequency.**
+//
+// It could not, and the bug was invisible from the API alone: `cron` is a
+// `*string`, so `null` and omitted are the same nil, and the stale expression
+// carried forward into a `CronFor` that refused the combination. The schedule was
+// unsaveable for as long as it existed, and the only way out was to send an empty
+// string — which nothing documents and no client would guess.
+//
+// Found by driving the schedules screen, which sends `"cron": null` when the
+// frequency changes, because that is what the spec's nullable field means.
+func TestACronScheduleCanBecomeAFixedFrequency(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	tpl := createTemplate(t, c, map[string]any{"name": "Monthly", "type": "sla", "formats": []string{"pdf"}})
+
+	body := scheduleFixtureBody(tpl)
+	body["frequency"] = "cron"
+	body["cron"] = "0 9 1,15 * *"
+	resp, created := createSchedule(t, c, body)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d (%v)", resp.StatusCode, created)
+	}
+	id := created["id"].(string)
+
+	// The move a person makes on the form: pick a fixed frequency, and the cron
+	// box disappears along with its value.
+	resp, out := c.do(http.MethodPatch, "/api/v1/report-schedules/"+id,
+		map[string]any{"frequency": "monthly", "cron": nil, "send_at": "08:30"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch = %d, want 200 (%v)", resp.StatusCode, out)
+	}
+	if out["cron"] != nil {
+		t.Errorf("cron = %v, want null once the frequency is not cron", out["cron"])
+	}
+	if out["frequency"] != "monthly" {
+		t.Errorf("frequency = %v, want monthly", out["frequency"])
+	}
+	// And it still fires, which is the point of clearing rather than of the
+	// request merely being accepted.
+	if out["next_run_at"] == nil {
+		t.Error("the schedule has no next run after the change")
+	}
+}
+
+// Omitting `cron` entirely does the same thing, because a `*string` cannot tell
+// omitted from null and both mean "I am no longer asserting an expression".
+func TestOmittingCronAlsoClearsItWhenTheFrequencyMovesOff(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	tpl := createTemplate(t, c, map[string]any{"name": "Monthly", "type": "sla", "formats": []string{"pdf"}})
+
+	body := scheduleFixtureBody(tpl)
+	body["frequency"] = "cron"
+	body["cron"] = "0 9 1,15 * *"
+	_, created := createSchedule(t, c, body)
+	id := created["id"].(string)
+
+	resp, out := c.do(http.MethodPatch, "/api/v1/report-schedules/"+id, map[string]any{"frequency": "weekly"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch = %d, want 200 (%v)", resp.StatusCode, out)
+	}
+	if out["cron"] != nil {
+		t.Errorf("cron = %v, want null", out["cron"])
+	}
+}
+
+// **The refusal this did not soften.** Supplying an expression alongside a
+// non-cron frequency is still refused rather than ignored: a stored expression
+// that never runs is a schedule an operator believes they configured, and the
+// silence looks like a bug in the product rather than in the request.
+func TestAnExpressionWithANonCronFrequencyIsStillRefused(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	tpl := createTemplate(t, c, map[string]any{"name": "Monthly", "type": "sla", "formats": []string{"pdf"}})
+
+	body := scheduleFixtureBody(tpl)
+	body["frequency"] = "monthly"
+	body["cron"] = "0 9 1,15 * *"
+
+	resp, out := createSchedule(t, c, body)
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (%v)", resp.StatusCode, out)
+	}
+	if !strings.Contains(problemMessages(out), "only accepted when frequency is cron") {
+		t.Errorf("messages = %q", problemMessages(out))
+	}
+}
+
+// A cron schedule that keeps its frequency keeps its expression, so editing an
+// unrelated field does not quietly disarm it.
+func TestEditingACronScheduleKeepsItsExpression(t *testing.T) {
+	t.Parallel()
+
+	c := reportingClient(t)
+	tpl := createTemplate(t, c, map[string]any{"name": "Monthly", "type": "sla", "formats": []string{"pdf"}})
+
+	body := scheduleFixtureBody(tpl)
+	body["frequency"] = "cron"
+	body["cron"] = "0 9 1,15 * *"
+	_, created := createSchedule(t, c, body)
+	id := created["id"].(string)
+
+	resp, out := c.do(http.MethodPatch, "/api/v1/report-schedules/"+id, map[string]any{"name": "Renamed"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("patch = %d (%v)", resp.StatusCode, out)
+	}
+	if out["cron"] != "0 9 1,15 * *" {
+		t.Errorf("cron = %v, want the stored expression", out["cron"])
+	}
+}
