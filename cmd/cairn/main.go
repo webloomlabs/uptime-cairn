@@ -34,30 +34,26 @@ func main() {
 // run holds everything main does, so a test can exercise it without exiting the
 // process. main itself stays three lines on purpose.
 func run(args []string, stdout, stderr io.Writer) error {
-	// Subcommands are matched before the flag set, because `cairn import kuma
-	// a.db b.db` has positional arguments and the flag package stops at the
-	// first one. There is exactly one subcommand and it is a verb, so this stays
-	// a switch rather than becoming a command framework.
-	if len(args) > 0 && args[0] == "import" {
-		return runImport(args[1:], stdout, stderr)
+	// Subcommands are matched before the flag set, because subcommands like
+	// `cairn import kuma a.db` or `cairn config validate` have positional
+	// arguments and the flag package stops at the first one. There are only a
+	// couple of subcommands, so this stays a switch rather than becoming a
+	// command framework.
+	if len(args) > 0 {
+		switch args[0] {
+		case "import":
+			return runImport(args[1:], stdout, stderr)
+		case "config":
+			return runConfig(args[1:], stdout, stderr)
+		}
 	}
 
 	fs := flag.NewFlagSet("cairn", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	cfg := config.Default()
-	fs.StringVar(&cfg.Mode, "mode", cfg.Mode, "solo (control plane + embedded probe) or probe (agent only)")
-	fs.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "directory holding the database and any credential file")
-	fs.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "address for the HTTP API and UI")
-	fs.StringVar(&cfg.EncryptionKeyFile, "encryption-key-file", cfg.EncryptionKeyFile,
-		"root key for encryption at rest: 32 bytes, raw or base64 (default: generated into the data dir)")
-	fs.StringVar(&cfg.InstanceName, "instance-name", cfg.InstanceName,
-		"name shown in authenticator apps and on status pages")
-	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL,
-		"public URL of this install, used in alert links (default: none, and alerts carry no link)")
 	var trustedProxies string
-	fs.StringVar(&trustedProxies, "trusted-proxy", "",
-		"comma-separated IPs or CIDRs allowed to set X-Forwarded-For; repeat or list to name several (default: none, and the header is never believed)")
+	bindConfigFlags(fs, &cfg, &trustedProxies)
 	showVersion := fs.Bool("version", false, "print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -72,11 +68,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintln(stdout, version.String())
 		return nil
 	}
-	for _, value := range strings.Split(trustedProxies, ",") {
-		if value = strings.TrimSpace(value); value != "" {
-			cfg.TrustedProxies = append(cfg.TrustedProxies, value)
-		}
-	}
+	applyTrustedProxies(&cfg, trustedProxies)
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -158,4 +150,66 @@ func runImport(args []string, stdout, stderr io.Writer) error {
 	defer stop()
 
 	return app.ImportKuma(ctx, cfg, fs.Args(), opts, stdout)
+}
+
+func bindConfigFlags(fs *flag.FlagSet, cfg *config.Config, trustedProxies *string) {
+	fs.StringVar(&cfg.Mode, "mode", cfg.Mode, "solo (control plane + embedded probe) or probe (agent only)")
+	fs.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "directory holding the database and any credential file")
+	fs.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "address for the HTTP API and UI")
+	fs.StringVar(&cfg.EncryptionKeyFile, "encryption-key-file", cfg.EncryptionKeyFile,
+		"root key for encryption at rest: 32 bytes, raw or base64 (default: generated into the data dir)")
+	fs.StringVar(&cfg.InstanceName, "instance-name", cfg.InstanceName,
+		"name shown in authenticator apps and on status pages")
+	fs.StringVar(&cfg.BaseURL, "base-url", cfg.BaseURL,
+		"public URL of this install, used in alert links (default: none, and alerts carry no link)")
+	fs.StringVar(trustedProxies, "trusted-proxy", "",
+		"comma-separated IPs or CIDRs allowed to set X-Forwarded-For; repeat or list to name several (default: none, and the header is never believed)")
+}
+
+func applyTrustedProxies(cfg *config.Config, trustedProxies string) {
+	for _, value := range strings.Split(trustedProxies, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			cfg.TrustedProxies = append(cfg.TrustedProxies, value)
+		}
+	}
+}
+
+// runConfig handles `cairn config <subcommand> [flags]`.
+func runConfig(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 || args[0] != "validate" {
+		fmt.Fprintln(stderr, "usage: cairn config validate [flags]")
+		fmt.Fprintln(stderr, "\nChecks configuration validity without starting the server or opening databases.")
+		return errors.New("unknown config subcommand")
+	}
+
+	fs := flag.NewFlagSet("cairn config validate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: cairn config validate [flags]")
+		fmt.Fprintln(stderr, "\nValidates configuration without starting the server, opening the database, or binding any port.")
+		fmt.Fprintln(stderr, "\nFlags:")
+		fs.PrintDefaults()
+	}
+
+	cfg := config.Default()
+	var trustedProxies string
+	bindConfigFlags(fs, &cfg, &trustedProxies)
+
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	applyTrustedProxies(&cfg, trustedProxies)
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("configuration invalid: %w", err)
+	}
+
+	fmt.Fprintln(stdout, "configuration valid")
+	return nil
 }
