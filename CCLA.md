@@ -19,7 +19,7 @@ Individuals contributing on their own behalf should sign the
 ## How to sign
 
 1. Complete the details below, sign the Agreement, and complete Schedule A.
-2. Email a scanned copy to `TODO-CLA-CONTACT-EMAIL`.
+2. Email a scanned copy to [shakil@webloomlabs.net](mailto:shakil@webloomlabs.net).
 3. The Company confirms receipt and adds the GitHub usernames on Schedule A to
    the CLA bot's allowlist, so your designated employees are not asked to sign
    individually.
