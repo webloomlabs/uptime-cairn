@@ -128,6 +128,17 @@ var schemas = map[string][]field{
 		{name: "token", kind: kString, secret: true, redact: true},
 		{name: "message_template", kind: kString, template: true},
 	},
+	"pushover": {
+		{name: "api_token", kind: kString, required: true, secret: true, redact: true},
+		{name: "user_key", kind: kString, required: true, secret: true, redact: true},
+		// priority ranges from -2 (lowest / silent) to 1 (high-priority / bypass
+		// quiet hours). 0 is Pushover's default and is omitted when unset or 0.
+		// Priority 2 (emergency) requires retry and expire parameters, so it is capped at 1.
+		{name: "priority", kind: kInt, min: -2, max: 1},
+		{name: "sound", kind: kString},
+		{name: "device", kind: kString},
+		{name: "message_template", kind: kString, template: true},
+	},
 	"msteams": {
 		{name: "webhook_url", kind: kString, required: true, format: "uri", secret: true, redact: true},
 		{name: "message_template", kind: kString, template: true},

@@ -78,6 +78,8 @@ func mapNotification(raw string) (mappedChannel, error) {
 		return mapTwilio(cfg)
 	case "apprise":
 		return mapApprise(cfg)
+	case "pushover":
+		return mapPushover(cfg)
 	default:
 		return mappedChannel{}, &unsupportedProvider{provider: provider}
 	}
@@ -334,4 +336,33 @@ func splitMailbox(raw string) (name, address string) {
 		return "", strings.TrimSpace(raw)
 	}
 	return strings.Trim(strings.TrimSpace(raw[:open]), `"`), strings.TrimSpace(raw[open+1 : closing])
+}
+
+func mapPushover(cfg map[string]any) (mappedChannel, error) {
+	token := pick(cfg, "pushoverapptoken", "pushoverApiToken", "pushoverAPIToken")
+	userKey := pick(cfg, "pushoveruserkey", "pushoverUserKey", "pushoverUser")
+	if token == "" || userKey == "" {
+		return mappedChannel{}, fmt.Errorf("pushover notification is missing api_token or user_key")
+	}
+	out := map[string]any{
+		"api_token": token,
+		"user_key":  userKey,
+	}
+	if pStr := pick(cfg, "pushoverpriority", "pushoverPriority"); pStr != "" {
+		p := int(number(pStr))
+		// Pushover priority ranges from -2 to 1 in this build (2 requires retry/expire).
+		if p > 1 {
+			p = 1
+		}
+		if p >= -2 && p <= 1 {
+			out["priority"] = p
+		}
+	}
+	if sound := pick(cfg, "pushoversounds", "pushoverSound"); sound != "" {
+		out["sound"] = sound
+	}
+	if device := pick(cfg, "pushoverdevice", "pushoverDevice"); device != "" {
+		out["device"] = device
+	}
+	return mappedChannel{Type: "pushover", Config: out}, nil
 }

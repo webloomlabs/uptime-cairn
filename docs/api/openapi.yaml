@@ -5202,6 +5202,7 @@ components:
         - matrix
         - gotify
         - ntfy
+        - pushover
         - msteams
         - mattermost
         - googlechat
@@ -5265,6 +5266,7 @@ components:
         - $ref: "#/components/schemas/MatrixChannel"
         - $ref: "#/components/schemas/GotifyChannel"
         - $ref: "#/components/schemas/NtfyChannel"
+        - $ref: "#/components/schemas/PushoverChannel"
         - $ref: "#/components/schemas/MsTeamsChannel"
         - $ref: "#/components/schemas/MattermostChannel"
         - $ref: "#/components/schemas/GoogleChatChannel"
@@ -5283,6 +5285,7 @@ components:
           matrix: "#/components/schemas/MatrixChannel"
           gotify: "#/components/schemas/GotifyChannel"
           ntfy: "#/components/schemas/NtfyChannel"
+          pushover: "#/components/schemas/PushoverChannel"
           msteams: "#/components/schemas/MsTeamsChannel"
           mattermost: "#/components/schemas/MattermostChannel"
           googlechat: "#/components/schemas/GoogleChatChannel"
@@ -5474,6 +5477,30 @@ components:
                 username: { type: [string, "null"] }
                 password: { type: [string, "null"], writeOnly: true }
                 token: { type: [string, "null"], writeOnly: true }
+                message_template: { type: [string, "null"] }
+
+    PushoverChannel:
+      allOf:
+        - $ref: "#/components/schemas/NotificationChannelCommon"
+        - type: object
+          required: [name, type, config]
+          properties:
+            type: { type: string, const: pushover }
+            config:
+              type: object
+              required: [api_token, user_key]
+              properties:
+                api_token: { type: string, writeOnly: true }
+                user_key: { type: string, writeOnly: true }
+                priority:
+                  type: integer
+                  minimum: -2
+                  maximum: 1
+                  default: 0
+                  description: |
+                    -2 = lowest (no notification), -1 = low, 0 = normal (default), 1 = high.
+                sound: { type: [string, "null"] }
+                device: { type: [string, "null"] }
                 message_template: { type: [string, "null"] }
 
     MsTeamsChannel:

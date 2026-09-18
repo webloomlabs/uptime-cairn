@@ -195,6 +195,26 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 			messageTemplate
 		]
 	},
+	pushover: {
+		label: 'Pushover',
+		summary: 'Send push notifications via Pushover.',
+		fields: [
+			{ key: 'api_token', label: 'API token', kind: 'secret', required: true, secret: true },
+			{ key: 'user_key', label: 'User key', kind: 'secret', required: true, secret: true },
+			{
+				key: 'priority',
+				label: 'Priority',
+				kind: 'number',
+				min: -2,
+				max: 1,
+				hint: '-2 = lowest, 0 = normal (default), 1 = high.',
+				advanced: true
+			},
+			{ key: 'sound', label: 'Sound', kind: 'text', advanced: true },
+			{ key: 'device', label: 'Device name', kind: 'text', advanced: true },
+			messageTemplate
+		]
+	},
 	msteams: {
 		label: 'Microsoft Teams',
 		summary: 'Post to an incoming webhook.',
