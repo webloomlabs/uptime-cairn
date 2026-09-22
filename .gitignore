@@ -3,6 +3,11 @@
 /dist/
 /bin/
 
+# The load harness binary. harness/README.md builds it in place with
+# `go build -o harness .`, which is how a 15 MB executable kept being committed;
+# CI builds its own copy into /tmp and never reads this one.
+/harness/harness
+
 # The frontend build lands in internal/ui/dist and is embedded at compile time.
 # Everything there is generated, including index.html, so nothing is committed
 # except .gitkeep — which exists only so //go:embed has a non-empty directory to
