@@ -9,11 +9,24 @@ them, not which files moved.
 
 ## [Unreleased]
 
-Everything below is on `main` and unreleased. It completes the Phase 2 scope, so
-the next tag is intended to be `1.1.0` — the stable one, at which point
-[COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §1 attaches the `/api/v1` freeze to
-the reporting operations. A report about their shape can still be acted on until
-then.
+## [1.1.0] — 2026-09-22
+
+The Phase 2 release: reporting, stable. It completes the Phase 2 scope. The
+reporting subsystem itself is described under
+[1.1.0-beta.1](#110-beta1--2026-09-04) below; this section is what changed since
+that beta.
+
+**This is the tag that freezes the reporting API.** Per
+[COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §1 the `/api/v1` compatibility
+promise now covers the reporting operations — report templates, schedules, runs,
+artifacts, share links, brand profiles and expiries. From here they change
+compatibly or not at all.
+
+**Upgrading** from `1.0.1` or `1.1.0-beta.1` is a binary or image swap. From
+`1.0.1`, migrations `0008` and `0009` run at start-up; from the beta they are
+already applied and nothing new runs. Reports are written to
+`<data-dir>/reports/`, which now belongs in your backup beside the database —
+see the [backup and restore guide](docs/operations/backup-restore.md).
 
 ### Added
 
@@ -57,11 +70,54 @@ then.
   check scheduling is unaffected — the report worker pool's exit criterion, which
   was previously an argument in a code comment. A regression blocks the merge.
 
+- **Three native notification channels: Pushover, Mattermost and Google Chat.**
+  Each was reachable before only indirectly — through Apprise, or for
+  Mattermost its Slack-compatible webhook; native, they get config validation
+  when saved, a test-send, message templates, and no dependency on the
+  `apprise` binary. Secrets — Pushover's `api_token` and `user_key`, the
+  Mattermost and Google Chat `webhook_url` — are encrypted at rest like every
+  other channel's. Pushover takes an optional `priority` (-2 to 1), `sound` and
+  `device`; Mattermost an optional `channel`, `username` and `icon_url`. The
+  Uptime Kuma importer now maps all three, where it previously reported them as
+  unsupported. See the [alerting guide](docs/guides/alerting.md). The
+  channel-type enum has always told clients to tolerate new values, so this is
+  additive under [COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §3.
+
+- **`cairn config validate`** checks a configuration — the same flags the
+  server takes — without starting the server, opening the database or binding
+  a port. It prints `configuration valid` and exits `0`, or
+  names the problem and exits `1`, so a bad deploy can fail in CI or an init
+  container rather than in a restart loop.
+
+- **`cairn version`**, as a subcommand beside the existing `-version` flag. Both
+  print the same line.
+
+- **`cairn import kuma -report-json <path>`** writes the full import report as
+  JSON, for scripting a migration and checking what did and did not come across.
+  `-` writes it to stdout in place of the human-readable report.
+
+### Changed
+
+- **Contributions now need a signed Contributor License Agreement.** An
+  individual ([CLA.md](CLA.md)) and a corporate ([CCLA.md](CCLA.md)) agreement,
+  adapted from Apache's, collected by a bot on the pull request. Section 9 writes
+  the governance limits into the agreement itself — licensing contributions
+  under anything but Apache 2.0 needs the governance supermajority and 30 days'
+  public notice, and must not remove a capability from the open edition or put
+  one behind payment. Nothing changes for anyone running the software.
+
 ### Fixed
 
 - The load harness measured check lateness against the wrong interval, reporting
   it three times more generously than intended. No released behaviour changes;
   the gate is now as strict as it was documented to be.
+
+### Security
+
+- **gRPC upgraded to v1.83.2 for CVE-2026-84445**, a high-severity
+  denial-of-service in gRPC-Go's xDS server path. Uptime Cairn does not run an xDS
+  server, so no install was exposed through it, but the vulnerable code was
+  linked into the binary and image scanners flag it.
 
 ## [1.1.0-beta.1] — 2026-09-04
 
@@ -239,7 +295,8 @@ SQLite on disk and no database server to run.
   `ghcr.io/webloomlabs/uptime-cairn` and `webloomlabs/uptime-cairn` on Docker Hub.
 - Load-test gate in CI holding the single-instance target of 5,000 monitors.
 
-[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0-beta.1...v1.1.0
 [1.1.0-beta.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.1...v1.1.0-beta.1
 [1.0.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.0-rc.1...v1.0.1
 [1.0.0-rc.1]: https://github.com/webloomlabs/uptime-cairn/releases/tag/v1.0.0-rc.1
