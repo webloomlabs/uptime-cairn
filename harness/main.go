@@ -53,6 +53,7 @@ func main() {
 		minWriteRate = flag.Float64("min-write-rate", 250, "required sustained heartbeats/sec at the largest scale")
 		seed         = flag.Int64("seed", 1, "workload seed; fixed so runs are comparable")
 		jsonOut      = flag.String("json", "", "also write the report as JSON to this path")
+		reportRuns   = flag.Int("report-runs", 50, "on the http target, concurrent report generations to fire at the largest scale; 0 disables the phase")
 	)
 	flag.Parse()
 
@@ -82,6 +83,8 @@ func main() {
 			seed:         *seed,
 			pageSize:     *pageSize,
 			scenarios:    scenarios,
+			reportRuns:   *reportRuns,
+			largestScale: scales[len(scales)-1],
 		})
 		if err != nil {
 			fatal(err)
@@ -123,6 +126,12 @@ type runConfig struct {
 	seed         int64
 	pageSize     int
 	scenarios    []Scenario
+
+	// reportRuns is how many concurrent report generations the burst phase
+	// fires, and largestScale is the scale it is allowed to run at. Zero runs
+	// disables the phase.
+	reportRuns   int
+	largestScale int
 }
 
 func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
@@ -204,6 +213,25 @@ func runScale(ctx context.Context, cfg runConfig) (ScaleResult, error) {
 			live.Clients, live.Scoped, live.Updates, live.Seconds, live.PerClientRate(), live.Foreign)
 	} else {
 		fmt.Println("live phase skipped: this target has no browser-facing update channel")
+	}
+
+	// The report burst, last of the engine phases and only at the largest scale.
+	//
+	// Last because it needs the engine back in steady state and the live phase
+	// above leaves it there. Largest scale only because the criterion is about an
+	// install under load — fifty concurrent renders on a 500-monitor install
+	// measures the pool against an engine with nothing much to delay, which would
+	// pass whatever the pool did.
+	if cfg.reportRuns > 0 && cfg.scale == cfg.largestScale {
+		if reporter, ok := target.(Reporter); ok {
+			reports, err := reporter.MeasureReports(ctx, workload, cfg.reportRuns)
+			if err != nil {
+				return res, fmt.Errorf("report burst at %d monitors: %w", cfg.scale, err)
+			}
+			res.Reports = &reports
+		} else {
+			fmt.Println("report phase skipped: this target has no reporting subsystem to load")
+		}
 	}
 
 	r := rand.New(rand.NewSource(cfg.seed))
@@ -530,6 +558,23 @@ func report(scenarios []Scenario, results []ScaleResult, findings []Finding) {
 		fmt.Printf("  probe      %d results shed, %d checks skipped\n", p.ProbeShed, p.ProbeSkipped)
 	}
 
+	// The report burst, printed as the pair it is measured as. A single "lateness
+	// during" figure would be unreadable — the whole claim is that it did not
+	// move — so the quiet number is always beside it.
+	for _, res := range results {
+		r := res.Reports
+		if r == nil {
+			continue
+		}
+		fmt.Printf("\n%d monitors, %d concurrent report runs:\n", res.Scale, r.Submitted)
+		fmt.Printf("  runs       %d accepted, %d refused, %d completed, %d failed in %s\n",
+			r.Accepted, r.Refused, r.Completed, r.Failed, r.Elapsed.Round(time.Second))
+		fmt.Printf("  lateness   p95 %.2f -> %.2f intervals (quiet -> burst, tolerance +%.2f)\n",
+			r.LatenessBefore, r.LatenessDuring, LatenessTolerance)
+		fmt.Printf("  writes     %.0f/sec -> %.0f/sec\n", r.WriteRateBefore, r.WriteRateDuring)
+		fmt.Printf("  probe      %d results shed, %d checks skipped\n", r.ShedDuring, r.SkippedDuring)
+	}
+
 	if len(findings) == 0 {
 		fmt.Println("\nNo threshold violations.")
 		return
@@ -557,7 +602,9 @@ func writeJSON(path string, scenarios []Scenario, results []ScaleResult, finding
 		Findings  []Finding      `json:"findings"`
 		WriteRate map[string]any `json:"write_rate"`
 		Partition map[string]any `json:"partition,omitempty"`
-	}{Findings: findings, WriteRate: map[string]any{}, Partition: map[string]any{}}
+		Reports   map[string]any `json:"reports,omitempty"`
+	}{Findings: findings, WriteRate: map[string]any{}, Partition: map[string]any{},
+		Reports: map[string]any{}}
 
 	for _, res := range results {
 		for _, sc := range scenarios {
@@ -578,6 +625,9 @@ func writeJSON(path string, scenarios []Scenario, results []ScaleResult, finding
 		}
 		if res.Partition != nil {
 			out.Partition[strconv.Itoa(res.Scale)] = res.Partition
+		}
+		if res.Reports != nil {
+			out.Reports[strconv.Itoa(res.Scale)] = res.Reports
 		}
 	}
 

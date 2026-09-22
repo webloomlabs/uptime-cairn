@@ -233,9 +233,14 @@ func TestNamingBothServiceLevelSectionsDrawsTheBlockOnce(t *testing.T) {
 	}
 }
 
-// The two sections the frozen enum names and nothing composes yet contribute no
-// block, and — this is the part worth asserting — do not fall back to the
-// defaults by looking like an empty selection.
+// `maintenance_log` is named by the frozen enum and composed by nothing, and
+// selecting it contributes no block — without, and this is the part worth
+// asserting, falling back to the defaults by looking like an empty selection.
+//
+// `certificate_expiry` keeps it company here only because this fixture carries
+// no expiries. That is the same rule every optional block follows: a section
+// with nothing behind it draws nothing. What it must not do is resurrect the
+// defaults.
 func TestUncomposedSectionsProduceNoBlockRatherThanTheDefaults(t *testing.T) {
 	t.Parallel()
 

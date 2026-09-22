@@ -269,3 +269,96 @@ func TestGrowthIsNotJudgedOnIncomparableSamples(t *testing.T) {
 		}
 	}
 }
+
+// The report burst's assertions, which are all about a delta rather than an
+// absolute — that is what lets this gate run on a shared runner at all.
+func TestReportBurstAssertions(t *testing.T) {
+	t.Parallel()
+
+	// The passing shape: fifty runs rendered, checks stayed on schedule. The
+	// lateness moves a little because the metric is a whole-second timestamp
+	// sampled twice; that movement is what the tolerance exists for.
+	clean := ScaleResult{Scale: 5000, Reports: &ReportResult{
+		Submitted: 50, Accepted: 50, Completed: 50,
+		LatenessBefore: 1.02, LatenessDuring: 1.09,
+		WriteRateBefore: 250, WriteRateDuring: 249,
+		Elapsed: 40 * time.Second,
+	}}
+	if findings := evaluateReports(clean); len(findings) != 0 {
+		t.Fatalf("a clean report burst produced %v", findings)
+	}
+
+	// **The failure the whole phase exists to catch.** A pool that rendered on
+	// the check path would not add a fraction of an interval; it would add whole
+	// ones, because a PDF takes longer than a check.
+	delayed := ScaleResult{Scale: 5000, Reports: &ReportResult{
+		Submitted: 50, Accepted: 50, Completed: 50,
+		LatenessBefore: 1.03, LatenessDuring: 2.40,
+		WriteRateBefore: 250, WriteRateDuring: 248,
+	}}
+	var scheduling bool
+	for _, f := range evaluateReports(delayed) {
+		if f.Scenario == "reports: check scheduling" && f.Failed {
+			scheduling = true
+		}
+	}
+	if !scheduling {
+		t.Error("checks delayed by more than an interval were not reported as a failure")
+	}
+
+	// A refusal is the designed answer to a full queue and must be reported
+	// without failing the gate — otherwise the correct behaviour blocks a merge.
+	shed := ScaleResult{Scale: 5000, Reports: &ReportResult{
+		Submitted: 50, Accepted: 30, Refused: 20, Completed: 30,
+		LatenessBefore: 1.01, LatenessDuring: 1.05,
+		WriteRateBefore: 250, WriteRateDuring: 250,
+	}}
+	findings := evaluateReports(shed)
+	if len(findings) != 1 || findings[0].Scenario != "reports: queue" {
+		t.Fatalf("a partial refusal produced %v, want one queue finding", findings)
+	}
+	if findings[0].Failed {
+		t.Error("a bounded queue refusing is the design and must not fail the gate")
+	}
+
+	// Refusing everything is different: the queue is too small to be useful.
+	none := ScaleResult{Scale: 5000, Reports: &ReportResult{
+		Submitted: 50, Accepted: 0, Refused: 50,
+		LatenessBefore: 1.01, LatenessDuring: 1.02,
+		WriteRateBefore: 250, WriteRateDuring: 250,
+	}}
+	var refusedAll bool
+	for _, f := range evaluateReports(none) {
+		if f.Scenario == "reports: queue" && f.Failed {
+			refusedAll = true
+		}
+	}
+	if !refusedAll {
+		t.Error("a queue that accepted nothing at all was not reported as a failure")
+	}
+
+	// A run accepted and never finished is neither succeeded nor failed, and it
+	// is the symptom of a pool that is not draining.
+	stuck := ScaleResult{Scale: 5000, Reports: &ReportResult{
+		Submitted: 50, Accepted: 50, Completed: 41, Failed: 0,
+		LatenessBefore: 1.01, LatenessDuring: 1.03,
+		WriteRateBefore: 250, WriteRateDuring: 250,
+		Elapsed: 3 * time.Minute,
+	}}
+	var draining bool
+	for _, f := range evaluateReports(stuck) {
+		if f.Scenario == "reports: drain" && f.Failed {
+			draining = true
+		}
+	}
+	if !draining {
+		t.Error("nine runs that never reached a terminal state were not reported")
+	}
+
+	// A target with no reporting subsystem produces no findings rather than a
+	// pass — the phase did not run, and saying nothing is different from saying
+	// it was fine.
+	if findings := evaluateReports(ScaleResult{Scale: 5000}); findings != nil {
+		t.Errorf("a skipped phase produced %v", findings)
+	}
+}

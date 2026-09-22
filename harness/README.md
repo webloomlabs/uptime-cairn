@@ -71,6 +71,52 @@ Detection is polled through `/monitors/membership`, which is exactly what that
 endpoint is for — a cheap count for a filter, asked repeatedly. Counting through
 the monitor listing would page 5,000 rows to find a number.
 
+### The report phase
+
+The report worker pool's exit criterion, from the Phase 2 plan, is a sentence:
+
+> Fifty PDFs at 09:00 on the 1st must not delay a single check.
+
+That is a claim about **interference**, and interference cannot be read off one
+measurement. An install whose checks are 200ms late during a report burst has
+either a reporting problem or a slow runner, and only a comparison against the
+same install a minute earlier says which. So every figure the phase produces is a
+pair: a quiet window with nothing rendering, then a burst window with fifty
+generations in flight, and the gate asserts on the **delta**.
+
+Measured at 1,000 monitors, fifty concurrent PDF renders:
+
+```
+  runs       50 accepted, 0 refused, 50 completed, 0 failed in 27s
+  lateness   p95 1.00 -> 1.00 intervals (quiet -> burst, tolerance +0.25)
+  writes     50/sec -> 50/sec
+  probe      0 results shed, 0 checks skipped
+```
+
+**Lateness rather than throughput**, because the heartbeat rate is the wrong
+measure here: a pool that delays every check by ten seconds and then catches up
+has an unchanged rate over a sixty-second window and has broken the promise
+exactly as stated. Lateness is how long past its due time each monitor was last
+checked, as a fraction of the interval the engine is scheduling at, read from
+`cairn_monitor_last_check_timestamp_seconds` — a series the engine already
+publishes for operators, because a harness with a private back door measures a
+system nobody else can see. A healthy install sits at 1.00; 2.00 is a whole
+interval missed.
+
+The quiet window comes **first**, and it has to. Taken afterwards it would catch
+the engine draining whatever the burst delayed, and the "quiet" figure would have
+the recovery in it.
+
+A **refusal is reported without failing the gate**. The pool's queue is bounded
+and answers `503` naming the reason, which is the design — an unbounded backlog
+turns a bad morning into memory pressure and then into an OOM kill, taking the
+monitoring down with the reporting. What does fail is refusing *everything*,
+which means the queue is too small to be useful.
+
+The phase runs at the largest scale only. Fifty renders against a 500-monitor
+install measures the pool against an engine with nothing much to delay, which
+would pass whatever the pool did.
+
 ### What the harness cannot fake
 
 Every figure except one comes from the engine's own counters, and a counter that
@@ -138,14 +184,23 @@ go build -o /tmp/cairn ../cmd/cairn
 
 # Or point it at something already running.
 ./harness -target http -base-url http://localhost:3000 -scales 500
+
+# The report burst on its own, without the partition phase.
+./harness -target http -cairn /tmp/cairn -scales 1000 -report-runs 50 -partition=false
 ```
 
-The engine run takes about eight minutes at `-scales 500,5000`: two minutes of it
-is creating 5,000 monitors through the real write path, which is itself one of
-the measurements.
+The engine run takes about thirteen minutes at `-scales 500,5000`: two minutes of
+it is creating 5,000 monitors through the real write path, which is itself one of
+the measurements, and roughly four is the report phase's two sampling windows and
+its drain.
 
 Useful flags: `-target sqlite|http`, `-cairn`, `-engine-dir`, `-partition=false`,
-`-migrations`, `-page-size`, `-rollup-hours`, `-min-write-rate`, `-seed`, `-v`.
+`-report-runs`, `-migrations`, `-page-size`, `-rollup-hours`, `-min-write-rate`,
+`-seed`, `-v`.
+
+`-report-runs 0` disables the report phase, which is what you want when
+bisecting something unrelated: it is the slowest phase and it needs the engine in
+steady state to mean anything.
 
 The workload is deterministic — fixed seed, fixed base time — so two runs
 produce the same shape. A gate that reshuffles its data every run cannot tell a
@@ -200,9 +255,10 @@ incidental:
   would leave the tag and group filters querying things that do not exist — and
   returning nothing, and passing.
 
-`Disruptor` is optional, and the SQLite target does not implement it: with no
-engine underneath, a partition would be the harness writing rows that say "down"
-and reading them back. The run says so rather than skipping the phase quietly.
+`Disruptor` and `Reporter` are optional, and the SQLite target implements
+neither: with no engine underneath, a partition would be the harness writing rows
+that say "down" and reading them back, and a report burst would be the harness
+timing its own loop. The run says so rather than skipping the phase quietly.
 
 The harness applies the **canonical** migrations from `migrations/sqlite/` rather
 than keeping its own copy. A harness with its own schema validates something the
@@ -265,6 +321,17 @@ building this kind of thing rather than reasoning about the numbers:
   created 5000 monitors through the API in 28.683s (174/sec)
     2676 statements queued for the write connection, 1.301s in total, 486µs each
   ```
+
+- **The report phase's own first cut measured lateness three times too
+  generously.** The workload generator stamps `Interval: 60` on every monitor it
+  invents; the HTTP target then creates all of them at the 20-second floor, which
+  is the whole claim the gate exists to measure. Normalising by the generator's
+  number reported a comfortable `0.33` for an install actually sitting at `1.00`,
+  and made the quarter-interval tolerance fifteen real seconds instead of five.
+  The delta assertion survived the mistake intact, which is exactly what made it
+  worth catching: the gate would have passed, and passed, and been three times
+  looser than its own comment claimed. Found by asking why a number that should
+  have sat near 1.0 sat at a third of it — not by reading the code.
 
   1.3 seconds of queueing across eight workers inside 28.7 seconds of creation.
   What remains is the O(N) reload itself, now merely running somewhere it blocks

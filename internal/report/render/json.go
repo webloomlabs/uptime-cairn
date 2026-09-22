@@ -29,6 +29,7 @@ type documentJSON struct {
 	Summary    *estateJSON          `json:"summary"`
 	Monitors   []monitorSectionJSON `json:"monitors"`
 	Incidents  []incidentJSON       `json:"incidents"`
+	Expiries   []upcomingExpiryJSON `json:"expiries"`
 	Comparison *comparisonJSON      `json:"comparison"`
 }
 
@@ -220,6 +221,28 @@ type comparisonSeries struct {
 // and nothing here consults the clock. ADR-007 item 6 requires the same model
 // rendered twice to be byte-identical, and for this format that is the whole of
 // the requirement.
+// upcomingExpiryJSON is UpcomingExpiry, the same schema /api/v1/expiries serves.
+//
+// Restated here rather than shared with internal/api, following this file's own
+// rule and dto.go's: each wire shape is hand-written against the spec where it is
+// used, and the contract tests are what prove the two agree. A shared struct
+// would make one package's field a change to the other's published document.
+//
+// subject and issuer are nullable in the spec and empty in the model — a
+// registration has no issuer and a certificate's is nullable in the schema — so
+// empty becomes null rather than "". A consumer distinguishing "not recorded"
+// from "recorded as blank" gets the answer the schema promised it.
+type upcomingExpiryJSON struct {
+	Kind          string    `json:"kind"`
+	MonitorID     string    `json:"monitor_id"`
+	MonitorName   string    `json:"monitor_name"`
+	Subject       *string   `json:"subject"`
+	Issuer        *string   `json:"issuer"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	DaysRemaining int       `json:"days_remaining"`
+	ObservedAt    time.Time `json:"observed_at"`
+}
+
 func JSON(doc report.Document) ([]byte, error) {
 	out := documentJSON{
 		Meta: metaJSON{
@@ -249,6 +272,7 @@ func JSON(doc report.Document) ([]byte, error) {
 		// client.
 		Monitors:  make([]monitorSectionJSON, 0, len(doc.Monitors)),
 		Incidents: make([]incidentJSON, 0, len(doc.Incidents)),
+		Expiries:  make([]upcomingExpiryJSON, 0, len(doc.Expiries)),
 	}
 
 	if doc.Summary != nil {
@@ -310,6 +334,23 @@ func JSON(doc report.Document) ([]byte, error) {
 			MTTASeconds:    inc.MTTASeconds,
 			MTTRSeconds:    inc.MTTRSeconds,
 			AlertsFired:    inc.AlertsFired,
+		})
+	}
+
+	// The calendar carries into the JSON where the sections selection does not,
+	// and the two are not in tension. Selection is a presentation choice and the
+	// JSON is the data document — it emits what the model holds, and the model
+	// holds a calendar only when the report asked for one.
+	for _, e := range doc.Expiries {
+		out.Expiries = append(out.Expiries, upcomingExpiryJSON{
+			Kind:          e.Kind,
+			MonitorID:     e.MonitorID.String(),
+			MonitorName:   e.MonitorName,
+			Subject:       emptyToNil(e.Subject),
+			Issuer:        emptyToNil(e.Issuer),
+			ExpiresAt:     e.ExpiresAt,
+			DaysRemaining: e.DaysRemaining,
+			ObservedAt:    e.ObservedAt,
 		})
 	}
 

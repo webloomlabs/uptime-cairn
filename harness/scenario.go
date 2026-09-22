@@ -281,6 +281,12 @@ type ScaleResult struct {
 	// Live is nil when the target has no browser-facing update channel, which
 	// is again the SQLite target: there is no server to open a stream against.
 	Live *LiveResult
+
+	// Reports is nil where the report burst did not run — the SQLite target,
+	// which has no worker pool or renderer, and every scale below the largest,
+	// where the phase would measure a pool against an engine with nothing to
+	// delay.
+	Reports *ReportResult
 }
 
 // PartitionResult is what happened when every monitored endpoint failed at once.
@@ -446,6 +452,7 @@ func Evaluate(scenarios []Scenario, results []ScaleResult, minWriteRate float64)
 	findings = append(findings, evaluateWrites(large, minWriteRate)...)
 	findings = append(findings, evaluatePartition(large)...)
 	findings = append(findings, evaluateSeeding(small, large)...)
+	findings = append(findings, evaluateReports(large)...)
 	return findings
 }
 
@@ -606,6 +613,117 @@ func evaluatePartition(large ScaleResult) []Finding {
 			Scenario: "partition: ingest",
 			Failed:   true,
 			Detail:   fmt.Sprintf("%d results could not be attributed to a monitor", p.Rejected),
+		})
+	}
+	return findings
+}
+
+// LatenessTolerance is how much check lateness the report burst may add.
+//
+// **The criterion is "must not delay a single check", and this is not a
+// softening of it — it is what makes it measurable on a shared runner.** Check
+// lateness on a quiet install does not sit at exactly 1.0: the scheduler ticks,
+// the metric is a whole-second Unix timestamp, and the two samples are taken
+// seconds apart. A gate demanding zero movement would fail on rounding and would
+// be turned off within a month, which is worse than a gate with a stated
+// tolerance.
+//
+// A quarter of an interval is the number because it is far below the thing the
+// criterion is protecting against. A pool that serialised rendering onto the
+// check path would not add a quarter of an interval; it would add whole ones,
+// because a PDF takes longer to render than a check takes to run. This catches
+// that with a wide margin and does not catch a slow runner.
+const LatenessTolerance = 0.25
+
+// WriteRateTolerance is how far the heartbeat rate may fall during the burst,
+// as a fraction of the quiet rate. Ten per cent: the rate is bounded by
+// arithmetic rather than by capacity, so any sustained fall is the scheduler
+// losing time to something, and the only candidate during this phase is the
+// reporting.
+const WriteRateTolerance = 0.10
+
+// evaluateReports is the report worker pool's exit criterion, as a verdict.
+//
+// The claim under test is interference, so every assertion here is on a delta
+// between the quiet window and the burst window rather than on an absolute. That
+// is deliberate and it is what lets this run on a GitHub runner at all: the
+// absolute numbers on a shared machine are noise, and the difference between two
+// windows taken ninety seconds apart on the same machine is not.
+func evaluateReports(large ScaleResult) []Finding {
+	r := large.Reports
+	if r == nil {
+		return nil
+	}
+	var findings []Finding
+
+	// **The headline assertion.** Fifty PDFs must not delay a check.
+	if added := r.LatenessDuring - r.LatenessBefore; added > LatenessTolerance {
+		findings = append(findings, Finding{
+			Scenario: "reports: check scheduling",
+			Failed:   true,
+			Detail: fmt.Sprintf(
+				"check lateness p95 rose from %.2f to %.2f intervals while %d reports rendered (+%.2f, tolerance %.2f) — the report pool is delaying checks, which is the one thing it is bounded to prevent",
+				r.LatenessBefore, r.LatenessDuring, r.Accepted, added, LatenessTolerance),
+		})
+	}
+
+	if r.WriteRateBefore > 0 {
+		floor := r.WriteRateBefore * (1 - WriteRateTolerance)
+		if r.WriteRateDuring < floor {
+			findings = append(findings, Finding{
+				Scenario: "reports: engine throughput",
+				Failed:   true,
+				Detail: fmt.Sprintf(
+					"heartbeat rate fell from %.0f/sec to %.0f/sec during the burst (floor %.0f/sec) — the scheduler is losing time to report rendering",
+					r.WriteRateBefore, r.WriteRateDuring, floor),
+			})
+		}
+	}
+
+	// Shedding is correct behaviour under overload and is still a finding, on
+	// the same reasoning the partition phase applies to its queues: a probe that
+	// sheds silently is indistinguishable from one that kept up.
+	if r.SkippedDuring > 0 || r.ShedDuring > 0 {
+		findings = append(findings, Finding{
+			Scenario: "reports: probe",
+			Failed:   true,
+			Detail: fmt.Sprintf(
+				"the probe skipped %d checks and shed %d results during the report burst",
+				r.SkippedDuring, r.ShedDuring),
+		})
+	}
+
+	// A refusal is the design and is reported without failing: the queue is
+	// bounded and answers 503 rather than growing. What would be wrong is
+	// refusing *everything*, which means the queue is too small to be useful.
+	if r.Refused > 0 {
+		failed := r.Accepted == 0
+		findings = append(findings, Finding{
+			Scenario: "reports: queue",
+			Failed:   failed,
+			Detail: fmt.Sprintf(
+				"%d of %d generations were refused by the bounded queue (%d accepted) — a refusal is the designed answer to a full queue, not a fault",
+				r.Refused, r.Submitted, r.Accepted),
+		})
+	}
+
+	if r.Failed > 0 {
+		findings = append(findings, Finding{
+			Scenario: "reports: rendering",
+			Failed:   true,
+			Detail:   fmt.Sprintf("%d accepted runs failed to render", r.Failed),
+		})
+	}
+
+	// Accepted but never finished is neither a success nor a failure state on
+	// the run, and it is the symptom of a pool that is not draining.
+	if stuck := r.Accepted - r.Completed - r.Failed; stuck > 0 {
+		findings = append(findings, Finding{
+			Scenario: "reports: drain",
+			Failed:   true,
+			Detail: fmt.Sprintf(
+				"%d of %d accepted runs had not reached a terminal state when the phase gave up after %s",
+				stuck, r.Accepted, r.Elapsed.Round(time.Second)),
 		})
 	}
 	return findings

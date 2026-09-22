@@ -51,12 +51,70 @@
 	let busy = $state<string | null>(null);
 	let span = $state('24h');
 
+	/**
+	 * The preset windows, and they deliberately reach past a month.
+	 *
+	 * The Phase 1 plan's complaint was a default UI "week-blinkered like Kuma's",
+	 * and a picker whose longest option is thirty days answers it only halfway:
+	 * retention keeps daily buckets indefinitely, so a year is a question the data
+	 * can already answer and the screen simply never asked.
+	 */
 	const SPANS: Record<string, number> = {
 		'1h': 3600_000,
 		'24h': 86_400_000,
 		'7d': 604_800_000,
-		'30d': 2_592_000_000
+		'30d': 2_592_000_000,
+		'90d': 7_776_000_000,
+		'1y': 31_536_000_000
 	};
+
+	/**
+	 * The drilldown: an explicit window rather than a distance back from now.
+	 *
+	 * A preset answers "how has it been lately"; this answers "what happened in
+	 * March", which is a different question and the one a relative picker cannot
+	 * express at all. Held as `datetime-local` strings because that is what the
+	 * inputs read and write, and converted once at the point of use.
+	 */
+	const CUSTOM = 'custom';
+	let customFrom = $state('');
+	let customTo = $state('');
+	let rangeProblem = $state<string | null>(null);
+
+	/** Local wall-clock, in the shape `datetime-local` wants. */
+	function localInput(at: Date): string {
+		const pad = (n: number) => String(n).padStart(2, '0');
+		return (
+			`${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}` +
+			`T${pad(at.getHours())}:${pad(at.getMinutes())}`
+		);
+	}
+
+	/**
+	 * The window to ask for, or null when the custom range is not usable yet.
+	 *
+	 * The refusal is here rather than at the server because an empty second field
+	 * is a half-typed range and not an error somebody should be told about — the
+	 * chart simply keeps showing what it was showing. A backwards range *is* worth
+	 * saying out loud, because it looks like a working control that returns
+	 * nothing.
+	 */
+	function windowFor(): { from: Date; to: Date } | null {
+		if (span !== CUSTOM) {
+			const to = new Date();
+			return { from: new Date(to.getTime() - SPANS[span]), to };
+		}
+		if (!customFrom || !customTo) return null;
+		const from = new Date(customFrom);
+		const to = new Date(customTo);
+		if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return null;
+		if (from >= to) {
+			rangeProblem = t('monitor.rangeBackwards');
+			return null;
+		}
+		rangeProblem = null;
+		return { from, to };
+	}
 
 	// The uptime bar's own window, fixed at twenty-four hours in one-hour stones
 	// so that it says what the heading beside it says. It is a second request
@@ -74,10 +132,15 @@
 	}
 
 	async function loadHistory() {
-		const to = new Date();
-		const from = new Date(to.getTime() - SPANS[span]);
+		const range = windowFor();
+		if (!range) return;
+		// `resolution` is left at the server's default of `auto`, which is the
+		// whole point: the tier is chosen from the span by the same rule a report
+		// follows, and the answer comes back saying which one it picked. Asking for
+		// a fixed tier here would produce a chart that is silently empty the moment
+		// somebody drills past that tier's retention.
 		history = await api.get<History>(
-			`/monitors/${id}/history?from=${from.toISOString()}&to=${to.toISOString()}`
+			`/monitors/${id}/history?from=${range.from.toISOString()}&to=${range.to.toISOString()}`
 		);
 	}
 
@@ -154,10 +217,37 @@
 		return () => clearInterval(timer);
 	});
 
-	// The range picker, which reloads only the chart.
+	// The range picker, which reloads only the chart. All three inputs are tracked
+	// so that editing either end of a custom range redraws it.
 	$effect(() => {
 		void span;
+		void customFrom;
+		void customTo;
 		if (untrack(() => monitor)) void loadHistory().catch(() => {});
+	});
+
+	/**
+	 * Where the data actually begins, when that is later than what was asked for.
+	 *
+	 * Retention truncates the start of a long window silently: the response echoes
+	 * the requested `from` and the buckets simply start later. Drawing that without
+	 * saying so is a chart that looks like an outage-free year when it is really a
+	 * year the install has not been running for. The comparison is against the
+	 * first bucket rather than a stored coverage figure because the history
+	 * response carries no `covered_from` — the report document has one, this
+	 * endpoint does not, and inventing a field would be an API change.
+	 *
+	 * A bucket's width of slack, so that a window starting mid-bucket does not
+	 * report a truncation that is really just alignment.
+	 */
+	const coverageBegins = $derived.by(() => {
+		if (!history || history.data.length === 0) return null;
+		const asked = new Date(history.from).getTime();
+		const first = new Date(history.data[0].bucket_start).getTime();
+		const second =
+			history.data.length > 1 ? new Date(history.data[1].bucket_start).getTime() : first;
+		const bucketWidth = Math.max(second - first, 60_000);
+		return first - asked > bucketWidth ? history.data[0].bucket_start : null;
 	});
 
 	const target = $derived(monitor ? monitorTarget(monitor) : '');
@@ -337,7 +427,7 @@
 			<section class="card space-y-3 p-5">
 				<div class="flex flex-wrap items-center justify-between gap-3">
 					<h2 class="font-semibold">{t('monitor.responseTime')}</h2>
-					<div class="flex gap-1">
+					<div class="flex flex-wrap gap-1">
 						{#each Object.keys(SPANS) as option (option)}
 							<button
 								type="button"
@@ -351,10 +441,91 @@
 								{option}
 							</button>
 						{/each}
+						<!--
+							The drilldown, beside the presets rather than behind a disclosure.
+							A relative picker and an absolute range answer different questions
+							— "how has it been lately" against "what happened in March" — and
+							hiding the second one is what made the screen week-blinkered.
+						-->
+						<button
+							type="button"
+							class="rounded-md px-2.5 py-1 text-xs transition-colors"
+							style={span === CUSTOM
+								? 'background-color: var(--surface-hover); font-weight: 600'
+								: 'color: var(--text-muted)'}
+							aria-pressed={span === CUSTOM}
+							onclick={() => {
+								// Seeded with the window currently on screen, so opening the
+								// control starts from what is being looked at rather than from
+								// two empty fields.
+								if (span !== CUSTOM) {
+									const now = new Date();
+									customTo = localInput(now);
+									customFrom = localInput(new Date(now.getTime() - SPANS[span]));
+								}
+								span = CUSTOM;
+							}}
+						>
+							{t('monitor.rangeCustom')}
+						</button>
 					</div>
 				</div>
+
+				{#if span === CUSTOM}
+					<div class="flex flex-wrap items-end gap-3">
+						<label class="text-xs">
+							<span class="muted mb-1 block">{t('monitor.rangeFrom')}</span>
+							<input type="datetime-local" class="field text-sm" bind:value={customFrom} />
+						</label>
+						<label class="text-xs">
+							<span class="muted mb-1 block">{t('monitor.rangeTo')}</span>
+							<input type="datetime-local" class="field text-sm" bind:value={customTo} />
+						</label>
+					</div>
+					{#if rangeProblem}
+						<p class="text-xs" style="color: var(--color-down)">{rangeProblem}</p>
+					{/if}
+				{/if}
+
 				{#if history}
 					<HistoryChart buckets={history.data} from={history.from} to={history.to} />
+
+					<!--
+						**The resolution actually used, on every chart rather than only on the
+						drilled-into ones.**
+
+						This is the half of the deliverable that makes the other half honest.
+						The tier is chosen from the span, so a year of history is a chart of
+						daily buckets and a p95 that no longer exists at that grain — and a
+						reader who is not told will compare it against an hourly chart from
+						last week as though the two were the same measurement. Retention
+						decides what can answer; this says what did.
+					-->
+					<p class="muted text-xs">
+						{t('monitor.resolutionUsed', { resolution: t(`monitor.tier.${history.resolution}`) })}
+						{#if coverageBegins}
+							· {t('monitor.coverageBegins', { at: formatAbsolute(coverageBegins) })}
+						{/if}
+					</p>
+
+					<!--
+						**An empty range and an untroubled one must not look alike.**
+
+						The tier is chosen from the span, so drilling into a month that is
+						past the hourly tier's retention asks for hours that no longer
+						exist and draws nothing — while the daily buckets for that same
+						month are still there. The chart's own "no heartbeats" reads as a
+						fact about the monitor; it is really a fact about the resolution,
+						and saying which is the difference between a reader concluding the
+						service was never checked and a reader widening the range.
+					-->
+					{#if history.data.length === 0}
+						<p class="text-xs" style="color: var(--color-pending)">
+							{t('monitor.emptyAtResolution', {
+								resolution: t(`monitor.tier.${history.resolution}`)
+							})}
+						</p>
+					{/if}
 				{:else}
 					<Spinner />
 				{/if}

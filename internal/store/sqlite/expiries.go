@@ -99,6 +99,20 @@ func (s *Store) ListUpcomingExpiries(
 		}
 	}
 
+	// Monitors narrow both halves the same way, and by IN rather than EXISTS:
+	// the set is already a list of primary keys, so there is no subquery to
+	// avoid duplicates from. An empty set never reaches here — a report whose
+	// scope resolved to no monitors does not ask.
+	if len(filter.MonitorIDs) > 0 {
+		clause := ` AND %s.monitor_id IN (` + placeholders(len(filter.MonitorIDs)) + `)`
+		certificates += fmt.Sprintf(clause, "c")
+		domains += fmt.Sprintf(clause, "d")
+		for _, id := range filter.MonitorIDs {
+			certArgs = append(certArgs, id[:])
+			domainArgs = append(domainArgs, id[:])
+		}
+	}
+
 	// The kind filter drops a whole branch rather than filtering the union, so
 	// an operator asking only for domains does not read the certificate index at
 	// all.

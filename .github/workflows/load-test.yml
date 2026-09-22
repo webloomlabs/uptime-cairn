@@ -109,9 +109,11 @@ jobs:
     name: 5,000-monitor gate (engine and UI)
     runs-on: ubuntu-latest
     # Longer than the storage gate: this one runs a real engine at both scales,
-    # waits for each to reach steady state, breaks every endpoint at once, and
-    # measures the browser channel. Roughly eight minutes of work, with headroom
-    # for a slow runner.
+    # waits for each to reach steady state, breaks every endpoint at once,
+    # measures the browser channel, and then renders fifty reports at the largest
+    # scale while watching the scheduler. Roughly thirteen minutes of work, with
+    # headroom for a slow runner — the report phase adds two 25-second sampling
+    # windows and up to three minutes of drain.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -151,6 +153,16 @@ jobs:
       # at 5,000 monitors is 1,250 heartbeats — few enough that the scheduler's
       # dispersal lands unevenly inside it and the ratio measures the window
       # rather than the engine.
+      #
+      # -report-runs 50 is the Phase 2 addition, and it is the report worker
+      # pool's exit criterion made into a gate: *fifty PDFs at 09:00 on the 1st
+      # must not delay a single check*. It runs at the largest scale only, after
+      # the live phase has left the engine in steady state, and it asserts on the
+      # delta between a quiet window and a burst window rather than on absolute
+      # latency — an absolute figure on a shared runner is noise, and the
+      # difference between two windows ninety seconds apart on the same machine
+      # is not. A regression here blocks the merge, which is the same standing
+      # every other assertion in this file has.
       - name: Run gate
         run: |
           /tmp/cairn-harness \
@@ -159,6 +171,7 @@ jobs:
             -scales 500,5000 \
             -iterations 100 \
             -write-seconds 30 \
+            -report-runs 50 \
             -json /tmp/load-test-engine.json
 
       - name: Upload results

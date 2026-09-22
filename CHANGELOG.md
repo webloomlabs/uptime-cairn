@@ -9,6 +9,60 @@ them, not which files moved.
 
 ## [Unreleased]
 
+Everything below is on `main` and unreleased. It completes the Phase 2 scope, so
+the next tag is intended to be `1.1.0` — the stable one, at which point
+[COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §1 attaches the `/api/v1` freeze to
+the reporting operations. A report about their shape can still be acted on until
+then.
+
+### Added
+
+- **Certificate and domain expiry calendar in reports.** A `custom` report can
+  now include a **Certificates and domains** section: everything in the report's
+  scope expiring within 90 days, soonest first, with anything already lapsed at
+  the top carrying how long ago it went. This is the same collection
+  `/api/v1/expiries` and the Expiries screen read, so a report and the screen
+  cannot disagree about what is running out. It appears in the HTML and the PDF
+  when the section is selected, and in the JSON artifact as `expiries` — the
+  field the document schema has always declared and nothing filled.
+
+  The section is offered on `custom` templates only, because that is the only
+  report type whose document carries a calendar. A template switched away from
+  `custom` drops the selection rather than keeping a block nobody can see to
+  remove.
+
+- **Preview a rendered report without downloading it.** Run history now offers
+  **Preview** beside **Download** on an HTML artifact, showing the report inline.
+  It serves the _stored_ artifact rather than re-rendering, so it answers the
+  question people actually bring to it — what did we send? — and the figures
+  cannot have moved since the client got theirs. The document is displayed in a
+  fully sandboxed frame: no scripts, no access to the dashboard's session, its
+  own opaque origin.
+
+- **Browse history over any past range.** A monitor's availability chart gains
+  90-day and 1-year presets and a **Custom range** control taking explicit start
+  and end times, so "what happened in March" is now a question the dashboard can
+  answer rather than only "how has it been lately".
+
+  Every chart now states **the resolution it was actually drawn at** — per check,
+  one minute, five minute, hourly or daily. The tier is chosen from the span, so
+  a year of history is daily buckets and last week is far finer; a reader
+  comparing the two without being told would be comparing different measurements.
+  Where a range reaches further back than the install holds, the chart says when
+  the data actually begins instead of drawing an outage-free stretch that is
+  really an install that did not exist yet.
+
+- **The load-test gate now covers report rendering.** The 5,000-monitor gate
+  fires 50 concurrent report generations at its largest scale and asserts that
+  check scheduling is unaffected — the report worker pool's exit criterion, which
+  was previously an argument in a code comment. A regression blocks the merge.
+
+### Fixed
+
+- The load harness measured check lateness against the wrong interval, reporting
+  it three times more generously than intended. No released behaviour changes;
+  the gate is now as strict as it was documented to be.
+
 ## [1.1.0-beta.1] — 2026-09-04
 
 The Phase 2 reporting subsystem, released as a beta. Everything below is
@@ -105,7 +159,7 @@ shape of these endpoints can still be acted on rather than deferred to
   accepted when frequency is cron", because clearing the expression was not
   expressible — `null` and an omitted field were indistinguishable, so the stored
   one carried forward. The expression is now cleared when the frequency moves off
-  cron. Supplying an expression *alongside* a fixed frequency is still refused,
+  cron. Supplying an expression _alongside_ a fixed frequency is still refused,
   which is deliberate: a stored expression that never runs is a schedule you
   believe you configured.
 - **A report whose file is missing from disk was offered for download anyway.**
@@ -136,7 +190,7 @@ shape of these endpoints can still be acted on rather than deferred to
   `down_count` with a null `response_time_min`; that is correct. Existing rollup
   rows are not rewritten — the correction applies from upgrade onward.
 - **Notification channel forms showed the wrong default.** Boolean fields the
-  server defaults to *on* — "use the instance SMTP settings", "verify the TLS
+  server defaults to _on_ — "use the instance SMTP settings", "verify the TLS
   certificate" — rendered as unchecked, so the first save failed on a setting
   that already looked the way the user wanted it. Field specs now carry their
   server-side default.

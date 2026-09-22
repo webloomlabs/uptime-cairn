@@ -170,6 +170,23 @@ type Store interface {
 	// report and the incident screen cannot come to disagree about what "in this
 	// window" means.
 	ListIncidents(ctx context.Context, after *store.Cursor, limit int, filter store.IncidentFilter) ([]model.Incident, bool, error)
+
+	// ListUpcomingExpiries supplies the certificate and domain expiry calendar,
+	// narrowed to the monitors in scope through ExpiryFilter's MonitorIDs.
+	//
+	// Reused verbatim from the API's own store for the same reason ListIncidents
+	// is: /api/v1/expiries and the calendar section of a report are two views of
+	// one collection, and a second query would let the screen an operator checks
+	// and the document a client is sent come to disagree about what is expiring.
+	//
+	// It takes `now` rather than deriving it, because `days_remaining` is
+	// computed against an instant rather than stored. The instant a report passes
+	// is its own generated_at, not the wall clock — a document regenerated in
+	// December must not report a different number of days than the one it
+	// replaces, and ADR-007 requires the same model rendered twice to be
+	// byte-identical.
+	ListUpcomingExpiries(ctx context.Context, after *store.Cursor, limit int,
+		filter store.ExpiryFilter, now time.Time) ([]model.UpcomingExpiry, bool, error)
 }
 
 // Deliberately absent, so that the gaps are decisions rather than omissions:
@@ -183,11 +200,6 @@ type Store interface {
 // which reads as alarming and carries no signal. The daily series gives the same
 // shape of information from a statistic that only moves on sustained
 // degradation, which is why DailySeries is here and a MinMax method is not.
-//
-// Certificate and domain expiries. The document has a place for them and the
-// data exists, but the query that answers /api/v1/expiries returns rows this
-// package has no type for yet, and inventing one before that endpoint is written
-// is exactly what store.go warns against. It joins when the endpoint does.
 //
 // Anything that writes. A run's lifecycle — templates, schedules, artifacts,
 // deliveries, share links — is the API's half of the surface and belongs to the

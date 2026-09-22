@@ -249,3 +249,80 @@ func tagNamed(t *testing.T, s *Store, name string) model.ID {
 	}
 	return tag.ID
 }
+
+// A report reads the calendar for the monitors it covers, and nothing else.
+//
+// The scope of a report resolves to a set of monitor IDs before it gets here, so
+// the narrowing is by primary key rather than by tag. Both halves of the union
+// have to honour it: a filter applied to the certificate branch alone would leak
+// every domain on the install into one client's report, which is the failure that
+// matters here and the reason the test seeds a monitor of each kind outside the
+// scope.
+func TestMonitorFilteringNarrowsBothHalvesOfTheUnion(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	inScope := mustCreate(t, s, testMonitor("client-api"))
+	alsoInScope := mustCreate(t, s, testMonitor("client-site"))
+	elsewhere := mustCreate(t, s, testMonitor("another-clients-api"))
+	elsewhereDomain := mustCreate(t, s, testMonitor("another-clients-site"))
+
+	seedCertificate(t, s, inScope.ID, "client-api.example.com", "CA", calendarNow.AddDate(0, 0, 10))
+	seedDomain(t, s, alsoInScope.ID, "client.example", "Registrar", calendarNow.AddDate(0, 0, 20))
+	seedCertificate(t, s, elsewhere.ID, "other.example.com", "CA", calendarNow.AddDate(0, 0, 5))
+	seedDomain(t, s, elsewhereDomain.ID, "other.example", "Registrar", calendarNow.AddDate(0, 0, 7))
+
+	entries, _, err := s.ListUpcomingExpiries(t.Context(), nil, 25,
+		store.ExpiryFilter{MonitorIDs: []model.ID{inScope.ID, alsoInScope.ID}}, calendarNow)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("%d entries, want the 2 in scope — the two soonest expiries on "+
+			"this install belong to another client and must not appear", len(entries))
+	}
+	// Ordering survives the narrowing, which is what lets the report print the
+	// rows in the order the store returned them.
+	if entries[0].Subject != "client-api.example.com" || entries[1].Subject != "client.example" {
+		t.Errorf("entries = %q, %q — want the certificate then the domain, soonest first",
+			entries[0].Subject, entries[1].Subject)
+	}
+}
+
+// Monitors and tags intersect rather than union.
+//
+// A report scoped to a set of monitors that also names a tag is asking for
+// "these monitors, of which the tagged ones". Unioning them would widen a
+// client's report to every monitor carrying a tag, which is the wrong direction
+// for a filter to fail in: too much in a client's document is a disclosure, and
+// too little is a gap somebody notices.
+func TestMonitorAndTagFiltersIntersect(t *testing.T) {
+	t.Parallel()
+
+	s := open(t)
+	both := mustCreate(t, s, testMonitor("tagged-and-in-scope"))
+	scopedOnly := mustCreate(t, s, testMonitor("in-scope-untagged"))
+	taggedOnly := mustCreate(t, s, testMonitor("tagged-out-of-scope"))
+
+	for _, m := range []model.Monitor{both, scopedOnly, taggedOnly} {
+		seedCertificate(t, s, m.ID, m.Name, "CA", calendarNow.AddDate(0, 0, 10))
+	}
+
+	tag := tagNamed(t, s, "acme")
+	for _, id := range []model.ID{both.ID, taggedOnly.ID} {
+		if err := s.SetMonitorTags(t.Context(), id, model.SentinelOrgID, []model.ID{tag}); err != nil {
+			t.Fatalf("tag monitor: %v", err)
+		}
+	}
+
+	entries, _, err := s.ListUpcomingExpiries(t.Context(), nil, 25, store.ExpiryFilter{
+		MonitorIDs: []model.ID{both.ID, scopedOnly.ID},
+		TagIDs:     []model.ID{tag},
+	}, calendarNow)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Subject != "tagged-and-in-scope" {
+		t.Fatalf("entries = %+v, want only the monitor satisfying both filters", entries)
+	}
+}

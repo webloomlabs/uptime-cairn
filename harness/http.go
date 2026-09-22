@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -255,6 +257,11 @@ func (t *HTTPTarget) authenticate(ctx context.Context) error {
 			"monitors:read", "monitors:write", "heartbeats:read",
 			"groups:read", "groups:write", "tags:read", "tags:write",
 			"webhooks:read", "webhooks:write", "metrics:read",
+			// The reporting pair, for the report-burst phase. Requested here
+			// rather than minted separately because a second key would measure a
+			// second authentication path for no reason — the phase is about the
+			// worker pool, not about scopes.
+			"reports:read", "reports:write",
 		},
 	}
 	headers := map[string]string{"X-Cairn-CSRF-Token": session.CSRFToken}
@@ -1140,4 +1147,332 @@ func (t *HTTPTarget) waitForSteadyState(ctx context.Context, expected float64) (
 			return time.Since(start), nil
 		}
 	}
+}
+
+// MeasureReports fires a burst of concurrent report generations and measures
+// what it did to check scheduling.
+//
+// This is the report worker pool's exit criterion made into a measurement:
+// *fifty PDFs at 09:00 on the 1st must not delay a single check*. Everything
+// about the shape of this function follows from that sentence being a claim
+// about interference rather than about reporting throughput.
+//
+// # Why a template per burst rather than one reused
+//
+// One template generated fifty times would queue fifty runs against the same
+// scope, which is the realistic shape — an agency's monthly batch is many
+// clients, not one client fifty times — but it also lets the store answer every
+// run from the same warm pages. Distinct scopes are the harsher and more honest
+// load, so the templates are cut across the workload's monitors.
+//
+// # PDF, deliberately, and not JSON
+//
+// The criterion names PDFs because the PDF backend is the expensive one: it
+// lays out pages, shapes text against a real font and emits a document, where
+// the JSON renderer is a struct walk. Measuring the cheap format would be
+// measuring the wrong thing and would pass a pool that could not survive the
+// real one.
+func (t *HTTPTarget) MeasureReports(ctx context.Context, w *Workload, runs int) (ReportResult, error) {
+	out := ReportResult{Submitted: runs}
+	if runs <= 0 || len(w.Monitors) == 0 {
+		return out, nil
+	}
+
+	// The quiet window first. It has to come before the burst rather than after,
+	// because after the burst the engine is draining whatever the burst delayed
+	// and the "quiet" figure would carry the recovery in it.
+	before, err := t.sampleScheduling(ctx, w, reportSampleWindow)
+	if err != nil {
+		return out, err
+	}
+	out.LatenessBefore, out.WriteRateBefore = before.lateness, before.writeRate
+
+	templates, err := t.createReportTemplates(ctx, w, runs)
+	if err != nil {
+		return out, err
+	}
+
+	countersBefore, err := t.Counters(ctx)
+	if err != nil {
+		return out, err
+	}
+
+	// The burst. Every generation is submitted as concurrently as the client
+	// will allow, because the failure being looked for is a pool that blocks its
+	// caller — and a submission loop that waited for each response in turn would
+	// serialise exactly the thing under test.
+	started := time.Now()
+	var wg sync.WaitGroup
+	var accepted, refused atomic.Int64
+	runIDs := make([]string, len(templates))
+
+	for i, template := range templates {
+		wg.Add(1)
+		go func(i int, template string) {
+			defer wg.Done()
+			var created struct {
+				ID string `json:"id"`
+			}
+			err := t.call(ctx, http.MethodPost, "/api/v1/report-templates/"+template+"/generate",
+				map[string]any{}, &created, nil)
+			switch {
+			case err == nil:
+				accepted.Add(1)
+				runIDs[i] = created.ID
+			case strings.Contains(err.Error(), "503"):
+				// **A refusal is the design, not a failure.** The queue is
+				// bounded and answers 503 naming the reason; an unbounded
+				// backlog is what turns a bad morning into an OOM kill. It is
+				// counted and reported rather than retried.
+				refused.Add(1)
+			default:
+				refused.Add(1)
+			}
+		}(i, template)
+	}
+	wg.Wait()
+
+	out.Accepted, out.Refused = int(accepted.Load()), int(refused.Load())
+
+	// The second window, taken while the accepted runs are rendering. This is
+	// the measurement the whole phase exists for.
+	during, err := t.sampleScheduling(ctx, w, reportSampleWindow)
+	if err != nil {
+		return out, err
+	}
+	out.LatenessDuring, out.WriteRateDuring = during.lateness, during.writeRate
+
+	completed, failed := t.drainReportRuns(ctx, runIDs)
+	out.Completed, out.Failed = completed, failed
+	out.Elapsed = time.Since(started)
+
+	countersAfter, err := t.Counters(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.SkippedDuring = countersAfter.ProbeSkippedChecks - countersBefore.ProbeSkippedChecks
+	out.ShedDuring = countersAfter.ProbeShedResults - countersBefore.ProbeShedResults
+
+	fmt.Printf("reports: %d submitted, %d accepted, %d refused, %d completed, %d failed in %s\n",
+		out.Submitted, out.Accepted, out.Refused, out.Completed, out.Failed,
+		out.Elapsed.Round(time.Second))
+	fmt.Printf("  check lateness p95 %.2f intervals quiet -> %.2f during the burst; "+
+		"writes %.0f/sec -> %.0f/sec; probe skipped %d, shed %d\n",
+		out.LatenessBefore, out.LatenessDuring, out.WriteRateBefore, out.WriteRateDuring,
+		out.SkippedDuring, out.ShedDuring)
+	return out, nil
+}
+
+// reportSampleWindow is how long each of the two scheduling samples runs.
+//
+// Long enough that a 20-second check interval turns over at least once inside
+// it, because a window shorter than the interval measures whichever monitors
+// happened to be due and says nothing about the fleet.
+const reportSampleWindow = 25 * time.Second
+
+// schedulingSample is one window's view of whether checks are on time.
+type schedulingSample struct {
+	// lateness is the p95 across the fleet of (now - last checked) divided by
+	// the monitor's own interval. A healthy install sits near 1.
+	lateness float64
+
+	writeRate float64
+}
+
+// sampleScheduling measures check timeliness over one window.
+//
+// It reads `cairn_monitor_last_check_timestamp_seconds`, which the engine
+// publishes per monitor for operators — the harness deliberately has no private
+// back door, because a measurement nobody else can take is one nobody else can
+// check.
+func (t *HTTPTarget) sampleScheduling(ctx context.Context, w *Workload, window time.Duration) (schedulingSample, error) {
+	var out schedulingSample
+
+	first, err := t.Counters(ctx)
+	if err != nil {
+		return out, err
+	}
+	start := time.Now()
+
+	select {
+	case <-ctx.Done():
+		return out, ctx.Err()
+	case <-time.After(window):
+	}
+
+	second, err := t.Counters(ctx)
+	if err != nil {
+		return out, err
+	}
+	out.writeRate = float64(second.HeartbeatsWritten-first.HeartbeatsWritten) / time.Since(start).Seconds()
+
+	lateness, err := t.checkLateness(ctx, w)
+	if err != nil {
+		return out, err
+	}
+	out.lateness = lateness
+	return out, nil
+}
+
+// checkLateness reads the per-monitor last-check timestamps and returns the p95
+// of how overdue they are, in units of the interval the engine is scheduling at.
+//
+// Normalised rather than reported in seconds so the figure means the same thing
+// at any interval: "1.0" is a monitor checked exactly one interval ago, which is
+// the steady state of a healthy install, and "2.0" is a whole interval missed.
+// A raw p95 in seconds would have to be read against the schedule every time.
+//
+// # The divisor is monitorInterval, not w.Monitors[i].Interval
+//
+// This was wrong in the first cut and the run said so rather than the author.
+// The workload generator stamps `Interval: 60` on every monitor it invents;
+// createMonitors then creates all of them through the API at `monitorInterval`,
+// which is 20, because the 20-second floor is the claim the whole gate exists to
+// measure. Dividing by the generator's 60 understated lateness threefold — the
+// phase reported a comfortable 0.33 for an install actually sitting at 1.0, and
+// the quarter-interval tolerance was silently fifteen real seconds instead of
+// five.
+//
+// The delta assertion survived the mistake, which is exactly why it was worth
+// catching: the gate would have passed and passed and been three times looser
+// than its own comment claimed. The engine's schedule is the only honest
+// divisor, and the HTTP target is the thing that set it.
+func (t *HTTPTarget) checkLateness(ctx context.Context, w *Workload) (float64, error) {
+	body, err := t.callRaw(ctx, http.MethodGet, "/metrics")
+	if err != nil {
+		return 0, err
+	}
+
+	// The set of ids this run created, so a monitor left behind by something
+	// else on the instance cannot enter the sample.
+	known := make(map[string]bool, len(w.Monitors))
+	for _, m := range w.Monitors {
+		known[hexUUID(m.ID)] = true
+	}
+
+	now := float64(time.Now().Unix())
+	var ratios []float64
+	for _, line := range strings.Split(string(body), "\n") {
+		if !strings.HasPrefix(line, "cairn_monitor_last_check_timestamp_seconds{") {
+			continue
+		}
+		name, value, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		at, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || at <= 0 {
+			// A monitor that has never been checked has no lateness to report,
+			// and counting it as infinitely late would make the first sample of
+			// a fresh install fail for a reason that is about seeding.
+			continue
+		}
+		if !known[metricLabel(name, "monitor_id")] {
+			continue
+		}
+		ratios = append(ratios, (now-at)/float64(monitorInterval))
+	}
+	if len(ratios) == 0 {
+		return 0, nil
+	}
+
+	sort.Float64s(ratios)
+	rank := int(math.Ceil(0.95*float64(len(ratios)))) - 1
+	if rank < 0 {
+		rank = 0
+	}
+	return ratios[rank], nil
+}
+
+// metricLabel pulls one label value out of a Prometheus series name.
+func metricLabel(series, label string) string {
+	open := strings.IndexByte(series, '{')
+	if open < 0 {
+		return ""
+	}
+	for _, pair := range strings.Split(strings.TrimSuffix(series[open+1:], "}"), ",") {
+		key, value, found := strings.Cut(pair, "=")
+		if found && key == label {
+			return strings.Trim(value, `"`)
+		}
+	}
+	return ""
+}
+
+// createReportTemplates cuts one PDF template per run, each over its own slice
+// of the workload.
+func (t *HTTPTarget) createReportTemplates(ctx context.Context, w *Workload, runs int) ([]string, error) {
+	// Twenty-five monitors apiece: the size of a client report, which is the
+	// scope the phase plan's P95MaxMonitors constant is chosen for and therefore
+	// the shape of report that actually gets scheduled fifty times over.
+	const scope = 25
+
+	out := make([]string, 0, runs)
+	for i := 0; i < runs; i++ {
+		ids := make([]string, 0, scope)
+		for j := 0; j < scope; j++ {
+			m := w.Monitors[(i*scope+j)%len(w.Monitors)]
+			ids = append(ids, hexUUID(m.ID))
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		err := t.call(ctx, http.MethodPost, "/api/v1/report-templates", map[string]any{
+			"name":         fmt.Sprintf("load %d", i),
+			"type":         "uptime",
+			"period":       "month",
+			"period_style": "calendar",
+			"formats":      []string{"pdf"},
+			"scope":        map[string]any{"monitor_ids": ids},
+		}, &created, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create report template %d: %w", i, err)
+		}
+		out = append(out, created.ID)
+	}
+	return out, nil
+}
+
+// drainReportRuns waits for the accepted runs to reach a terminal state.
+//
+// Bounded, because "they never finished" is a finding this phase must be able to
+// report rather than hang on. A run still running at the deadline counts as
+// neither completed nor failed, and the gap between Accepted and Completed is
+// what says so.
+func (t *HTTPTarget) drainReportRuns(ctx context.Context, runIDs []string) (completed, failed int) {
+	const deadline = 3 * time.Minute
+
+	pending := make(map[string]bool, len(runIDs))
+	for _, id := range runIDs {
+		if id != "" {
+			pending[id] = true
+		}
+	}
+
+	until := time.Now().Add(deadline)
+	for len(pending) > 0 && time.Now().Before(until) {
+		select {
+		case <-ctx.Done():
+			return completed, failed
+		case <-time.After(2 * time.Second):
+		}
+
+		for id := range pending {
+			var run struct {
+				State string `json:"state"`
+			}
+			if err := t.call(ctx, http.MethodGet, "/api/v1/report-runs/"+id, nil, &run, nil); err != nil {
+				continue
+			}
+			switch run.State {
+			case "succeeded", "partial":
+				completed++
+				delete(pending, id)
+			case "failed":
+				failed++
+				delete(pending, id)
+			}
+		}
+	}
+	return completed, failed
 }

@@ -145,15 +145,17 @@ func ComposeSections(doc report.Document, brand Brand, sections []string) []Elem
 			if len(doc.Incidents) > 0 {
 				out = append(out, incidentSection(doc)...)
 			}
-		case model.SectionMaintenanceLog, model.SectionCertificateExpiry:
+		case model.SectionCertificateExpiry:
+			if len(doc.Expiries) > 0 {
+				out = append(out, expirySection(doc, loc)...)
+			}
+		case model.SectionMaintenanceLog:
 			// **Named by the frozen enum and not composed by anything.**
 			//
-			// Selecting one is accepted at the API — it is a valid section — and
+			// Selecting it is accepted at the API — it is a valid section — and
 			// contributes no block, which is the honest behaviour while the
-			// document model has no element for either. A maintenance log needs a
-			// windows query the report store does not have; a certificate expiry
-			// table is the expiry-calendar report type, which is its own piece of
-			// work with its own entry on the Phase 2 checklist.
+			// document model has no element for it: a maintenance log needs a
+			// windows query the report store does not have.
 			//
 			// Silently absent rather than refused, because refusing at render
 			// time would fail a queued run over a choice the API accepted, and
@@ -163,6 +165,97 @@ func ComposeSections(doc report.Document, brand Brand, sections []string) []Elem
 
 	out = append(out, Footer{Text: brand.FooterText, HidePoweredBy: brand.HidePoweredBy})
 	return out
+}
+
+// expirySection draws the certificate and domain calendar.
+//
+// **Sorted by the store, not here.** The rows arrive soonest-first from one
+// ordered query, which is what makes the section's whole claim — "this is what
+// runs out next" — true of the table as printed. Re-sorting would be a second
+// opinion about an order that is already the collection's contract.
+//
+// The heading counts what is over rather than what is ahead, because a table
+// whose first rows are negative reads as broken unless the reader is told. A
+// calendar with nothing expired says so by omission: the note is absent rather
+// than reading "0 expired", which is a reassurance nobody asked for.
+func expirySection(doc report.Document, loc *time.Location) []Element {
+	out := []Element{Heading{Text: "Certificates and domains", Level: 1}}
+
+	var expired int
+	for _, e := range doc.Expiries {
+		if e.DaysRemaining < 0 {
+			expired++
+		}
+	}
+	if expired > 0 {
+		out = append(out, Paragraph{
+			Text: fmt.Sprintf("%s of the %s below %s already expired.",
+				thousands(expired), thousands(len(doc.Expiries)),
+				plural(expired, "has", "have")),
+		})
+	}
+
+	table := Table{Columns: []Column{
+		{Title: "Subject"},
+		{Title: "Kind"},
+		{Title: "Monitor"},
+		{Title: "Issuer"},
+		{Title: "Expires"},
+		{Title: "Days left", Numeric: true},
+	}}
+	for _, e := range doc.Expiries {
+		table.Rows = append(table.Rows, []string{
+			dashIfEmpty(e.Subject),
+			e.Kind,
+			e.MonitorName,
+			dashIfEmpty(e.Issuer),
+			e.ExpiresAt.In(loc).Format("2 Jan 2006"),
+			expiryDays(e.DaysRemaining),
+		})
+	}
+	out = append(out, table)
+
+	// The horizon is on the face of the report, because an empty-looking
+	// calendar and a calendar that was asked a narrow question look identical
+	// otherwise — and §4.3's rule that a figure carries what produced it does not
+	// stop at the percentages.
+	out = append(out, Paragraph{
+		Muted: true,
+		Text: fmt.Sprintf("Everything expiring within %d days of %s, soonest first. "+
+			"Entries that have already expired are listed with a negative count.",
+			report.ExpiryHorizonDays, doc.Meta.GeneratedAt.In(loc).Format("2 January 2006")),
+	})
+	return out
+}
+
+// expiryDays writes the signed day count the way a reader parses it fastest: a
+// bare number ahead, and an explicit "expired" behind, because a lone "-11" in a
+// numeric column is read as eleven before it is read as minus eleven.
+func expiryDays(days int) string {
+	if days < 0 {
+		return fmt.Sprintf("expired %d %s ago", -days, plural(-days, "day", "days"))
+	}
+	return thousands(days)
+}
+
+// dashIfEmpty fills a cell the source had nothing for. A certificate always has
+// a subject and a registration always has a domain, but issuer and registrar are
+// both nullable in the schema, and an empty cell in a table reads as a rendering
+// fault rather than as an absent fact.
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// plural picks between two forms. Written out rather than suffixing an "s",
+// because the callers here need "has"/"have" as well as a count.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // monitorSection draws one monitor's blocks, in the order the template named

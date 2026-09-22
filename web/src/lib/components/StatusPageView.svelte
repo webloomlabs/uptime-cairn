@@ -360,7 +360,16 @@
 				{/if}
 				<p>{t('public.updated', { when: formatRelative(sp.generated_at) })}</p>
 				{#if sp.show_powered_by}
-					<p>{t('public.poweredBy')}</p>
+					<p>
+						<a
+							href="https://uptimecairn.dev"
+							target="_blank"
+							rel="noopener noreferrer"
+							class="underline"
+						>
+							{t('public.poweredBy')}
+						</a>
+					</p>
 				{/if}
 			</footer>
 		</div>
