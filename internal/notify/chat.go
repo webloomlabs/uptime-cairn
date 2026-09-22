@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// The five chat destinations. Each one is somebody else's JSON shape and
+// The six chat destinations. Each one is somebody else's JSON shape and
 // nothing more interesting than that — which is the point of writing them
 // natively rather than routing everything through the meta-provider: no Python
 // runtime in the container, and an error message that came from Slack.
@@ -197,4 +197,56 @@ func sendMatrix(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, erro
 		headers:     map[string]string{"Authorization": "Bearer " + c.str("access_token", "")},
 		verifyTLS:   true,
 	})
+}
+
+func sendMattermost(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error) {
+	text, err := message(c, "message_template", ev)
+	if err != nil {
+		return Receipt{}, err
+	}
+
+	payload := map[string]any{
+		"text": Title(ev),
+		"attachments": []any{map[string]any{
+			"color":     fmt.Sprintf("#%06X", colourFor(ev)),
+			"text":      text,
+			"fallback":  Title(ev),
+			"footer":    ev.Instance.Name,
+			"mrkdwn_in": []string{"text"},
+		}},
+	}
+	if v := c.str("channel", ""); v != "" {
+		payload["channel"] = v
+	}
+	if v := c.str("username", ""); v != "" {
+		payload["username"] = v
+	}
+	if v := c.str("icon_url", ""); v != "" {
+		payload["icon_url"] = v
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return Receipt{}, err
+	}
+	return s.postJSON(ctx, c.str("webhook_url", ""), body, nil)
+}
+
+// sendGoogleChat posts to a Google Chat incoming webhook. The API takes a flat
+// {"text": ...} document — no attachments, no colour — so the title and the
+// rendered message are joined into one body.
+func sendGoogleChat(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error) {
+	text, err := message(c, "message_template", ev)
+	if err != nil {
+		return Receipt{}, err
+	}
+
+	payload := map[string]any{
+		"text": Title(ev) + "\n\n" + text,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return Receipt{}, err
+	}
+	return s.postJSON(ctx, c.str("webhook_url", ""), body, nil)
 }

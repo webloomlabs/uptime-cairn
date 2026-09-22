@@ -274,3 +274,39 @@ func TestAnIntervalBelowTheFloorIsRaised(t *testing.T) {
 		t.Errorf("timeout %s is not below the interval %s, which the schema requires", m.Timeout, m.Interval)
 	}
 }
+
+func TestKumaPushoverNotificationMapping(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"type": "pushover",
+		"pushoverapptoken": "app_token_123",
+		"pushoveruserkey": "user_key_456",
+		"pushoverpriority": "1",
+		"pushoversounds": "alien",
+		"pushoverdevice": "iphone"
+	}`
+
+	mapped, err := mapNotification(raw)
+	if err != nil {
+		t.Fatalf("mapNotification: %v", err)
+	}
+	if mapped.Type != "pushover" {
+		t.Fatalf("mapped.Type = %q, want pushover", mapped.Type)
+	}
+	if mapped.Config["api_token"] != "app_token_123" {
+		t.Errorf("api_token = %v, want app_token_123", mapped.Config["api_token"])
+	}
+	if mapped.Config["user_key"] != "user_key_456" {
+		t.Errorf("user_key = %v, want user_key_456", mapped.Config["user_key"])
+	}
+	if mapped.Config["priority"] != 1 {
+		t.Errorf("priority = %v, want 1", mapped.Config["priority"])
+	}
+	if mapped.Config["sound"] != "alien" {
+		t.Errorf("sound = %v, want alien", mapped.Config["sound"])
+	}
+	if mapped.Config["device"] != "iphone" {
+		t.Errorf("device = %v, want iphone", mapped.Config["device"])
+	}
+}

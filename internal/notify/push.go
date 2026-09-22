@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -78,5 +80,64 @@ func sendNtfy(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error)
 		body:        body,
 		headers:     headers,
 		verifyTLS:   true,
+	})
+}
+
+// sendPushover delivers a notification through Pushover's API
+// (https://pushover.net/api). It posts an application token and a user key
+// which together authenticate and route the message — the same pair that
+// identifies both sender and recipient.
+//
+// Pushover's endpoint is https://api.pushover.net/1/messages.json. The
+// body is form-encoded, not JSON, matching their documented format.
+func sendPushover(ctx context.Context, s *Sender, c conf, ev Event) (Receipt, error) {
+	text, err := message(c, "message_template", ev)
+	if err != nil {
+		return Receipt{}, err
+	}
+
+	// Pushover limits: title is 250 characters, message is 1024 characters.
+	// truncate appends "… (truncated)" (15 bytes) when shortening, so trim
+	// under each limit to guarantee the final payload stays within Pushover's bounds.
+	title := truncate(Title(ev), 230)
+	msg := truncate(text, 1000)
+
+	form := url.Values{}
+	form.Set("token", c.str("api_token", ""))
+	form.Set("user", c.str("user_key", ""))
+	form.Set("title", title)
+	form.Set("message", msg)
+
+	// priority ranges from -2 (lowest) to 1 (high). 0 is Pushover's default
+	// and is omitted when unset or 0. Priority 2 (emergency) requires retry/expire.
+	if p := c.num("priority", 0); p != 0 {
+		form.Set("priority", strconv.Itoa(int(p)))
+	}
+	if sound := c.str("sound", ""); sound != "" {
+		form.Set("sound", sound)
+	}
+	if device := c.str("device", ""); device != "" {
+		form.Set("device", device)
+	}
+
+	// The form body contains the api_token and user_key; record only the
+	// rendered message so credentials do not appear in the delivery log.
+	// Fall back to title or a placeholder so record is never empty, which
+	// would otherwise cause Sender.do to record the raw form body.
+	record := msg
+	if record == "" {
+		record = title
+	}
+	if record == "" {
+		record = "(empty message)"
+	}
+
+	encoded := []byte(form.Encode())
+	return s.do(ctx, request{
+		url:         "https://api.pushover.net/1/messages.json",
+		contentType: "application/x-www-form-urlencoded",
+		body:        encoded,
+		verifyTLS:   true,
+		record:      record,
 	})
 }

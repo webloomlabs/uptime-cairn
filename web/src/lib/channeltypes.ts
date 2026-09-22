@@ -195,11 +195,55 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 			messageTemplate
 		]
 	},
+	pushover: {
+		label: 'Pushover',
+		summary: 'Send push notifications via Pushover.',
+		fields: [
+			{ key: 'api_token', label: 'API token', kind: 'secret', required: true, secret: true },
+			{ key: 'user_key', label: 'User key', kind: 'secret', required: true, secret: true },
+			{
+				key: 'priority',
+				label: 'Priority',
+				kind: 'number',
+				min: -2,
+				max: 1,
+				hint: '-2 = lowest, 0 = normal (default), 1 = high.',
+				advanced: true
+			},
+			{ key: 'sound', label: 'Sound', kind: 'text', advanced: true },
+			{ key: 'device', label: 'Device name', kind: 'text', advanced: true },
+			messageTemplate
+		]
+	},
 	msteams: {
 		label: 'Microsoft Teams',
 		summary: 'Post to an incoming webhook.',
 		fields: [
 			{ key: 'webhook_url', label: 'Webhook URL', kind: 'secret', required: true, secret: true },
+			messageTemplate
+		]
+	},
+	googlechat: {
+		label: 'Google Chat',
+		summary: 'Post to an incoming webhook.',
+		fields: [
+			{ key: 'webhook_url', label: 'Webhook URL', kind: 'secret', required: true, secret: true },
+			messageTemplate
+		]
+	},
+	mattermost: {
+		label: 'Mattermost',
+		summary: 'Post to an incoming webhook.',
+		fields: [
+			{ key: 'webhook_url', label: 'Webhook URL', kind: 'secret', required: true, secret: true },
+			{
+				key: 'channel',
+				label: 'Channel',
+				kind: 'text',
+				hint: 'Optional channel name override (e.g. town-square).'
+			},
+			{ key: 'username', label: 'Username', kind: 'text', hint: 'Optional username override.' },
+			{ key: 'icon_url', label: 'Icon URL', kind: 'url', hint: 'Optional icon image URL.' },
 			messageTemplate
 		]
 	},

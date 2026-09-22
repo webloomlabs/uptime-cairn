@@ -1,6 +1,6 @@
 # Alerting
 
-Thirteen channel types, what each one needs, and the two things about the system
+Sixteen channel types, what each one needs, and the two things about the system
 as a whole that are worth knowing before you configure any of them.
 
 ---
@@ -128,7 +128,26 @@ generates.
 instance. `priority` (1–5), `tags`, and an `auth_type` of `none`, `basic`
 (`username`/`password`), or `token`.
 
+### Pushover
+
+`api_token` (encrypted) and `user_key` (encrypted) are both required.
+Register an application at [pushover.net](https://pushover.net) to obtain
+the token; the user key is on your Pushover account dashboard.
+
+Optional: `priority` (-2 to 1, default 0), `sound` (any Pushover sound name),
+`device` (to target a specific device rather than all your devices).
+
 ### Microsoft Teams
+
+`webhook_url` (encrypted) and an optional `message_template`.
+
+### Mattermost
+
+`webhook_url` (encrypted), with optional `channel` (channel name override, e.g.
+`town-square`), `username`, `icon_url`, and `message_template`. Notifications
+render with colour-coded attachments indicating status (`up`, `down`, `pending`).
+
+### Google Chat
 
 `webhook_url` (encrypted) and an optional `message_template`.
 

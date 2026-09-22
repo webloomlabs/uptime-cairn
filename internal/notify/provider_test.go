@@ -146,6 +146,37 @@ func TestProvidersDeliver(t *testing.T) {
 			},
 		},
 		{
+			channelType: "googlechat",
+			config:      cfg(`{"webhook_url":"https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=t"}`),
+			check: func(t *testing.T, got sent) {
+				body := decodeBody(t, got.body)
+				text, ok := body["text"].(string)
+				if !ok || !strings.Contains(text, `[DOWN] API "edge"`) {
+					t.Errorf("text = %v", body["text"])
+				}
+			},
+		},
+		{
+			channelType: "mattermost",
+			config:      cfg(`{"webhook_url":"https://mattermost.example.com/hooks/x","channel":"town-square","username":"cairn","icon_url":"https://example.com/icon.png"}`),
+			check: func(t *testing.T, got sent) {
+				body := decodeBody(t, got.body)
+				if body["channel"] != "town-square" {
+					t.Errorf("channel = %v", body["channel"])
+				}
+				if body["username"] != "cairn" {
+					t.Errorf("username = %v", body["username"])
+				}
+				if body["icon_url"] != "https://example.com/icon.png" {
+					t.Errorf("icon_url = %v", body["icon_url"])
+				}
+				attachments, ok := body["attachments"].([]any)
+				if !ok || len(attachments) != 1 {
+					t.Fatalf("attachments = %v", body["attachments"])
+				}
+			},
+		},
+		{
 			channelType: "telegram",
 			config:      cfg(`{"bot_token":"123:abc","chat_id":"-100","parse_mode":"HTML"}`),
 			check: func(t *testing.T, got sent) {
@@ -248,6 +279,34 @@ func TestProvidersDeliver(t *testing.T) {
 				}
 				if form.Get("To") != "+2" || form.Get("From") != "+1" {
 					t.Errorf("form = %v", form)
+				}
+			},
+		},
+		{
+			channelType: "pushover",
+			config:      cfg(`{"api_token":"tok123","user_key":"usr456","priority":1}`),
+			check: func(t *testing.T, got sent) {
+				form, err := url.ParseQuery(got.body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Credentials must be in the form body, not the query string
+				// (a query string appears in server access logs).
+				if got.query.Get("token") != "" {
+					t.Error("api_token leaked into query string")
+				}
+				if form.Get("token") != "tok123" {
+					t.Errorf("token = %q, want tok123", form.Get("token"))
+				}
+				if form.Get("user") != "usr456" {
+					t.Errorf("user = %q, want usr456", form.Get("user"))
+				}
+				if form.Get("priority") != "1" {
+					t.Errorf("priority = %q, want 1", form.Get("priority"))
+				}
+				// Message must be present; title comes from the event.
+				if form.Get("message") == "" {
+					t.Error("message is empty")
 				}
 			},
 		},
@@ -392,4 +451,42 @@ func TestRateLimitIsRetryable(t *testing.T) {
 
 func asProviderError(err error, target **ProviderError) bool {
 	return errors.As(err, target)
+}
+
+func TestPushoverEmptyTemplateDoesNotLeakCredentials(t *testing.T) {
+	t.Parallel()
+
+	// A template that evaluates to empty string, e.g. {{monitor.description}}
+	// when description is empty.
+	config := cfg(`{"api_token":"secret_token_123","user_key":"secret_user_456","message_template":"{{monitor.description}}"}`)
+	sender, recorded := testSender(t, http.StatusOK, `{"status":1}`)
+
+	ev := sampleEvent()
+	ev.Monitor.Description = ""
+
+	receipt, err := sender.Send(context.Background(), "pushover", config, ev)
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Form body was sent to Pushover with credentials
+	got := recorded.get()
+	form, err := url.ParseQuery(got.body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("token") != "secret_token_123" {
+		t.Errorf("token = %q, want secret_token_123", form.Get("token"))
+	}
+	if form.Get("user") != "secret_user_456" {
+		t.Errorf("user = %q, want secret_user_456", form.Get("user"))
+	}
+
+	// But receipt.Payload (which goes into delivery logs) MUST NOT contain secrets.
+	if strings.Contains(receipt.Payload, "secret_token_123") || strings.Contains(receipt.Payload, "secret_user_456") {
+		t.Fatalf("receipt.Payload leaked credentials: %q", receipt.Payload)
+	}
+	if receipt.Payload != Title(ev) {
+		t.Errorf("receipt.Payload = %q, want fallback to title %q", receipt.Payload, Title(ev))
+	}
 }

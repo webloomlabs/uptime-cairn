@@ -2,9 +2,42 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/webloomlabs/uptime-cairn/internal/model"
+
+	_ "modernc.org/sqlite"
 )
+
+func TestVersionSubcommandMatchesFlag(t *testing.T) {
+	var commandOut, flagOut bytes.Buffer
+	if err := run([]string{"version"}, &commandOut, &bytes.Buffer{}); err != nil {
+		t.Fatalf("version subcommand: %v", err)
+	}
+	if err := run([]string{"-version"}, &flagOut, &bytes.Buffer{}); err != nil {
+		t.Fatalf("-version flag: %v", err)
+	}
+	if commandOut.String() != flagOut.String() {
+		t.Fatalf("version output differs:\nsubcommand: %q\nflag: %q", commandOut.String(), flagOut.String())
+	}
+}
+
+func TestRootHelpListsSubcommands(t *testing.T) {
+	var stderr bytes.Buffer
+	if err := run([]string{"-h"}, &bytes.Buffer{}, &stderr); err != nil {
+		t.Fatalf("help: %v", err)
+	}
+	for _, command := range []string{"import", "config", "version"} {
+		if !strings.Contains(stderr.String(), command) {
+			t.Fatalf("help does not list %q:\n%s", command, stderr.String())
+		}
+	}
+}
 
 func TestConfigValidateValidDefault(t *testing.T) {
 	var stdout, stderr bytes.Buffer
@@ -108,5 +141,125 @@ func TestConfigHelp(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "usage: cairn config validate") {
 		t.Errorf("expected usage in stderr, got: %q", stderr.String())
+	}
+}
+
+func seedTestKuma(t *testing.T, dir string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "kuma.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open kuma.db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	schema := `CREATE TABLE monitor (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(150), description TEXT,
+		active BOOLEAN DEFAULT 1, type VARCHAR(20), url TEXT, hostname VARCHAR(255), port INTEGER,
+		interval INTEGER DEFAULT 60, retry_interval INTEGER DEFAULT 60, resend_interval INTEGER DEFAULT 0,
+		timeout DOUBLE DEFAULT 0, maxretries INTEGER DEFAULT 0, upside_down BOOLEAN DEFAULT 0,
+		parent INTEGER, keyword VARCHAR(255), invert_keyword BOOLEAN DEFAULT 0,
+		accepted_statuscodes_json TEXT DEFAULT '["200-299"]', method TEXT DEFAULT 'GET',
+		basic_auth_user TEXT, basic_auth_pass TEXT, auth_method VARCHAR(250),
+		ignore_tls BOOLEAN DEFAULT 0, max_redirects INTEGER DEFAULT 10,
+		dns_resolve_type VARCHAR(5), docker_container VARCHAR(255), push_token VARCHAR(20),
+		proxy_id INTEGER);
+	CREATE TABLE tag (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255), color VARCHAR(20));
+	CREATE TABLE monitor_tag (id INTEGER PRIMARY KEY AUTOINCREMENT, monitor_id INTEGER, tag_id INTEGER, value TEXT);
+	CREATE TABLE notification (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255),
+		active BOOLEAN DEFAULT 1, is_default BOOLEAN DEFAULT 0, config TEXT);
+	CREATE TABLE monitor_notification (id INTEGER PRIMARY KEY AUTOINCREMENT, monitor_id INTEGER, notification_id INTEGER);
+	CREATE TABLE status_page (id INTEGER PRIMARY KEY AUTOINCREMENT, slug VARCHAR(255), title VARCHAR(255),
+		description TEXT, theme VARCHAR(30), published BOOLEAN DEFAULT 1, password VARCHAR(255));
+	CREATE TABLE ` + "`group`" + ` (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255), status_page_id INTEGER, weight INTEGER DEFAULT 1000);
+	CREATE TABLE monitor_group (id INTEGER PRIMARY KEY AUTOINCREMENT, monitor_id INTEGER, group_id INTEGER, weight INTEGER DEFAULT 1000);
+	CREATE TABLE heartbeat (id INTEGER PRIMARY KEY AUTOINCREMENT, important BOOLEAN DEFAULT 0,
+		monitor_id INTEGER, status SMALLINT, msg TEXT, time DATETIME, ping INTEGER);
+	INSERT INTO monitor (id, name, type, url, interval) VALUES (1, 'Prod Service', 'http', 'https://example.com/health', 60);`
+
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("seed test kuma: %v", err)
+	}
+	return path
+}
+
+func TestImportKumaReportJSONStdout(t *testing.T) {
+	kumaDB := seedTestKuma(t, t.TempDir())
+	dataDir := filepath.Join(t.TempDir(), "cairn-data")
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"import", "kuma",
+		"-data-dir=" + dataDir,
+		"-dry-run",
+		"-report-json=-",
+		kumaDB,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run import kuma -report-json -: %v (stderr: %s)", err, stderr.String())
+	}
+
+	outStr := stdout.String()
+	if strings.Contains(outStr, "Dry run — nothing was written.") {
+		t.Errorf("expected text table to be omitted on stdout, got: %s", outStr)
+	}
+
+	var report model.ImportReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("unmarshal json report from stdout: %v\noutput: %s", err, outStr)
+	}
+
+	if !report.DryRun {
+		t.Errorf("report.DryRun = false, want true")
+	}
+	if report.State != model.ImportSucceeded {
+		t.Errorf("report.State = %q, want %q", report.State, model.ImportSucceeded)
+	}
+	if report.Summary["monitor"].Imported != 1 {
+		t.Errorf("summary.Imported = %d, want 1", report.Summary["monitor"].Imported)
+	}
+}
+
+func TestImportKumaReportJSONFile(t *testing.T) {
+	kumaDB := seedTestKuma(t, t.TempDir())
+	dataDir := filepath.Join(t.TempDir(), "cairn-data")
+	jsonPath := filepath.Join(t.TempDir(), "report.json")
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{
+		"import", "kuma",
+		"-data-dir=" + dataDir,
+		"-dry-run",
+		"-report-json=" + jsonPath,
+		kumaDB,
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run import kuma -report-json <file>: %v (stderr: %s)", err, stderr.String())
+	}
+
+	outStr := stdout.String()
+	if !strings.Contains(outStr, "Dry run — nothing was written.") {
+		t.Errorf("expected stdout to contain human table, got: %s", outStr)
+	}
+
+	dataBytes, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read report json: %v", err)
+	}
+
+	var report model.ImportReport
+	if err := json.Unmarshal(dataBytes, &report); err != nil {
+		t.Fatalf("unmarshal json report from file: %v", err)
+	}
+
+	if !report.DryRun {
+		t.Errorf("report.DryRun = false, want true")
+	}
+	if report.State != model.ImportSucceeded {
+		t.Errorf("report.State = %q, want %q", report.State, model.ImportSucceeded)
+	}
+	if report.Summary["monitor"].Imported != 1 {
+		t.Errorf("summary.Imported = %d, want 1", report.Summary["monitor"].Imported)
 	}
 }

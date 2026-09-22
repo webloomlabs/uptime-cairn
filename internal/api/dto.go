@@ -171,67 +171,14 @@ type monitorWrite struct {
 }
 
 // importJobJSON is ImportJob in docs/api/openapi.yaml.
-type importJobJSON struct {
-	ID         string                         `json:"id"`
-	State      string                         `json:"state"`
-	DryRun     bool                           `json:"dry_run"`
-	Sources    []model.ImportSource           `json:"sources"`
-	Summary    map[string]model.ImportSummary `json:"summary"`
-	Entries    []importEntryJSON              `json:"entries"`
-	Error      *string                        `json:"error"`
-	StartedAt  *time.Time                     `json:"started_at"`
-	FinishedAt *time.Time                     `json:"finished_at"`
-	CreatedAt  time.Time                      `json:"created_at"`
-}
+type importJobJSON = model.ImportReport
 
 // importEntryJSON is one source entity and what became of it. Every source
 // entity appears exactly once, which is the guarantee the whole report rests on.
-type importEntryJSON struct {
-	SourceFile string  `json:"source_file"`
-	EntityType string  `json:"entity_type"`
-	SourceID   *string `json:"source_id"`
-	SourceName string  `json:"source_name"`
-	Result     string  `json:"result"`
-	TargetID   *string `json:"target_id"`
-	Detail     *string `json:"detail"`
-}
+type importEntryJSON = model.ImportReportEntry
 
 func toImportJobJSON(j model.ImportJob, entries []model.ImportEntry) importJobJSON {
-	out := importJobJSON{
-		ID: j.ID.String(), State: j.State, DryRun: j.DryRun,
-		Sources:    j.Sources,
-		Summary:    model.Tally(entries),
-		Entries:    make([]importEntryJSON, 0, len(entries)),
-		StartedAt:  j.StartedAt,
-		FinishedAt: j.FinishedAt,
-		CreatedAt:  j.CreatedAt,
-	}
-	if out.Sources == nil {
-		out.Sources = []model.ImportSource{}
-	}
-	if j.Error != "" {
-		out.Error = &j.Error
-	}
-	for _, e := range entries {
-		entry := importEntryJSON{
-			SourceFile: e.SourceFile, EntityType: e.EntityType,
-			SourceName: e.SourceName, Result: e.Result,
-		}
-		if e.SourceID != "" {
-			id := e.SourceID
-			entry.SourceID = &id
-		}
-		if e.TargetID != nil {
-			id := e.TargetID.String()
-			entry.TargetID = &id
-		}
-		if e.Detail != "" {
-			detail := e.Detail
-			entry.Detail = &detail
-		}
-		out.Entries = append(out.Entries, entry)
-	}
-	return out
+	return model.NewImportReport(j, entries)
 }
 
 // probeJSON is Probe in docs/api/openapi.yaml.

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,7 +32,7 @@ import (
 // checker registry. An importer with its own idea of any of those would produce
 // rows the server then could not read, which is the failure mode a second write
 // path always has.
-func ImportKuma(ctx context.Context, cfg config.Config, paths []string, opts kuma.Options, out io.Writer) error {
+func ImportKuma(ctx context.Context, cfg config.Config, paths []string, opts kuma.Options, reportJSONPath string, out io.Writer) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("name at least one kuma.db to import")
 	}
@@ -84,8 +86,41 @@ func ImportKuma(ctx context.Context, cfg config.Config, paths []string, opts kum
 		}
 	}
 
-	WriteImportReport(out, job, entries, opts)
-	return runErr
+	var writeErr error
+	if reportJSONPath == "-" {
+		writeErr = WriteImportReportJSON(out, job, entries)
+	} else {
+		if reportJSONPath != "" {
+			writeErr = writeReportJSONFile(reportJSONPath, job, entries)
+		}
+		WriteImportReport(out, job, entries, opts)
+	}
+
+	if runErr != nil || writeErr != nil {
+		return errors.Join(runErr, writeErr)
+	}
+	return nil
+}
+
+// WriteImportReportJSON serialises the import report as formatted JSON.
+func WriteImportReportJSON(out io.Writer, job model.ImportJob, entries []model.ImportEntry) error {
+	report := model.NewImportReport(job, entries)
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(report)
+}
+
+func writeReportJSONFile(path string, job model.ImportJob, entries []model.ImportEntry) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create report json file: %w", err)
+	}
+	defer f.Close()
+
+	if err := WriteImportReportJSON(f, job, entries); err != nil {
+		return fmt.Errorf("write report json: %w", err)
+	}
+	return f.Close()
 }
 
 // WriteImportReport prints the report a migrating user reads.

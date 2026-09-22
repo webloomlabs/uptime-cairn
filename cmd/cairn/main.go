@@ -45,11 +45,23 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return runImport(args[1:], stdout, stderr)
 		case "config":
 			return runConfig(args[1:], stdout, stderr)
+		case "version":
+			fmt.Fprintln(stdout, version.String())
+			return nil
 		}
 	}
 
 	fs := flag.NewFlagSet("cairn", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: cairn [flags] [command]")
+		fmt.Fprintln(stderr, "\nCommands:")
+		fmt.Fprintln(stderr, "  import    import from Uptime Kuma")
+		fmt.Fprintln(stderr, "  config    inspect or validate configuration")
+		fmt.Fprintln(stderr, "  version   print version and exit")
+		fmt.Fprintln(stderr, "\nFlags:")
+		fs.PrintDefaults()
+	}
 
 	cfg := config.Default()
 	var trustedProxies string
@@ -117,6 +129,8 @@ func runImport(args []string, stdout, stderr io.Writer) error {
 
 	opts := kuma.DefaultOptions()
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "produce the full report without writing anything")
+	var reportJSON string
+	fs.StringVar(&reportJSON, "report-json", "", "write full import report as JSON to <path> ('-' for stdout)")
 	fs.StringVar(&opts.ConflictStrategy, "on-conflict", opts.ConflictStrategy,
 		"what to do when a name collides: skip, rename, or replace (rename is the only one that cannot lose data)")
 	fs.StringVar(&opts.NamePrefix, "name-prefix", "",
@@ -149,7 +163,7 @@ func runImport(args []string, stdout, stderr io.Writer) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	return app.ImportKuma(ctx, cfg, fs.Args(), opts, stdout)
+	return app.ImportKuma(ctx, cfg, fs.Args(), opts, reportJSON, stdout)
 }
 
 func bindConfigFlags(fs *flag.FlagSet, cfg *config.Config, trustedProxies *string) {

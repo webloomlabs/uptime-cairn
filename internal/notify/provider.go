@@ -14,7 +14,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
-// The delivery half: thirteen providers behind one function.
+// The delivery half: sixteen providers behind one function.
 //
 // Every one of them either speaks HTTP or shells out, so the shared machinery
 // here is small and the per-provider files are almost entirely the shape of
@@ -104,19 +104,22 @@ func (s *Sender) AppriseAvailable() bool { return s.apprisePath != "" }
 type sendFunc func(context.Context, *Sender, conf, Event) (Receipt, error)
 
 var senders = map[string]sendFunc{
-	"email":     sendEmail,
-	"webhook":   sendWebhook,
-	"slack":     sendSlack,
-	"discord":   sendDiscord,
-	"telegram":  sendTelegram,
-	"matrix":    sendMatrix,
-	"gotify":    sendGotify,
-	"ntfy":      sendNtfy,
-	"msteams":   sendMSTeams,
-	"pagerduty": sendPagerDuty,
-	"opsgenie":  sendOpsgenie,
-	"twilio":    sendTwilio,
-	"apprise":   sendApprise,
+	"email":      sendEmail,
+	"webhook":    sendWebhook,
+	"slack":      sendSlack,
+	"discord":    sendDiscord,
+	"telegram":   sendTelegram,
+	"matrix":     sendMatrix,
+	"gotify":     sendGotify,
+	"ntfy":       sendNtfy,
+	"pushover":   sendPushover,
+	"msteams":    sendMSTeams,
+	"mattermost": sendMattermost,
+	"googlechat": sendGoogleChat,
+	"pagerduty":  sendPagerDuty,
+	"opsgenie":   sendOpsgenie,
+	"twilio":     sendTwilio,
+	"apprise":    sendApprise,
 }
 
 // Send delivers one event through one channel's merged configuration.

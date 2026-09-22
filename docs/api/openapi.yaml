@@ -5202,7 +5202,10 @@ components:
         - matrix
         - gotify
         - ntfy
+        - pushover
         - msteams
+        - mattermost
+        - googlechat
         - pagerduty
         - opsgenie
         - twilio
@@ -5263,7 +5266,10 @@ components:
         - $ref: "#/components/schemas/MatrixChannel"
         - $ref: "#/components/schemas/GotifyChannel"
         - $ref: "#/components/schemas/NtfyChannel"
+        - $ref: "#/components/schemas/PushoverChannel"
         - $ref: "#/components/schemas/MsTeamsChannel"
+        - $ref: "#/components/schemas/MattermostChannel"
+        - $ref: "#/components/schemas/GoogleChatChannel"
         - $ref: "#/components/schemas/PagerDutyChannel"
         - $ref: "#/components/schemas/OpsgenieChannel"
         - $ref: "#/components/schemas/TwilioChannel"
@@ -5279,7 +5285,10 @@ components:
           matrix: "#/components/schemas/MatrixChannel"
           gotify: "#/components/schemas/GotifyChannel"
           ntfy: "#/components/schemas/NtfyChannel"
+          pushover: "#/components/schemas/PushoverChannel"
           msteams: "#/components/schemas/MsTeamsChannel"
+          mattermost: "#/components/schemas/MattermostChannel"
+          googlechat: "#/components/schemas/GoogleChatChannel"
           pagerduty: "#/components/schemas/PagerDutyChannel"
           opsgenie: "#/components/schemas/OpsgenieChannel"
           twilio: "#/components/schemas/TwilioChannel"
@@ -5470,6 +5479,30 @@ components:
                 token: { type: [string, "null"], writeOnly: true }
                 message_template: { type: [string, "null"] }
 
+    PushoverChannel:
+      allOf:
+        - $ref: "#/components/schemas/NotificationChannelCommon"
+        - type: object
+          required: [name, type, config]
+          properties:
+            type: { type: string, const: pushover }
+            config:
+              type: object
+              required: [api_token, user_key]
+              properties:
+                api_token: { type: string, writeOnly: true }
+                user_key: { type: string, writeOnly: true }
+                priority:
+                  type: integer
+                  minimum: -2
+                  maximum: 1
+                  default: 0
+                  description: |
+                    -2 = lowest (no notification), -1 = low, 0 = normal (default), 1 = high.
+                sound: { type: [string, "null"] }
+                device: { type: [string, "null"] }
+                message_template: { type: [string, "null"] }
+
     MsTeamsChannel:
       allOf:
         - $ref: "#/components/schemas/NotificationChannelCommon"
@@ -5477,6 +5510,37 @@ components:
           required: [name, type, config]
           properties:
             type: { type: string, const: msteams }
+            config:
+              type: object
+              required: [webhook_url]
+              properties:
+                webhook_url: { type: string, format: uri, writeOnly: true }
+                message_template: { type: [string, "null"] }
+
+    MattermostChannel:
+      allOf:
+        - $ref: "#/components/schemas/NotificationChannelCommon"
+        - type: object
+          required: [name, type, config]
+          properties:
+            type: { type: string, const: mattermost }
+            config:
+              type: object
+              required: [webhook_url]
+              properties:
+                webhook_url: { type: string, format: uri, writeOnly: true }
+                channel: { type: [string, "null"] }
+                username: { type: [string, "null"] }
+                icon_url: { type: [string, "null"], format: uri }
+                message_template: { type: [string, "null"] }
+
+    GoogleChatChannel:
+      allOf:
+        - $ref: "#/components/schemas/NotificationChannelCommon"
+        - type: object
+          required: [name, type, config]
+          properties:
+            type: { type: string, const: googlechat }
             config:
               type: object
               required: [webhook_url]
