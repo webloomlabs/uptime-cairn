@@ -1,6 +1,6 @@
 # ADR-009: Pagination Key — Generalise the Cursor to `(sort_field, id)`, with Sortable Fields Restricted to Stable Stored Columns
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-27
 - **Deciders:** [Shakil Ilham](https://github.com/silham)
 - **Relationship to prior ADRs:** **Supersedes [ADR-004](004-ui-state-synchronisation.md) in one part only** — the pagination key. ADR-004's three other decisions (ID-scoped live subscriptions, membership reconciliation by polling, and the two load-test invariants) remain in force, unmodified, and this decision is constrained by them.
