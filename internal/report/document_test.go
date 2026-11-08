@@ -30,6 +30,12 @@ type fakeStore struct {
 	// tier that summarised them.
 	rawShort bool
 
+	// What the calendar answers, and what it was asked. The filter is kept
+	// because the scope narrowing is the part of that call worth asserting.
+	expiries     []model.UpcomingExpiry
+	expiryFilter store.ExpiryFilter
+	expiryNow    time.Time
+
 	calls map[string]int
 }
 
@@ -79,6 +85,13 @@ func (f *fakeStore) UptimeFromRaw(_ context.Context, _ model.ID, from, to time.T
 func (f *fakeStore) ListIncidents(context.Context, *store.Cursor, int, store.IncidentFilter) ([]model.Incident, bool, error) {
 	f.note("ListIncidents")
 	return nil, false, nil
+}
+
+func (f *fakeStore) ListUpcomingExpiries(_ context.Context, _ *store.Cursor, _ int,
+	filter store.ExpiryFilter, now time.Time) ([]model.UpcomingExpiry, bool, error) {
+	f.note("ListUpcomingExpiries")
+	f.expiryFilter, f.expiryNow = filter, now
+	return f.expiries, false, nil
 }
 
 var _ Store = (*fakeStore)(nil)

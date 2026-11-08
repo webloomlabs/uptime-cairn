@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,5 +214,101 @@ func TestBearerToken(t *testing.T) {
 		if _, ok := BearerToken(bad); ok {
 			t.Errorf("BearerToken(%q) accepted", bad)
 		}
+	}
+}
+
+// readSpecApiKeyScopes extracts components.schemas.ApiKeyScope.enum from docs/api/openapi.yaml.
+func readSpecApiKeyScopes(t *testing.T) []string {
+	t.Helper()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "api", "openapi.yaml"))
+	if err != nil {
+		t.Fatalf("read openapi.yaml: %v", err)
+	}
+
+	lines := strings.Split(string(raw), "\n")
+	var (
+		inApiKeyScope bool
+		inEnum        bool
+		scopes        []string
+	)
+
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+
+		if indent == 4 && strings.HasPrefix(trimmed, "ApiKeyScope:") {
+			inApiKeyScope = true
+			continue
+		}
+		if inApiKeyScope {
+			if indent <= 4 {
+				break
+			}
+			if indent == 6 && strings.HasPrefix(trimmed, "enum:") {
+				inEnum = true
+				continue
+			}
+			if inEnum {
+				if indent == 8 && strings.HasPrefix(trimmed, "- ") {
+					scopes = append(scopes, strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")))
+				} else if indent <= 6 {
+					inEnum = false
+				}
+			}
+		}
+	}
+
+	if len(scopes) == 0 {
+		t.Fatal("readSpecApiKeyScopes found 0 scopes in docs/api/openapi.yaml; schema layout may have changed")
+	}
+	return scopes
+}
+
+// TestAllScopesMatchesSpecApiKeyScopeEnum verifies that auth.AllScopes stays in sync
+// with components.schemas.ApiKeyScope.enum in docs/api/openapi.yaml in both directions.
+func TestAllScopesMatchesSpecApiKeyScopeEnum(t *testing.T) {
+	t.Parallel()
+
+	specScopes := readSpecApiKeyScopes(t)
+
+	codeScopeSet := make(map[string]bool, len(AllScopes))
+	for _, s := range AllScopes {
+		str := string(s)
+		if codeScopeSet[str] {
+			t.Errorf("duplicate scope %q in AllScopes", str)
+		}
+		codeScopeSet[str] = true
+	}
+
+	specScopeSet := make(map[string]bool, len(specScopes))
+	for _, s := range specScopes {
+		if specScopeSet[s] {
+			t.Errorf("duplicate scope %q in openapi.yaml ApiKeyScope enum", s)
+		}
+		specScopeSet[s] = true
+	}
+
+	// 1. Every scope in the OpenAPI spec enum must be present in AllScopes.
+	for _, s := range specScopes {
+		if !codeScopeSet[s] {
+			t.Errorf("scope %q is in docs/api/openapi.yaml ApiKeyScope enum, but missing from auth.AllScopes", s)
+		}
+	}
+
+	// 2. Every scope in AllScopes must be present in the OpenAPI spec enum.
+	for _, s := range AllScopes {
+		str := string(s)
+		if !specScopeSet[str] {
+			t.Errorf("scope %q is in auth.AllScopes, but missing from docs/api/openapi.yaml ApiKeyScope enum", str)
+		}
+	}
+
+	if len(specScopes) != len(AllScopes) {
+		t.Errorf("scope count mismatch: spec has %d scopes, AllScopes has %d", len(specScopes), len(AllScopes))
 	}
 }

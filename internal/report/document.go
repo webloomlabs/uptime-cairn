@@ -204,6 +204,17 @@ type Document struct {
 	// proportion to how much is unknown.
 	MTT MTTSummary
 
+	// Expiries are the certificates and domain registrations running out ahead
+	// of the report, for the `certificate_expiry` section.
+	//
+	// Forward-looking rather than a statement about the window, and the one
+	// block on the document that is: §4.8 asks for "a forward-looking view, not
+	// an alert three days before it breaks", so a March report handed over in
+	// April lists what expires from April onwards. Reading it against the window
+	// would produce a calendar of things that already expired, which is a
+	// history and not a calendar.
+	Expiries []model.UpcomingExpiry
+
 	// Comparison is present for a comparative report and nil for every other
 	// type, which is the spec's own shape.
 	Comparison *Comparison
@@ -367,6 +378,10 @@ func Build(ctx context.Context, s Store, spec Spec, retention Retention, runID m
 		return Document{}, err
 	}
 
+	if err := attachExpiries(ctx, s, &doc, spec, ids, now); err != nil {
+		return Document{}, err
+	}
+
 	if spec.Comparison.Mode != "" {
 		comparison, err := BuildComparison(ctx, s, spec.Comparison, spec.Scope, window, res.Tier, spec.MaintenanceHandling)
 		if err != nil {
@@ -428,6 +443,63 @@ func attachIncidents(ctx context.Context, s Store, doc *Document, spec Spec, win
 	// should be able to manufacture.
 	doc.Incidents = PostMortem(incidents, nil, nil)
 	doc.MTT = Summarise(doc.Incidents)
+	return nil
+}
+
+// ExpiryPageSize bounds the calendar block.
+//
+// Generous next to IncidentPageSize because the rows are one line each and an
+// estate genuinely can hold two hundred certificates, where two hundred
+// incidents in a month is a different kind of problem. It is still a bound: a
+// report is a document somebody reads, and a calendar longer than this is a
+// screen rather than a section.
+const ExpiryPageSize = 250
+
+// ExpiryHorizonDays is how far ahead the calendar block looks.
+//
+// Ninety days, which is the widest of the three horizons §4.8 names and the one
+// that makes the other two readable off the same table — a reader wanting the
+// thirty-day view reads the top of a ninety-day list, where a reader given a
+// thirty-day list cannot recover the ninety-day one. Unbounded was the
+// alternative and is worse: a domain registered for ten years would head the
+// table with an expiry nobody will act on in this decade.
+//
+// Fixed rather than configurable, because the horizon is not on the frozen
+// template contract and inventing a field for it would be an API change
+// (AGENTS.md rule 4). The calendar screen keeps its own `within_days`.
+const ExpiryHorizonDays = 90
+
+// attachExpiries fills the certificate and domain calendar.
+//
+// **Only for `custom`**, which is the same gate attachIncidents applies and for
+// the same cost reason: it is another read, and the four-reads-whatever-the-scope
+// property the load gate measures is worth keeping for the types that make up
+// almost every scheduled report. `certificate_expiry` is selectable only on a
+// custom template, so no other type can draw the block it would pay for.
+//
+// The instant is the run's own `now` rather than the wall clock, so that
+// `days_remaining` is a property of the document rather than of when somebody
+// opened it. ADR-007 requires the same model rendered twice to be byte-identical,
+// and a figure counted from time.Now would break that inside a single run — the
+// PDF and the JSON of one report would disagree by a day across midnight.
+//
+// Already-expired entries are kept, because the store keeps them and because
+// "expired eleven days ago" is the row the section exists to surface. A calendar
+// that hid it would look calm on the worst possible day.
+func attachExpiries(ctx context.Context, s Store, doc *Document, spec Spec, ids []model.ID, now time.Time) error {
+	if spec.Type != model.ReportTypeCustom {
+		return nil
+	}
+
+	horizon := ExpiryHorizonDays
+	entries, _, err := s.ListUpcomingExpiries(ctx, nil, ExpiryPageSize, store.ExpiryFilter{
+		MonitorIDs: ids,
+		WithinDays: &horizon,
+	}, now)
+	if err != nil {
+		return fmt.Errorf("expiry calendar: %w", err)
+	}
+	doc.Expiries = entries
 	return nil
 }
 

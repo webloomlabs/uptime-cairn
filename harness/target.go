@@ -265,6 +265,80 @@ type Streamer interface {
 	MeasureLive(ctx context.Context, w *Workload, clients, scoped, seconds int) (LiveResult, error)
 }
 
+// ReportResult is what the concurrent report-run phase measured.
+//
+// # The question, and why it needs two windows rather than one
+//
+// The phase plan's exit criterion for the report worker pool is that "fifty PDFs
+// at 09:00 on the 1st must not delay a single check". That is a claim about
+// *interference*, and interference cannot be read off one measurement: an
+// install whose checks are 200ms late during a report burst has either a
+// reporting problem or a slow runner, and only a comparison against the same
+// install a minute earlier tells you which.
+//
+// So every figure here is a pair. The baseline is taken with the engine in
+// steady state and nothing rendering; the burst is taken with `Submitted` runs
+// in flight. The gate asserts on the *delta*, which is the only form of the
+// assertion that survives a noisy shared runner.
+//
+// # Lateness rather than throughput
+//
+// The heartbeat write rate is the harness's existing steady-state measure and it
+// is the wrong one here. A pool that delays every check by ten seconds and then
+// catches up has an unchanged rate over a sixty-second window and has broken the
+// promise exactly as stated. Check lateness — how long past its due time each
+// monitor was last checked, as a fraction of its own interval — is the thing the
+// criterion is actually about, and it is visible in
+// `cairn_monitor_last_check_timestamp_seconds`, which the engine already
+// publishes for operators.
+type ReportResult struct {
+	// Submitted is how many runs were requested, and Accepted how many the API
+	// took. The difference is the pool refusing, which is correct behaviour and
+	// not a failure: a bounded queue that answers 503 is the design.
+	Submitted int
+	Accepted  int
+	Refused   int
+
+	// Failed is a run the engine accepted and could not complete. Unlike a
+	// refusal, this is a defect.
+	Failed int
+
+	// Completed is how many reached a terminal state inside the phase's
+	// deadline, and Elapsed how long the whole burst took to drain.
+	Completed int
+	Elapsed   time.Duration
+
+	// LatenessBefore and LatenessDuring are the p95 of (now - last checked) as a
+	// fraction of the monitor's own interval, over every monitor in the
+	// workload. 1.0 means "checked exactly one interval ago", which is the
+	// steady state of a healthy install; 2.0 means a whole interval was missed.
+	LatenessBefore float64
+	LatenessDuring float64
+
+	// SkippedDuring and ShedDuring are the probe's own counters over the burst.
+	// A probe that sheds is protecting itself and is reported rather than
+	// treated as a pass.
+	SkippedDuring uint64
+	ShedDuring    uint64
+
+	// WriteRateBefore and WriteRateDuring bracket the throughput measure too,
+	// because a pool that starved the scheduler entirely would show there first.
+	WriteRateBefore float64
+	WriteRateDuring float64
+}
+
+// Reporter is the optional half a target implements when it has a reporting
+// subsystem to put under load.
+//
+// Optional for the same reason Disruptor is: the SQLite target has no engine, no
+// worker pool and no renderer, so a report burst against it would be the harness
+// timing its own loop.
+type Reporter interface {
+	// MeasureReports fires `runs` report generations concurrently and measures
+	// what they did to check scheduling.
+	MeasureReports(ctx context.Context, w *Workload, runs int) (ReportResult, error)
+}
+
 // Disruptor is the optional half: a target that can break the thing its monitors
 // are watching, and read back what the engine did about it.
 //

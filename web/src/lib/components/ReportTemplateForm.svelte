@@ -99,10 +99,10 @@
 	/**
 	 * The section vocabulary, in the order the API documents it.
 	 *
-	 * `maintenance_log` and `certificate_expiry` are in the API's enum and are
-	 * not offered here, deliberately: nothing composes them yet, so a chip that
-	 * silently contributed no block would be a control that appears to do
-	 * nothing. They will appear when there is something behind them.
+	 * `maintenance_log` is in the API's enum and is not offered here,
+	 * deliberately: nothing composes it yet, so a chip that silently contributed
+	 * no block would be a control that appears to do nothing. It will appear when
+	 * there is something behind it.
 	 */
 	const ALL_SECTIONS = [
 		'summary',
@@ -112,8 +112,23 @@
 		'sla_breakdown',
 		'error_budget',
 		'incident_log',
+		'certificate_expiry',
 		'comparison'
 	];
+
+	/**
+	 * `certificate_expiry` is offered on a custom report and nowhere else, for
+	 * the same reason `maintenance_log` is offered nowhere at all: only a custom
+	 * report computes the calendar, so the chip would tick and draw nothing on
+	 * any other type.
+	 *
+	 * Hidden rather than disabled. A disabled control invites the reader to work
+	 * out what would enable it, and the answer — change the report's type — is a
+	 * decision about the whole document rather than about one block.
+	 */
+	const offeredSections = $derived(
+		ALL_SECTIONS.filter((s) => s !== 'certificate_expiry' || type === 'custom')
+	);
 
 	$effect(() => {
 		untrack(() => void loadReferences());
@@ -180,10 +195,16 @@
 			period_style: periodStyle,
 			maintenance_handling: maintenance,
 			formats,
-			// Sent as given. An empty array is meaningful — it selects the
-			// defaults for the type — so it is not omitted when nothing is
-			// chosen.
-			sections,
+			// Sent as what the form actually offered. An empty array is meaningful
+			// — it selects the defaults for the type — so it is not omitted when
+			// nothing is chosen.
+			//
+			// Filtered rather than sent verbatim because a template can change
+			// type after its blocks were picked: a custom report that selected
+			// the expiry calendar and was then switched to `sla` would otherwise
+			// save a section the editor no longer shows and the document no
+			// longer draws, leaving a selection nobody can see to remove.
+			sections: sections.filter((s) => offeredSections.includes(s)),
 			scope: {
 				monitor_ids: monitors.map((m) => m.id),
 				group_ids: groupIDs,
@@ -461,7 +482,7 @@
 				{sections.length === 0 ? t('reports.sectionsDefault') : t('reports.sectionsHint')}
 			</p>
 			<div class="flex flex-wrap gap-3">
-				{#each ALL_SECTIONS as section (section)}
+				{#each offeredSections as section (section)}
 					{@const at = sections.indexOf(section)}
 					<label class="flex items-center gap-1.5 text-sm">
 						<input

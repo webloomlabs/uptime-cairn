@@ -9,6 +9,191 @@ them, not which files moved.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-11-08
+
+Maintenance windows get a screen of their own. They have been in the API since
+1.0; this release lets you plan, start, end and edit them from the dashboard,
+and announce them on the right status pages without listing those pages by
+hand.
+
+**Upgrading** from `1.1.0` is a binary or image swap. No migration runs.
+
+### Added
+
+- **A Maintenance screen.** **Maintenance** in the navigation lists every
+  window with its state (running, scheduled, ended), what it repeats on, when
+  it next runs or until when it is running, what it covers and which status
+  pages show it. You can create and edit windows of every kind: once, daily,
+  weekly on chosen days, monthly on chosen dates, or a cron expression. Times
+  are entered in the window's own time zone, not the browser's, so "02:00
+  every Sunday in Europe/London" means that wherever you are when you type it.
+- **Start maintenance now.** On a one-off window, **Start now, for** 30
+  minutes, 1, 2 or 4 hours fills in both times in one click. **End now** on a
+  running one-off window ends it early and keeps the record. A monitor's page
+  has a **Schedule maintenance** button that opens the form with that monitor
+  already chosen.
+- **Announce on the status pages that show the affected monitors.** A new
+  window is announced, by default, on every status page that lists a monitor it
+  covers, directly or through a group or tag. You can switch to choosing pages
+  by hand. In the API this is the new optional `auto_status_pages` field on
+  `POST` and `PATCH /api/v1/maintenance-windows`. The pages are worked out when
+  the window is saved and stored as its `status_page_ids`.
+
+### Changed
+
+- **Status pages mark maintenance that is under way** with an "In progress"
+  label, and show the dates of the occurrence that is running or comes next.
+  Before, a recurring window could show its original start date, which might be
+  months in the past.
+
+### Fixed
+
+- **Status pages no longer list maintenance that has already ended.** A one-off
+  window that finished, or a recurring window past its `until`, stayed under
+  "Scheduled maintenance" until it was deleted. It now drops off when it ends.
+  The window itself is kept, and so is its mark on monitor history.
+
+### Security
+
+- **Built with Go 1.26.10**, up from 1.25.14, for the standard-library fixes
+  that are not available on the 1.25 line: crypto/x509 (GO-2026-6809,
+  CVE-2026-111943), net/http (CVE-2026-78667) and crypto/tls (CVE-2026-97031).
+  Building from source now needs Go 1.26.10 or later.
+- **`golang.org/x/net` v0.62.0**, up from v0.58.0, for an HTTP/2 server crash
+  (GO-2026-6617, CVE-2026-78669) and a denial of service in `x/net/html`
+  (CVE-2026-78661). `golang.org/x/crypto`, `x/sys` and `x/text` move with it.
+- **Frontend build tooling** updated within existing ranges (Vite 7.3.7,
+  devalue, source-map-js) for high-severity advisories. None of it ships in the
+  dashboard bundle.
+
+### API compatibility
+
+An additive change under [COMPATIBILITY.md](docs/api/COMPATIBILITY.md):
+`auto_status_pages` is a new optional, write-only request field. Leaving it out
+behaves exactly as in 1.1.0: a window sent without `status_page_ids` is shown
+on no page. Sending both fields is refused with a `conflict` on
+`/auto_status_pages`.
+
+## [1.1.0] — 2026-09-22
+
+The Phase 2 release: reporting, stable. It completes the Phase 2 scope. The
+reporting subsystem itself is described under
+[1.1.0-beta.1](#110-beta1--2026-09-04) below; this section is what changed since
+that beta.
+
+**This is the tag that freezes the reporting API.** Per
+[COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §1 the `/api/v1` compatibility
+promise now covers the reporting operations — report templates, schedules, runs,
+artifacts, share links, brand profiles and expiries. From here they change
+compatibly or not at all.
+
+**Upgrading** from `1.0.1` or `1.1.0-beta.1` is a binary or image swap. From
+`1.0.1`, migrations `0008` and `0009` run at start-up; from the beta they are
+already applied and nothing new runs. Reports are written to
+`<data-dir>/reports/`, which now belongs in your backup beside the database —
+see the [backup and restore guide](docs/operations/backup-restore.md).
+
+### Added
+
+- **Certificate and domain expiry calendar in reports.** A `custom` report can
+  now include a **Certificates and domains** section: everything in the report's
+  scope expiring within 90 days, soonest first, with anything already lapsed at
+  the top carrying how long ago it went. This is the same collection
+  `/api/v1/expiries` and the Expiries screen read, so a report and the screen
+  cannot disagree about what is running out. It appears in the HTML and the PDF
+  when the section is selected, and in the JSON artifact as `expiries` — the
+  field the document schema has always declared and nothing filled.
+
+  The section is offered on `custom` templates only, because that is the only
+  report type whose document carries a calendar. A template switched away from
+  `custom` drops the selection rather than keeping a block nobody can see to
+  remove.
+
+- **Preview a rendered report without downloading it.** Run history now offers
+  **Preview** beside **Download** on an HTML artifact, showing the report inline.
+  It serves the _stored_ artifact rather than re-rendering, so it answers the
+  question people actually bring to it — what did we send? — and the figures
+  cannot have moved since the client got theirs. The document is displayed in a
+  fully sandboxed frame: no scripts, no access to the dashboard's session, its
+  own opaque origin.
+
+- **Browse history over any past range.** A monitor's availability chart gains
+  90-day and 1-year presets and a **Custom range** control taking explicit start
+  and end times, so "what happened in March" is now a question the dashboard can
+  answer rather than only "how has it been lately".
+
+  Every chart now states **the resolution it was actually drawn at** — per check,
+  one minute, five minute, hourly or daily. The tier is chosen from the span, so
+  a year of history is daily buckets and last week is far finer; a reader
+  comparing the two without being told would be comparing different measurements.
+  Where a range reaches further back than the install holds, the chart says when
+  the data actually begins instead of drawing an outage-free stretch that is
+  really an install that did not exist yet.
+
+- **The load-test gate now covers report rendering.** The 5,000-monitor gate
+  fires 50 concurrent report generations at its largest scale and asserts that
+  check scheduling is unaffected — the report worker pool's exit criterion, which
+  was previously an argument in a code comment. A regression blocks the merge.
+
+- **Three native notification channels: Pushover, Mattermost and Google Chat.**
+  Each was reachable before only indirectly — through Apprise, or for
+  Mattermost its Slack-compatible webhook; native, they get config validation
+  when saved, a test-send, message templates, and no dependency on the
+  `apprise` binary. Secrets — Pushover's `api_token` and `user_key`, the
+  Mattermost and Google Chat `webhook_url` — are encrypted at rest like every
+  other channel's. Pushover takes an optional `priority` (-2 to 1), `sound` and
+  `device`; Mattermost an optional `channel`, `username` and `icon_url`. The
+  Uptime Kuma importer now maps all three, where it previously reported them as
+  unsupported. See the [alerting guide](docs/guides/alerting.md). The
+  channel-type enum has always told clients to tolerate new values, so this is
+  additive under [COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §3.
+
+- **`cairn config validate`** checks a configuration — the same flags the
+  server takes — without starting the server, opening the database or binding
+  a port. It prints `configuration valid` and exits `0`, or
+  names the problem and exits `1`, so a bad deploy can fail in CI or an init
+  container rather than in a restart loop.
+
+- **`cairn version`**, as a subcommand beside the existing `-version` flag. Both
+  print the same line.
+
+- **`cairn import kuma -report-json <path>`** writes the full import report as
+  JSON, for scripting a migration and checking what did and did not come across.
+  `-` writes it to stdout in place of the human-readable report.
+
+### Changed
+
+- **Contributions now need a signed Contributor License Agreement.** An
+  individual ([CLA.md](CLA.md)) and a corporate ([CCLA.md](CCLA.md)) agreement,
+  adapted from Apache's, collected by a bot on the pull request. Section 9 writes
+  the governance limits into the agreement itself — licensing contributions
+  under anything but Apache 2.0 needs the governance supermajority and 30 days'
+  public notice, and must not remove a capability from the open edition or put
+  one behind payment. Nothing changes for anyone running the software.
+
+### Fixed
+
+- The load harness measured check lateness against the wrong interval, reporting
+  it three times more generously than intended. No released behaviour changes;
+  the gate is now as strict as it was documented to be.
+
+### Security
+
+- **gRPC upgraded to v1.83.2 for CVE-2026-84445**, a high-severity
+  denial-of-service in gRPC-Go's xDS server path. Uptime Cairn does not run an xDS
+  server, so no install was exposed through it, but the vulnerable code was
+  linked into the binary and image scanners flag it.
+
+## [1.1.0-beta.1] — 2026-09-04
+
+The Phase 2 reporting subsystem, released as a beta. Everything below is
+implemented and installable; what it is not yet is frozen. Per
+[COMPATIBILITY.md](docs/api/COMPATIBILITY.md) §1 the `/api/v1` freeze attaches at
+the first stable tag, so the reporting operations stay editable until `1.1.0`.
+That is the point of a beta, and it is the window in which a report about the
+shape of these endpoints can still be acted on rather than deferred to
+`/api/v2`.
+
 ### Changed
 
 - **Licence is now Apache 2.0**, replacing AGPL 3.0 throughout the project —
@@ -95,7 +280,7 @@ them, not which files moved.
   accepted when frequency is cron", because clearing the expression was not
   expressible — `null` and an omitted field were indistinguishable, so the stored
   one carried forward. The expression is now cleared when the frequency moves off
-  cron. Supplying an expression *alongside* a fixed frequency is still refused,
+  cron. Supplying an expression _alongside_ a fixed frequency is still refused,
   which is deliberate: a stored expression that never runs is a schedule you
   believe you configured.
 - **A report whose file is missing from disk was offered for download anyway.**
@@ -126,7 +311,7 @@ them, not which files moved.
   `down_count` with a null `response_time_min`; that is correct. Existing rollup
   rows are not rewritten — the correction applies from upgrade onward.
 - **Notification channel forms showed the wrong default.** Boolean fields the
-  server defaults to *on* — "use the instance SMTP settings", "verify the TLS
+  server defaults to _on_ — "use the instance SMTP settings", "verify the TLS
   certificate" — rendered as unchecked, so the first save failed on a setting
   that already looked the way the user wanted it. Field specs now carry their
   server-side default.
@@ -175,6 +360,9 @@ SQLite on disk and no database server to run.
   `ghcr.io/webloomlabs/uptime-cairn` and `webloomlabs/uptime-cairn` on Docker Hub.
 - Load-test gate in CI holding the single-instance target of 5,000 monitors.
 
-[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0-beta.1...v1.1.0
+[1.1.0-beta.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.1...v1.1.0-beta.1
 [1.0.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.0-rc.1...v1.0.1
 [1.0.0-rc.1]: https://github.com/webloomlabs/uptime-cairn/releases/tag/v1.0.0-rc.1

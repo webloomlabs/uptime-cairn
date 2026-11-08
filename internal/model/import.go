@@ -170,3 +170,72 @@ func StateFor(entries []ImportEntry) string {
 		return ImportPartial
 	}
 }
+
+// ImportReport is the structured JSON representation of a completed import,
+// matching the ImportJob schema in docs/api/openapi.yaml.
+type ImportReport struct {
+	ID         string                   `json:"id"`
+	State      string                   `json:"state"`
+	DryRun     bool                     `json:"dry_run"`
+	Sources    []ImportSource           `json:"sources"`
+	Summary    map[string]ImportSummary `json:"summary"`
+	Entries    []ImportReportEntry      `json:"entries"`
+	Error      *string                  `json:"error"`
+	StartedAt  *time.Time               `json:"started_at"`
+	FinishedAt *time.Time               `json:"finished_at"`
+	CreatedAt  time.Time                `json:"created_at"`
+}
+
+// ImportReportEntry is one source entity and what became of it in an ImportReport.
+type ImportReportEntry struct {
+	SourceFile string  `json:"source_file"`
+	EntityType string  `json:"entity_type"`
+	SourceID   *string `json:"source_id"`
+	SourceName string  `json:"source_name"`
+	Result     string  `json:"result"`
+	TargetID   *string `json:"target_id"`
+	Detail     *string `json:"detail"`
+}
+
+// NewImportReport builds an ImportReport from a job and its entries.
+func NewImportReport(j ImportJob, entries []ImportEntry) ImportReport {
+	out := ImportReport{
+		ID:         j.ID.String(),
+		State:      j.State,
+		DryRun:     j.DryRun,
+		Sources:    j.Sources,
+		Summary:    Tally(entries),
+		Entries:    make([]ImportReportEntry, 0, len(entries)),
+		StartedAt:  j.StartedAt,
+		FinishedAt: j.FinishedAt,
+		CreatedAt:  j.CreatedAt,
+	}
+	if out.Sources == nil {
+		out.Sources = []ImportSource{}
+	}
+	if j.Error != "" {
+		out.Error = &j.Error
+	}
+	for _, e := range entries {
+		entry := ImportReportEntry{
+			SourceFile: e.SourceFile,
+			EntityType: e.EntityType,
+			SourceName: e.SourceName,
+			Result:     e.Result,
+		}
+		if e.SourceID != "" {
+			id := e.SourceID
+			entry.SourceID = &id
+		}
+		if e.TargetID != nil {
+			id := e.TargetID.String()
+			entry.TargetID = &id
+		}
+		if e.Detail != "" {
+			detail := e.Detail
+			entry.Detail = &detail
+		}
+		out.Entries = append(out.Entries, entry)
+	}
+	return out
+}

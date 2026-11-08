@@ -107,6 +107,57 @@ export type MembershipSignal = {
 };
 
 /**
+ * A maintenance window.
+ *
+ * `state` is derived by the server from the schedule and the clock, and is not
+ * writable: a window is cancelled by deleting it. `starts_at` is the first
+ * occurrence, and for a recurring strategy the anchor its time of day is read
+ * from, in `timezone`. A single window ends at `ends_at` (or after
+ * `duration_minutes`); a recurring one lasts `duration_minutes` each time.
+ *
+ * On a write, `auto_status_pages: true` attaches the window to every page that
+ * shows a monitor it covers; `status_page_ids` is taken as given. Sending
+ * neither attaches it to no page.
+ */
+export type MaintenanceStrategy =
+	'single' | 'recurring_daily' | 'recurring_weekly' | 'recurring_monthly' | 'cron';
+
+export const MAINTENANCE_STRATEGIES: MaintenanceStrategy[] = [
+	'single',
+	'recurring_daily',
+	'recurring_weekly',
+	'recurring_monthly',
+	'cron'
+];
+
+export type MaintenanceState = 'scheduled' | 'active' | 'ended' | 'cancelled';
+
+export type MaintenanceWindow = {
+	id: string;
+	title: string;
+	description: string | null;
+	strategy: MaintenanceStrategy;
+	state: MaintenanceState;
+	timezone: string;
+	starts_at: string;
+	ends_at: string | null;
+	duration_minutes: number | null;
+	recurrence: {
+		weekdays?: number[];
+		days_of_month?: number[];
+		cron?: string;
+		until?: string | null;
+	} | null;
+	targets: { monitor_ids: string[]; group_ids: string[]; tag_ids: string[] };
+	suppress_notifications: boolean;
+	show_on_status_pages: boolean;
+	status_page_ids: string[];
+	next_occurrence_at: string | null;
+	created_at: string;
+	updated_at: string;
+};
+
+/**
  * An incident.
  *
  * State is not a field a client may PATCH. Advancing an incident goes through

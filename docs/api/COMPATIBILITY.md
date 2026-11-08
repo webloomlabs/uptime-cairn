@@ -21,8 +21,8 @@ wrong.
 
 | | What it is | Can it change? |
 |---|---|---|
-| Operations a release implements | A contract somebody's script depends on | **Frozen.** This document governs it. |
-| Operations tagged `x-cairn-phase: 2` or `3` that no release implements | A design draft that happens to live in the spec file | **Editable.** Nobody can depend on it. |
+| Operations a stable release implements | A contract somebody's script depends on | **Frozen.** This document governs it. |
+| Operations tagged `x-cairn-phase: 2` or `3` that no stable release implements | A design draft that happens to live in the spec file | **Editable.** Nobody can depend on it. |
 | `/healthz`, `/readyz`, `/metrics` | Operational endpoints outside `/api/v1` | Versioned separately; see §7 |
 
 Every operation already carries `x-cairn-phase`, and CI already selects on it —
@@ -30,8 +30,17 @@ Phase 1 contract tests run against `x-cairn-phase: 1`. **That extension plus the
 release that implemented the operation is what decides whether a change is
 expensive.**
 
-An operation becomes frozen the moment a tagged release implements it. Not when it
+An operation becomes frozen the moment a stable release implements it. Not when it
 is written, not when the file is declared frozen.
+
+**A pre-release does not freeze.** The freeze attaches at the first stable tag:
+`1.1.0` binds, `1.1.0-beta.1` and `1.1.0-rc.1` do not. A pre-release exists to
+collect the feedback that changes a surface, and one that froze on contact would
+make that feedback unusable — the answer to every report about the shape of an
+endpoint would be `/api/v2`, which is precisely the conversation a beta is
+published to avoid having. The cost is carried by the person who takes the
+pre-release, and the tag is what tells them they are taking it: an operation
+reached from a `-beta` or `-rc` build is a draft, and may move before it binds.
 
 > **Worked example.** The Phase 2 reporting merge of 2026-08-27 removed
 > `ReportRun.share_url`, replaced `ReportTemplate.branding` with `brand_profile_id`,

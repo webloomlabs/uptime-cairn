@@ -63,11 +63,24 @@ Uptime Cairn is licensed under the [Apache License 2.0](LICENSE), and
 contributions require signing a CLA. A bot will prompt you on your first pull
 request.
 
+- **Contributing as yourself:** read the [Individual CLA](CLA.md), then post this
+  comment on your pull request, exactly as written:
+
+  ```
+  I have read the CLA Document and I hereby sign the CLA
+  ```
+
+  You sign once, and it covers all your contributions, including earlier ones.
+- **Contributing as part of your job:** if your employer owns what you write,
+  they sign the [Corporate CLA](CCLA.md) and list you on its Schedule A. You are
+  then added to the bot's allowlist and don't sign individually.
+
 The CLA lets the project relicense or dual-license in future if its needs
 change. Because that asks real trust of you, governance bounds it: relicensing
 needs a supermajority plus 30 days' public notice, and **it can never be used to
-paywall a feature in the open build**. You keep full copyright in your work.
-See [GOVERNANCE.md §6](GOVERNANCE.md).
+paywall a feature in the open build**. Both commitments are written into the CLA
+itself (section 9), not only into governance. You keep full copyright in your
+work. See [GOVERNANCE.md §6](GOVERNANCE.md).
 
 ## Development setup
 

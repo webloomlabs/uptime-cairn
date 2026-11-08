@@ -204,8 +204,65 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 	return parsed as T;
 }
 
+/**
+ * Fetches a response body as text rather than parsing it as JSON.
+ *
+ * For the one case that is not a JSON document: a rendered report artifact,
+ * which the preview reads as bytes and hands to a sandboxed frame. It shares
+ * `request`'s error handling — a failure still arrives as a problem document and
+ * still becomes an `ApiError` — and differs only in what it does with a success.
+ *
+ * The artifact endpoint sets `Content-Disposition: attachment`, which governs
+ * top-level navigation and says nothing about `fetch`. So this reads the same
+ * bytes a download would write to disk, without a second endpoint and without
+ * touching the frozen spec.
+ */
+export async function requestText(path: string, options: RequestOptions = {}): Promise<string> {
+	const url = new URL(`/api/v1${path}`, window.location.origin);
+
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			method: 'GET',
+			credentials: 'same-origin',
+			signal: options.signal
+		});
+	} catch (cause) {
+		if (cause instanceof DOMException && cause.name === 'AbortError') throw cause;
+		throw new ApiError({
+			type: ERROR_BASE + 'network',
+			title: 'Cannot reach the server',
+			status: 0,
+			detail:
+				'The request did not complete. The server may be restarting, or the network may be down.'
+		});
+	}
+
+	if (response.status === 401 && !options.expectUnauthorised) onUnauthorised();
+
+	const text = await response.text();
+	if (!response.ok) {
+		let problem: Partial<Problem> | undefined;
+		try {
+			problem = JSON.parse(text) as Partial<Problem>;
+		} catch {
+			problem = undefined;
+		}
+		throw new ApiError({
+			type: problem?.type ?? ERROR_BASE + 'unexpected',
+			title: problem?.title ?? response.statusText ?? 'Request failed',
+			status: problem?.status ?? response.status,
+			detail: problem?.detail,
+			instance: problem?.instance,
+			errors: problem?.errors
+		});
+	}
+	return text;
+}
+
 export const api = {
 	get: <T>(path: string, options: RequestOptions = {}) => request<T>(path, { ...options }),
+	text: (path: string, options: RequestOptions = {}) => requestText(path, options),
 	post: <T>(path: string, body?: unknown, options: RequestOptions = {}) =>
 		request<T>(path, { ...options, method: 'POST', body }),
 	patch: <T>(path: string, body?: unknown, options: RequestOptions = {}) =>

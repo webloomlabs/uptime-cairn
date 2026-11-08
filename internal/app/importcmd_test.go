@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/webloomlabs/uptime-cairn/internal/config"
 	"github.com/webloomlabs/uptime-cairn/internal/importer/kuma"
+	"github.com/webloomlabs/uptime-cairn/internal/model"
 
 	_ "modernc.org/sqlite"
 )
@@ -67,7 +70,7 @@ func importInto(t *testing.T, dataDir string, opts kuma.Options, paths ...string
 	var out bytes.Buffer
 	cfg := config.Default()
 	cfg.DataDir = dataDir
-	if err := ImportKuma(context.Background(), cfg, paths, opts, &out); err != nil {
+	if err := ImportKuma(context.Background(), cfg, paths, opts, "", &out); err != nil {
 		t.Fatalf("import: %v\n%s", err, out.String())
 	}
 	return out.String()
@@ -346,5 +349,132 @@ func TestImportingHistoryTwiceProducesOneHistory(t *testing.T) {
 	importInto(t, data, opts, source)
 	if second := scalar[int](t, db, `SELECT COUNT(*) FROM heartbeats`); second != first {
 		t.Errorf("%d heartbeats after re-running the import, want %d", second, first)
+	}
+}
+
+func TestImportReportJSONStdout(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := seedKuma(t, dir,
+		`INSERT INTO monitor (id, name, type, url, interval) VALUES (1, 'Checkout', 'http', 'https://example.com/', 60)`)
+
+	opts := kuma.DefaultOptions()
+	opts.DryRun = true
+
+	data := filepath.Join(t.TempDir(), "cairn")
+	cfg := config.Default()
+	cfg.DataDir = data
+
+	var out bytes.Buffer
+	if err := ImportKuma(context.Background(), cfg, []string{source}, opts, "-", &out); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw := out.String()
+	if strings.Contains(raw, "Dry run — nothing was written.") {
+		t.Errorf("expected table to be omitted when writing report to stdout, got: %s", raw)
+	}
+
+	var report model.ImportReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("unmarshal json report from stdout: %v\noutput: %s", err, raw)
+	}
+
+	if !report.DryRun {
+		t.Errorf("report.DryRun = false, want true")
+	}
+	if report.State != model.ImportSucceeded {
+		t.Errorf("report.State = %q, want %q", report.State, model.ImportSucceeded)
+	}
+	summary, ok := report.Summary["monitor"]
+	if !ok {
+		t.Fatalf("missing 'monitor' summary in report: %+v", report.Summary)
+	}
+	if summary.Imported != 1 {
+		t.Errorf("summary.Imported = %d, want 1", summary.Imported)
+	}
+	if len(report.Entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(report.Entries))
+	}
+	entry := report.Entries[0]
+	if entry.EntityType != "monitor" || entry.SourceName != "Checkout" || entry.Result != "imported" {
+		t.Errorf("unexpected entry: %+v", entry)
+	}
+}
+
+func TestImportReportJSONFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := seedKuma(t, dir,
+		`INSERT INTO monitor (id, name, type, url, interval) VALUES (1, 'API Gateway', 'http', 'https://api.example.com/', 30)`)
+
+	opts := kuma.DefaultOptions()
+
+	data := filepath.Join(t.TempDir(), "cairn")
+	cfg := config.Default()
+	cfg.DataDir = data
+
+	jsonPath := filepath.Join(t.TempDir(), "import-report.json")
+
+	var out bytes.Buffer
+	if err := ImportKuma(context.Background(), cfg, []string{source}, opts, jsonPath, &out); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	rawOut := out.String()
+	if !strings.Contains(rawOut, "monitor") || !strings.Contains(rawOut, "imported") {
+		t.Errorf("expected stdout to contain human table, got: %s", rawOut)
+	}
+
+	dataBytes, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read report json file: %v", err)
+	}
+
+	var report model.ImportReport
+	if err := json.Unmarshal(dataBytes, &report); err != nil {
+		t.Fatalf("unmarshal report json file: %v\ncontent: %s", err, string(dataBytes))
+	}
+
+	if report.DryRun {
+		t.Errorf("report.DryRun = true, want false")
+	}
+	if report.State != model.ImportSucceeded {
+		t.Errorf("report.State = %q, want %q", report.State, model.ImportSucceeded)
+	}
+	if report.Summary["monitor"].Imported != 1 {
+		t.Errorf("summary.Imported = %d, want 1", report.Summary["monitor"].Imported)
+	}
+	if len(report.Entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(report.Entries))
+	}
+	if report.Entries[0].TargetID == nil || *report.Entries[0].TargetID == "" {
+		t.Errorf("expected non-nil TargetID for imported entity, got %+v", report.Entries[0])
+	}
+}
+
+func TestImportReportJSONInvalidFilePath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	source := seedKuma(t, dir,
+		`INSERT INTO monitor (id, name, type, url, interval) VALUES (1, 'Test', 'http', 'https://example.com/', 60)`)
+
+	opts := kuma.DefaultOptions()
+	data := filepath.Join(t.TempDir(), "cairn")
+	cfg := config.Default()
+	cfg.DataDir = data
+
+	invalidPath := filepath.Join(t.TempDir(), "nonexistent", "subdir", "report.json")
+
+	var out bytes.Buffer
+	err := ImportKuma(context.Background(), cfg, []string{source}, opts, invalidPath, &out)
+	if err == nil {
+		t.Fatalf("expected error for invalid json path, got nil")
+	}
+	if !strings.Contains(err.Error(), "create report json file") {
+		t.Errorf("error = %q, want it to mention create report json file", err.Error())
 	}
 }

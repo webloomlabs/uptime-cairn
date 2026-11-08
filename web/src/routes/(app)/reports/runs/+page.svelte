@@ -15,6 +15,7 @@
 	import ErrorBox from '$lib/components/ErrorBox.svelte';
 	import Icon from '$lib/components/Icon.svelte';
 	import PageTitle from '$lib/components/PageTitle.svelte';
+	import ArtifactPreview from '$lib/components/ArtifactPreview.svelte';
 
 	/**
 	 * Run history.
@@ -204,6 +205,28 @@
 		return artifact.state === 'rendered' && artifact.download_url === null;
 	}
 
+	/**
+	 * Which artifact is open in the preview panel, by id. One at a time: two
+	 * report pages side by side in a table row is not a comparison, it is two
+	 * things nobody can read.
+	 */
+	let previewing = $state<string | null>(null);
+
+	/**
+	 * **Only the HTML artifact previews, and only when its bytes are there.**
+	 *
+	 * The other three formats are deliberately not offered rather than offered
+	 * and refused. A PDF would need a viewer this dashboard does not have and the
+	 * browser's own is a download by another name; the CSV and the JSON are data
+	 * exports, and a table of raw rows in a panel is worse than the file. An
+	 * expired or failed artifact has no bytes at all, which is why this keys on
+	 * `downloadable` — the same link-or-nothing test the download control uses,
+	 * so the two controls appear and disappear together.
+	 */
+	function previewable(artifact: ReportArtifact): boolean {
+		return artifact.format === 'html' && downloadable(artifact);
+	}
+
 	function sizeOf(bytes: number | null): string {
 		if (bytes === null) return '';
 		if (bytes < 1024) return `${bytes} B`;
@@ -314,6 +337,17 @@
 												<Icon name="download" size={14} />
 												{t('runs.download')}
 											</a>
+											{#if previewable(artifact)}
+												<button
+													type="button"
+													class="inline-flex items-center gap-1 text-xs hover:underline"
+													onclick={() =>
+														(previewing = previewing === artifact.id ? null : artifact.id)}
+												>
+													<Icon name="eye" size={14} />
+													{previewing === artifact.id ? t('runs.previewClose') : t('runs.preview')}
+												</button>
+											{/if}
 											<span class="muted text-xs">{sizeOf(artifact.size_bytes)}</span>
 										{:else if unavailable(artifact)}
 											<!--
@@ -360,6 +394,19 @@
 									</li>
 								{/each}
 							</ul>
+
+							<!--
+								The panel sits under the whole list rather than inside the row
+								that opened it, so a report page is the full width of the
+								expanded run instead of the width of one line item.
+							-->
+							{#if previewing && full.artifacts.some((a) => a.id === previewing)}
+								<ArtifactPreview
+									runID={run.id}
+									artifactID={previewing}
+									onclose={() => (previewing = null)}
+								/>
+							{/if}
 						</div>
 
 						<!--

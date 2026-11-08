@@ -35,8 +35,8 @@ func TestEveryChannelTypeHasSchemaAndProvider(t *testing.T) {
 			t.Errorf("%s has no provider: a channel of this type would validate and deliver nothing", channelType)
 		}
 	}
-	if len(Types()) != 13 {
-		t.Errorf("%d channel types, spec defines 13", len(Types()))
+	if len(Types()) != 16 {
+		t.Errorf("%d channel types, spec defines 16", len(Types()))
 	}
 }
 
@@ -44,19 +44,22 @@ func TestValidateAcceptsAWellFormedChannel(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]string{
-		"slack":     `{"webhook_url":"https://hooks.slack.com/services/T/B/X"}`,
-		"discord":   `{"webhook_url":"https://discord.com/api/webhooks/1/x","username":"cairn"}`,
-		"telegram":  `{"bot_token":"123:abc","chat_id":"-100123"}`,
-		"matrix":    `{"homeserver_url":"https://matrix.example.com","room_id":"!abc:example.com","access_token":"tok"}`,
-		"gotify":    `{"server_url":"https://gotify.example.com","application_token":"tok","priority":8}`,
-		"ntfy":      `{"topic":"alerts","priority":4}`,
-		"msteams":   `{"webhook_url":"https://outlook.office.com/webhook/x"}`,
-		"pagerduty": `{"integration_key":"key","severity":"critical"}`,
-		"opsgenie":  `{"api_key":"key","responders":[{"type":"team","value":"platform"}]}`,
-		"twilio":    `{"account_sid":"AC1","auth_token":"tok","from_number":"+1","to_numbers":["+2"]}`,
-		"apprise":   `{"urls":["mailto://user:pass@example.com"]}`,
-		"webhook":   `{"url":"https://example.com/hook","method":"POST","body_template":"{\"m\":\"{{monitor.name}}\"}"}`,
-		"email":     `{"to":["ops@example.com"],"use_instance_smtp":false,"smtp_host":"smtp.example.com","from_address":"cairn@example.com"}`,
+		"slack":      `{"webhook_url":"https://hooks.slack.com/services/T/B/X"}`,
+		"discord":    `{"webhook_url":"https://discord.com/api/webhooks/1/x","username":"cairn"}`,
+		"telegram":   `{"bot_token":"123:abc","chat_id":"-100123"}`,
+		"matrix":     `{"homeserver_url":"https://matrix.example.com","room_id":"!abc:example.com","access_token":"tok"}`,
+		"gotify":     `{"server_url":"https://gotify.example.com","application_token":"tok","priority":8}`,
+		"ntfy":       `{"topic":"alerts","priority":4}`,
+		"pushover":   `{"api_token":"aTokenXXX","user_key":"aUserKeyXXX"}`,
+		"msteams":    `{"webhook_url":"https://outlook.office.com/webhook/x"}`,
+		"mattermost": `{"webhook_url":"https://mattermost.example.com/hooks/xxx","channel":"town-square","username":"cairn"}`,
+		"googlechat": `{"webhook_url":"https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=t"}`,
+		"pagerduty":  `{"integration_key":"key","severity":"critical"}`,
+		"opsgenie":   `{"api_key":"key","responders":[{"type":"team","value":"platform"}]}`,
+		"twilio":     `{"account_sid":"AC1","auth_token":"tok","from_number":"+1","to_numbers":["+2"]}`,
+		"apprise":    `{"urls":["mailto://user:pass@example.com"]}`,
+		"webhook":    `{"url":"https://example.com/hook","method":"POST","body_template":"{\"m\":\"{{monitor.name}}\"}"}`,
+		"email":      `{"to":["ops@example.com"],"use_instance_smtp":false,"smtp_host":"smtp.example.com","from_address":"cairn@example.com"}`,
 	}
 
 	for channelType, raw := range cases {

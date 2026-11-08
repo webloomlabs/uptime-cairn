@@ -347,4 +347,17 @@ type ExpiryFilter struct {
 	// TagIDs narrows to monitors carrying any of these tags, which is how an
 	// agency reads one client's calendar.
 	TagIDs []model.ID
+
+	// MonitorIDs narrows to an explicit set, which is how a report reads the
+	// calendar for the monitors it covers.
+	//
+	// A separate field rather than a second use of TagIDs, because a report's
+	// scope is a union of monitors, groups and tags that has already been
+	// resolved to monitor IDs by the time it gets here — re-expressing it as
+	// tags would lose the monitors and groups half of it. The two narrow
+	// independently and combine as an intersection: a filter naming both asks
+	// for these monitors, of which those carrying one of these tags.
+	//
+	// Empty means every monitor, which is what the calendar screen passes.
+	MonitorIDs []model.ID
 }

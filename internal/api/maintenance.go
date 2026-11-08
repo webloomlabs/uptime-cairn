@@ -337,9 +337,27 @@ func (s *Server) buildMaintenanceWindow(ctx context.Context, window *model.Maint
 			"a maintenance window needs at least one target; a window covering nothing suppresses nothing")
 	}
 
+	// auto_status_pages puts the window on every page that shows a monitor it
+	// covers: the people reading that page are the people the notice is for. It
+	// is opt-in because omitting status_page_ids has always meant "no pages", and
+	// a script relying on that must not start announcing windows in public.
+	// Worked out once per write rather than live, so a page that gains the monitor
+	// later does not start announcing a window nobody put there.
+	auto := body.AutoStatusPages != nil && *body.AutoStatusPages
 	var statusPageIDs []model.ID
-	if body.StatusPageIDs != nil {
+	switch {
+	case auto && body.StatusPageIDs != nil:
+		bad("/auto_status_pages", "conflict",
+			"send status_page_ids or auto_status_pages, not both: one is a list and the other asks for one to be worked out")
+	case body.StatusPageIDs != nil:
 		statusPageIDs = s.resolveTargets(ctx, "status_pages", "/status_page_ids", *body.StatusPageIDs, &problems)
+	case auto && len(problems) == 0:
+		pages, err := s.store.StatusPagesShowingTargets(ctx, s.orgID, window.Targets)
+		if err != nil {
+			s.log.Error("find status pages for maintenance targets", "error", err)
+			bad("/status_page_ids", "unavailable", "the status pages showing these targets could not be found")
+		}
+		statusPageIDs = pages
 	}
 
 	// Last, and only if the parts are individually sound: run the real
@@ -472,6 +490,7 @@ type MaintenanceStore interface {
 	ListMaintenanceWindows(ctx context.Context, after *store.Cursor, limit int, search string, monitorID *model.ID) ([]model.MaintenanceWindow, bool, error)
 	DeleteMaintenanceWindow(ctx context.Context, id model.ID) error
 	StatusPageIDsForWindows(ctx context.Context, windowIDs []model.ID) (map[model.ID][]model.ID, error)
+	StatusPagesShowingTargets(ctx context.Context, orgID model.ID, targets model.MaintenanceTargets) ([]model.ID, error)
 	MissingIDs(ctx context.Context, table string, orgID model.ID, ids []model.ID) ([]model.ID, error)
 
 	// DueMaintenanceWindows is the overview's "how many windows are open right

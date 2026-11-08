@@ -164,6 +164,11 @@ func (f *fakeStore) ListIncidents(context.Context, *store.Cursor, int, store.Inc
 	return nil, false, nil
 }
 
+func (f *fakeStore) ListUpcomingExpiries(context.Context, *store.Cursor, int,
+	store.ExpiryFilter, time.Time) ([]model.UpcomingExpiry, bool, error) {
+	return nil, false, nil
+}
+
 // fakeFiles records what was written and can be made to fail, which is how the
 // full-disk path gets demonstrated rather than reasoned about.
 type fakeFiles struct {

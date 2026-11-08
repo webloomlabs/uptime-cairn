@@ -1,6 +1,6 @@
 # Alerting
 
-Thirteen channel types, what each one needs, and the two things about the system
+Sixteen channel types, what each one needs, and the two things about the system
 as a whole that are worth knowing before you configure any of them.
 
 ---
@@ -128,7 +128,26 @@ generates.
 instance. `priority` (1–5), `tags`, and an `auth_type` of `none`, `basic`
 (`username`/`password`), or `token`.
 
+### Pushover
+
+`api_token` (encrypted) and `user_key` (encrypted) are both required.
+Register an application at [pushover.net](https://pushover.net) to obtain
+the token; the user key is on your Pushover account dashboard.
+
+Optional: `priority` (-2 to 1, default 0), `sound` (any Pushover sound name),
+`device` (to target a specific device rather than all your devices).
+
 ### Microsoft Teams
+
+`webhook_url` (encrypted) and an optional `message_template`.
+
+### Mattermost
+
+`webhook_url` (encrypted), with optional `channel` (channel name override, e.g.
+`town-square`), `username`, `icon_url`, and `message_template`. Notifications
+render with colour-coded attachments indicating status (`up`, `down`, `pending`).
+
+### Google Chat
 
 `webhook_url` (encrypted) and an optional `message_template`.
 
@@ -278,3 +297,54 @@ whole reason to express it that way.
 
 A schedule that will never fire is refused at write time rather than discovered
 by its silence.
+
+### From the dashboard
+
+**Maintenance** in the navigation lists every window and its state. **New
+maintenance window** opens the form. A monitor's own page also has **Schedule
+maintenance**, which opens the form with that monitor already chosen.
+
+- **Now, for a while.** On a one-off window, **Start now, for** sets the start
+  to now and the end 30 minutes, 1, 2 or 4 hours later. While it runs, the
+  list offers **End now**, which ends it early and keeps the window on record.
+  Deleting a window also stops it, but removes the window itself; the checks it
+  covered stay marked as maintenance in monitor history either way.
+- **Time zone.** Times on the form are read in the window's time zone, which
+  starts as your browser's. Change it, and the times you typed stay the same
+  clock times in the new zone.
+- **Hold alerts** (on by default) silences notifications for covered monitors
+  and marks their checks as maintenance. Turn it off to announce work without
+  holding anything.
+
+### On status pages
+
+With **Announce on status pages** on, a window can appear under "Scheduled
+maintenance" on public status pages, marked "In progress" while it runs. It
+stops appearing once it has ended.
+
+By default the form puts the window on **every status page that shows a
+monitor it covers**, whether it covers that monitor directly or through a group
+or tag. The pages are worked out when you save. A page that adds one of those
+monitors later does not pick the window up; edit the window and save it again
+with **Work out the pages again from what it covers** to refresh the list. To
+pick pages yourself, choose **Choose pages**.
+
+Through the API, send `"auto_status_pages": true` for the same behaviour, or
+`status_page_ids` with an explicit list. Sending neither puts the window on no
+page, which is how it worked before 1.2.0.
+
+```bash
+curl -X POST "$CAIRN_URL/api/v1/maintenance-windows" \
+  -H "Authorization: Bearer $CAIRN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Deploy",
+    "strategy": "single",
+    "starts_at": "2026-11-08T10:00:00Z",
+    "duration_minutes": 60,
+    "targets": { "monitor_ids": ["<monitor-id>"] },
+    "auto_status_pages": true
+  }'
+```
+
+The API key needs the `maintenance:write` scope.
