@@ -47,6 +47,13 @@
 					capability: 'incidents'
 				},
 				{
+					href: '/maintenance',
+					label: t('nav.maintenance'),
+					icon: 'maintenance',
+					scope: 'maintenance:read',
+					capability: 'maintenance'
+				},
+				{
 					href: '/status-pages',
 					label: t('nav.statusPages'),
 					icon: 'status',

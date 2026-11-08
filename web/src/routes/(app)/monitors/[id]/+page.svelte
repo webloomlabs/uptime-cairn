@@ -329,6 +329,12 @@
 						{t('monitors.resume')}
 					</Button>
 				{/if}
+				{#if session.allows('maintenance:write')}
+					<Button href="/maintenance/new?monitor={id}">
+						<Icon name="maintenance" size={15} />
+						{t('maintenance.scheduleAction')}
+					</Button>
+				{/if}
 				<Button href="/monitors/{id}/edit">
 					<Icon name="edit" size={15} />
 					{t('common.edit')}
