@@ -53,6 +53,19 @@ hand.
   "Scheduled maintenance" until it was deleted. It now drops off when it ends.
   The window itself is kept, and so is its mark on monitor history.
 
+### Security
+
+- **Built with Go 1.26.10**, up from 1.25.14, for the standard-library fixes
+  that are not available on the 1.25 line: crypto/x509 (GO-2026-6809,
+  CVE-2026-111943), net/http (CVE-2026-78667) and crypto/tls (CVE-2026-97031).
+  Building from source now needs Go 1.26.10 or later.
+- **`golang.org/x/net` v0.62.0**, up from v0.58.0, for an HTTP/2 server crash
+  (GO-2026-6617, CVE-2026-78669) and a denial of service in `x/net/html`
+  (CVE-2026-78661). `golang.org/x/crypto`, `x/sys` and `x/text` move with it.
+- **Frontend build tooling** updated within existing ranges (Vite 7.3.7,
+  devalue, source-map-js) for high-severity advisories. None of it ships in the
+  dashboard bundle.
+
 ### API compatibility
 
 An additive change under [COMPATIBILITY.md](docs/api/COMPATIBILITY.md):
