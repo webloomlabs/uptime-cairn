@@ -9,6 +9,58 @@ them, not which files moved.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-11-08
+
+Maintenance windows get a screen of their own. They have been in the API since
+1.0; this release lets you plan, start, end and edit them from the dashboard,
+and announce them on the right status pages without listing those pages by
+hand.
+
+**Upgrading** from `1.1.0` is a binary or image swap. No migration runs.
+
+### Added
+
+- **A Maintenance screen.** **Maintenance** in the navigation lists every
+  window with its state (running, scheduled, ended), what it repeats on, when
+  it next runs or until when it is running, what it covers and which status
+  pages show it. You can create and edit windows of every kind: once, daily,
+  weekly on chosen days, monthly on chosen dates, or a cron expression. Times
+  are entered in the window's own time zone, not the browser's, so "02:00
+  every Sunday in Europe/London" means that wherever you are when you type it.
+- **Start maintenance now.** On a one-off window, **Start now, for** 30
+  minutes, 1, 2 or 4 hours fills in both times in one click. **End now** on a
+  running one-off window ends it early and keeps the record. A monitor's page
+  has a **Schedule maintenance** button that opens the form with that monitor
+  already chosen.
+- **Announce on the status pages that show the affected monitors.** A new
+  window is announced, by default, on every status page that lists a monitor it
+  covers, directly or through a group or tag. You can switch to choosing pages
+  by hand. In the API this is the new optional `auto_status_pages` field on
+  `POST` and `PATCH /api/v1/maintenance-windows`. The pages are worked out when
+  the window is saved and stored as its `status_page_ids`.
+
+### Changed
+
+- **Status pages mark maintenance that is under way** with an "In progress"
+  label, and show the dates of the occurrence that is running or comes next.
+  Before, a recurring window could show its original start date, which might be
+  months in the past.
+
+### Fixed
+
+- **Status pages no longer list maintenance that has already ended.** A one-off
+  window that finished, or a recurring window past its `until`, stayed under
+  "Scheduled maintenance" until it was deleted. It now drops off when it ends.
+  The window itself is kept, and so is its mark on monitor history.
+
+### API compatibility
+
+An additive change under [COMPATIBILITY.md](docs/api/COMPATIBILITY.md):
+`auto_status_pages` is a new optional, write-only request field. Leaving it out
+behaves exactly as in 1.1.0: a window sent without `status_page_ids` is shown
+on no page. Sending both fields is refused with a `conflict` on
+`/auto_status_pages`.
+
 ## [1.1.0] — 2026-09-22
 
 The Phase 2 release: reporting, stable. It completes the Phase 2 scope. The
@@ -295,7 +347,8 @@ SQLite on disk and no database server to run.
   `ghcr.io/webloomlabs/uptime-cairn` and `webloomlabs/uptime-cairn` on Docker Hub.
 - Load-test gate in CI holding the single-instance target of 5,000 monitors.
 
-[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/webloomlabs/uptime-cairn/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/webloomlabs/uptime-cairn/compare/v1.1.0-beta.1...v1.1.0
 [1.1.0-beta.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.1...v1.1.0-beta.1
 [1.0.1]: https://github.com/webloomlabs/uptime-cairn/compare/v1.0.0-rc.1...v1.0.1
