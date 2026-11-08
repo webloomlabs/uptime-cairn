@@ -159,6 +159,60 @@ func (s *Store) StatusPageIDsForWindows(ctx context.Context, windowIDs []model.I
 	return out, rows.Err()
 }
 
+// StatusPagesShowingTargets returns the status pages that display at least one
+// monitor the targets cover. It is how a window with no status_page_ids of its
+// own finds the pages its visitors would look at.
+//
+// Targets resolve the same way MonitorsUnderWindows resolves them: a monitor
+// directly, a group by the monitors whose group_id it is, a tag by membership.
+// Disabled monitors count here although the sweep skips them, because a paused
+// monitor still has a row on the page and its visitors still read the notice.
+func (s *Store) StatusPagesShowingTargets(ctx context.Context, orgID model.ID, targets model.MaintenanceTargets) ([]model.ID, error) {
+	if targets.Empty() {
+		return nil, nil
+	}
+
+	var (
+		matches []string
+		args    = []any{orgID[:]}
+	)
+	add := func(clause string, ids []model.ID) {
+		if len(ids) == 0 {
+			return
+		}
+		matches = append(matches, fmt.Sprintf(clause, placeholders(len(ids))))
+		for _, id := range ids {
+			args = append(args, id[:])
+		}
+	}
+	add(`m.id IN (%s)`, targets.MonitorIDs)
+	add(`m.group_id IN (%s)`, targets.GroupIDs)
+	add(`EXISTS (SELECT 1 FROM monitor_tags mt WHERE mt.monitor_id = m.id AND mt.tag_id IN (%s))`, targets.TagIDs)
+
+	rows, err := s.ro.QueryContext(ctx, `
+		SELECT DISTINCT spm.status_page_id
+		FROM status_page_section_monitors spm
+		JOIN monitors m ON m.id = spm.monitor_id
+		WHERE spm.org_id = ? AND (`+strings.Join(matches, " OR ")+`)
+		ORDER BY spm.status_page_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("status pages showing maintenance targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.ID
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var id model.ID
+		copy(id[:], raw)
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func writeTargets(ctx context.Context, tx *sql.Tx, w model.MaintenanceWindow) error {
 	insert := func(targetType string, ids []model.ID) error {
 		for _, id := range ids {

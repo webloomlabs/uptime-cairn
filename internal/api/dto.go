@@ -596,6 +596,11 @@ type maintenanceWindowWrite struct {
 	ShowOnStatusPages     *bool           `json:"show_on_status_pages"`
 	StatusPageIDs         *[]string       `json:"status_page_ids"`
 
+	// AutoStatusPages asks the server to attach the window to every status page
+	// showing a monitor it covers, instead of sending status_page_ids. Write-only:
+	// what is stored is the list it produced, which status_page_ids reads back.
+	AutoStatusPages *bool `json:"auto_status_pages"`
+
 	// Cancelled is not in the spec's write shape; a window is cancelled by
 	// deleting it. Declared here only so a client echoing a read back is met
 	// with a clear rejection rather than "unknown field".

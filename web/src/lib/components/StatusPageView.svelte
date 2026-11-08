@@ -266,8 +266,21 @@
 				<section class="mb-8 space-y-3">
 					<h2 class="font-semibold">{t('public.scheduledMaintenance')}</h2>
 					{#each sp.scheduled_maintenance as window (window.title + window.starts_at)}
+						<!-- The server lists only windows still to come or under way, so
+						     one that has started is one that is running. -->
+						{@const running = Date.parse(window.starts_at) <= Date.parse(sp.generated_at)}
 						<div class="card p-5">
-							<p class="font-medium">{window.title}</p>
+							<p class="flex flex-wrap items-center gap-2 font-medium">
+								{window.title}
+								{#if running}
+									<span
+										class="rounded px-2 py-0.5 text-xs font-medium"
+										style="background-color: var(--color-maintenance-soft)"
+									>
+										{t('public.maintenanceRunning')}
+									</span>
+								{/if}
+							</p>
 							<p class="muted text-sm">
 								{formatAbsolute(window.starts_at)}
 								{#if window.ends_at}— {formatAbsolute(window.ends_at)}{/if}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/webloomlabs/uptime-cairn/internal/auth"
+	"github.com/webloomlabs/uptime-cairn/internal/maintenance"
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 	"github.com/webloomlabs/uptime-cairn/internal/notify"
 	"github.com/webloomlabs/uptime-cairn/internal/store"
@@ -732,24 +733,27 @@ func (s *Server) renderPublicPage(ctx context.Context, page model.StatusPage) (p
 	if err != nil {
 		return publicStatusPage{}, err
 	}
+	now := time.Now().UTC()
 	for _, window := range windows {
-		// next_occurrence_at rather than starts_at: for a recurring window
-		// starts_at is the anchor the rule is derived from, which may be months
-		// in the past, and a visitor wants the next time the lights go out.
-		starts := window.StartsAt
-		if window.NextOccurrenceAt != nil {
-			starts = *window.NextOccurrenceAt
+		// The occurrence that is running now or comes next, from the same
+		// evaluator the sweep uses. Not starts_at: for a recurring window that
+		// is the anchor the rule is derived from, which may be months in the
+		// past, and a visitor wants the next time the lights go out. Not
+		// next_occurrence_at either, which the sweep fills in after the write.
+		//
+		// A window with no occurrence left has ended, and is left off: a page
+		// still announcing last Tuesday's maintenance reads as a page nobody
+		// looks after.
+		occurrence, ok, err := maintenance.Next(window, now)
+		if err != nil || !ok {
+			continue
 		}
-		ends := window.EndsAt
-		if ends == nil && window.Duration > 0 {
-			finish := starts.Add(window.Duration)
-			ends = &finish
-		}
+		ends := occurrence.End
 		out.ScheduledMaintenance = append(out.ScheduledMaintenance, publicMaintenanceWindow{
 			Title:              window.Title,
 			Description:        optional(window.Description),
-			StartsAt:           starts,
-			EndsAt:             ends,
+			StartsAt:           occurrence.Start,
+			EndsAt:             &ends,
 			AffectedMonitorIDs: idStrings(window.Targets.MonitorIDs),
 		})
 	}
