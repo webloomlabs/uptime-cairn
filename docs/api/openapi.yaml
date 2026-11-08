@@ -5791,7 +5791,20 @@ components:
           description: Display the window as scheduled maintenance on the pages listed below.
         status_page_ids:
           type: array
+          description: |
+            Pages the window is announced on. On a write it is taken as given, and an empty
+            list keeps the window off every page. Sending neither this nor `auto_status_pages`
+            attaches the window to no page.
           items: { type: string, format: uuid }
+        auto_status_pages:
+          type: boolean
+          writeOnly: true
+          default: false
+          description: |
+            Attach the window to every status page that shows a monitor it covers, by monitor,
+            group or tag, instead of sending `status_page_ids`. Worked out once per write, so a
+            page that gains one of those monitors later does not pick the window up. Sending
+            both fields is refused with a `conflict` on `/auto_status_pages`. Added in 1.2.0.
         next_occurrence_at: { type: [string, "null"], format: date-time, readOnly: true }
         created_at: { type: string, format: date-time, readOnly: true }
         updated_at: { type: string, format: date-time, readOnly: true }
