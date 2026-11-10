@@ -831,9 +831,10 @@ all, which is worse.
 A monitoring tool that detects an outage and tells nobody is a logging tool. This
 is the part that tells somebody.
 
-Create a channel. Thirteen types exist — `email`, `webhook`, `slack`, `discord`,
-`telegram`, `matrix`, `gotify`, `ntfy`, `msteams`, `pagerduty`, `opsgenie`,
-`twilio`, and `apprise` as the meta-provider for everything else:
+Create a channel. Seventeen types exist — `email`, `resend`, `webhook`,
+`slack`, `discord`, `telegram`, `matrix`, `gotify`, `ntfy`, `pushover`,
+`msteams`, `mattermost`, `googlechat`, `pagerduty`, `opsgenie`, `twilio`, and
+`apprise` as the meta-provider for everything else:
 
 ```sh
 curl -sS -X POST localhost:3000/api/v1/notification-channels \

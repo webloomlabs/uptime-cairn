@@ -311,6 +311,40 @@ func TestProvidersDeliver(t *testing.T) {
 			},
 		},
 		{
+			channelType: "resend",
+			config:      cfg(`{"api_key":"re_123","from_address":"cairn@example.com","from_name":"Cairn","to":["ops@example.com"],"cc":["oncall@example.com"]}`),
+			check: func(t *testing.T, got sent) {
+				// The credential goes in the header: a body or query string
+				// would put it in the delivery log and the provider's logs.
+				if got.headers.Get("Authorization") != "Bearer re_123" {
+					t.Errorf("authorization = %q", got.headers.Get("Authorization"))
+				}
+				if got.path != "/emails" {
+					t.Errorf("path = %s, want /emails", got.path)
+				}
+				if strings.Contains(got.body, "re_123") {
+					t.Error("the API key reached the request body")
+				}
+				body := decodeBody(t, got.body)
+				if body["from"] != `"Cairn" <cairn@example.com>` {
+					t.Errorf("from = %v", body["from"])
+				}
+				to, ok := body["to"].([]any)
+				if !ok || len(to) != 1 || to[0] != "ops@example.com" {
+					t.Errorf("to = %v", body["to"])
+				}
+				if cc, ok := body["cc"].([]any); !ok || len(cc) != 1 || cc[0] != "oncall@example.com" {
+					t.Errorf("cc = %v", body["cc"])
+				}
+				if body["subject"] != `[DOWN] API "edge"` {
+					t.Errorf("subject = %v", body["subject"])
+				}
+				if text, ok := body["text"].(string); !ok || !strings.Contains(text, "API") {
+					t.Errorf("text = %v", body["text"])
+				}
+			},
+		},
+		{
 			channelType: "webhook",
 			config:      cfg(`{"url":"https://example.com/hook","headers":{"X-Monitor":"{{monitor.name}}"}}`),
 			check: func(t *testing.T, got sent) {
