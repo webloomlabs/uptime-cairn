@@ -5,14 +5,15 @@ import (
 	"time"
 )
 
-// The sixteen channel types, matching notification_channels.type in the schema
+// The seventeen channel types, matching notification_channels.type in the schema
 // and NotificationChannelType in the OpenAPI spec.
 //
-// Fifteen are native. apprise is the meta-provider: one dependency the operator
+// Sixteen are native. apprise is the meta-provider: one dependency the operator
 // opts into, buying roughly ninety more destinations for the cost of shelling
 // out to a binary (PHASE-1-PLAN.md §3.3).
 const (
 	ChannelEmail      = "email"
+	ChannelResend     = "resend"
 	ChannelWebhook    = "webhook"
 	ChannelSlack      = "slack"
 	ChannelDiscord    = "discord"

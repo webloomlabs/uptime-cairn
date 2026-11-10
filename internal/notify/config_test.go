@@ -35,8 +35,8 @@ func TestEveryChannelTypeHasSchemaAndProvider(t *testing.T) {
 			t.Errorf("%s has no provider: a channel of this type would validate and deliver nothing", channelType)
 		}
 	}
-	if len(Types()) != 16 {
-		t.Errorf("%d channel types, spec defines 16", len(Types()))
+	if len(Types()) != 17 {
+		t.Errorf("%d channel types, spec defines 17", len(Types()))
 	}
 }
 
@@ -60,6 +60,7 @@ func TestValidateAcceptsAWellFormedChannel(t *testing.T) {
 		"apprise":    `{"urls":["mailto://user:pass@example.com"]}`,
 		"webhook":    `{"url":"https://example.com/hook","method":"POST","body_template":"{\"m\":\"{{monitor.name}}\"}"}`,
 		"email":      `{"to":["ops@example.com"],"use_instance_smtp":false,"smtp_host":"smtp.example.com","from_address":"cairn@example.com"}`,
+		"resend":     `{"to":["ops@example.com"],"from_address":"cairn@example.com","api_key":"re_123"}`,
 	}
 
 	for channelType, raw := range cases {

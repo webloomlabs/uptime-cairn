@@ -5195,6 +5195,7 @@ components:
         Clients must tolerate values added in later releases.
       enum:
         - email
+        - resend
         - webhook
         - slack
         - discord
@@ -5259,6 +5260,7 @@ components:
       description: An alert destination. `type` selects the shape of `config`.
       oneOf:
         - $ref: "#/components/schemas/EmailChannel"
+        - $ref: "#/components/schemas/ResendChannel"
         - $ref: "#/components/schemas/WebhookChannel"
         - $ref: "#/components/schemas/SlackChannel"
         - $ref: "#/components/schemas/DiscordChannel"
@@ -5278,6 +5280,7 @@ components:
         propertyName: type
         mapping:
           email: "#/components/schemas/EmailChannel"
+          resend: "#/components/schemas/ResendChannel"
           webhook: "#/components/schemas/WebhookChannel"
           slack: "#/components/schemas/SlackChannel"
           discord: "#/components/schemas/DiscordChannel"
@@ -5342,6 +5345,35 @@ components:
                 smtp_encryption: { type: string, enum: [none, starttls, tls], default: starttls }
                 from_address: { type: [string, "null"], format: email }
                 from_name: { type: [string, "null"] }
+
+    ResendChannel:
+      allOf:
+        - $ref: "#/components/schemas/NotificationChannelCommon"
+        - type: object
+          required: [name, type, config]
+          properties:
+            type: { type: string, const: resend }
+            config:
+              type: object
+              description: |
+                The same mail as an `email` channel, sent through the Resend HTTP
+                API instead of an SMTP relay — no host, port, or encryption to
+                configure, one API key, and deliverability handled by the
+                provider.
+              required: [to, from_address, api_key]
+              properties:
+                to:
+                  type: array
+                  minItems: 1
+                  items: { type: string, format: email }
+                cc: { type: array, items: { type: string, format: email } }
+                from_address: { type: string, format: email }
+                from_name: { type: [string, "null"] }
+                api_key:
+                  type: string
+                  writeOnly: true
+                  description: Resend API key. Stored as a secret and never returned by a read.
+                message_template: { type: [string, "null"] }
 
     WebhookChannel:
       allOf:

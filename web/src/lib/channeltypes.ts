@@ -80,6 +80,24 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 			{ key: 'from_name', label: 'From name', kind: 'text' }
 		]
 	},
+	resend: {
+		label: 'Email (Resend)',
+		summary: 'Send mail through the Resend API instead of an SMTP relay — one API key and a sender, no relay to host.',
+		fields: [
+			{ key: 'to', label: 'To', kind: 'list', required: true, hint: 'One address per line.' },
+			{ key: 'cc', label: 'Cc', kind: 'list' },
+			{
+				key: 'from_address',
+				label: 'From address',
+				kind: 'text',
+				required: true,
+				hint: 'Must be a sender domain verified with Resend.'
+			},
+			{ key: 'from_name', label: 'From name', kind: 'text' },
+			{ key: 'api_key', label: 'API key', kind: 'secret', required: true, secret: true },
+			messageTemplate
+		]
+	},
 	webhook: {
 		label: 'Webhook',
 		summary: 'POST your own body to your own URL, with every variable interpolated.',
