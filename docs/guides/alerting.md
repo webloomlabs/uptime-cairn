@@ -79,6 +79,26 @@ Bodies are base64-encoded, so a long template stays inside SMTP's line-length
 limit rather than being wrapped into something a client renders wrong. Threading
 headers are set, so an outage and its recovery arrive as one conversation.
 
+### Resend
+
+| Field | Notes |
+|---|---|
+| `to` | At least one address. |
+| `cc` | Optional. |
+| `from_address` | Required. Must be a sender domain verified with Resend. |
+| `from_name` | |
+| `api_key` | Encrypted at rest. |
+| `message_template` | Optional. |
+
+The same mail as [Email (SMTP)](#email-smtp), sent as one HTTPS call to
+`api.resend.com` rather than through a relay you host, configure, and keep
+delivering to: no host, port, or TLS mode, and deliverability handled by the
+provider. There is no instance relay to inherit a sender from, which is why
+`from_address` is required here and optional above.
+
+The API key travels in the `Authorization` header, so it never appears in the
+delivery log — the recorded payload is the rendered message.
+
 ### Generic webhook
 
 | Field | Notes |

@@ -75,6 +75,19 @@ var schemas = map[string][]field{
 		{name: "from_address", kind: kString, format: "email"},
 		{name: "from_name", kind: kString},
 	},
+	// Resend is the same email destination reached over HTTP instead of SMTP:
+	// no relay to configure, one API key, and deliverability handled by the
+	// provider. from_address is required because Resend rejects a send with no
+	// sender rather than defaulting one, and unlike SMTP there is no instance
+	// relay to inherit it from.
+	"resend": {
+		{name: "to", kind: kStringArray, required: true, minItems: 1, format: "email"},
+		{name: "cc", kind: kStringArray, format: "email"},
+		{name: "from_address", kind: kString, required: true, format: "email"},
+		{name: "from_name", kind: kString},
+		{name: "api_key", kind: kString, required: true, secret: true, redact: true},
+		{name: "message_template", kind: kString, template: true},
+	},
 	"webhook": {
 		{name: "url", kind: kString, required: true, format: "uri"},
 		{name: "method", kind: kString, enum: []string{"POST", "PUT", "PATCH", "GET"}},

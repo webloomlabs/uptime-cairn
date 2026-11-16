@@ -38,7 +38,8 @@ func (s *Server) getSystemInfo(w http.ResponseWriter, r *http.Request) {
 		APIVersion:    "v1",
 		MonitorTypes:  append(s.registry.Types(), model.TypePush),
 		NotificationChannelTypes: []string{
-			model.ChannelEmail, model.ChannelWebhook, model.ChannelSlack,
+			model.ChannelEmail, model.ChannelResend, model.ChannelWebhook,
+			model.ChannelSlack,
 			model.ChannelDiscord, model.ChannelTelegram, model.ChannelMatrix,
 			model.ChannelGotify, model.ChannelNtfy, model.ChannelPushover,
 			model.ChannelMSTeams, model.ChannelMattermost, model.ChannelGoogleChat,

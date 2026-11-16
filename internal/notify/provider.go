@@ -14,7 +14,7 @@ import (
 	"github.com/webloomlabs/uptime-cairn/internal/model"
 )
 
-// The delivery half: sixteen providers behind one function.
+// The delivery half: seventeen providers behind one function.
 //
 // Every one of them either speaks HTTP or shells out, so the shared machinery
 // here is small and the per-provider files are almost entirely the shape of
@@ -105,6 +105,7 @@ type sendFunc func(context.Context, *Sender, conf, Event) (Receipt, error)
 
 var senders = map[string]sendFunc{
 	"email":      sendEmail,
+	"resend":     sendResend,
 	"webhook":    sendWebhook,
 	"slack":      sendSlack,
 	"discord":    sendDiscord,
