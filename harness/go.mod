@@ -1,6 +1,6 @@
 module github.com/webloomlabs/uptime-cairn/harness
 
-go 1.26.10
+go 1.26.11
 
 // Dependencies are deliberately not pinned by hand here — run `go mod tidy` once
 // and commit the resulting go.mod/go.sum. See README.md for the single

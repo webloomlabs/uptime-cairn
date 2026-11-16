@@ -82,7 +82,8 @@ export const CHANNEL_TYPES: Record<string, ChannelSpec> = {
 	},
 	resend: {
 		label: 'Email (Resend)',
-		summary: 'Send mail through the Resend API instead of an SMTP relay — one API key and a sender, no relay to host.',
+		summary:
+			'Send mail through the Resend API instead of an SMTP relay — one API key and a sender, no relay to host.',
 		fields: [
 			{ key: 'to', label: 'To', kind: 'list', required: true, hint: 'One address per line.' },
 			{ key: 'cc', label: 'Cc', kind: 'list' },
